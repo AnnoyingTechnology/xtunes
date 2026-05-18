@@ -1,0 +1,15 @@
+[package]
+name = "xtunes-app-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "xtunes_app_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+xtunes-domain = { path = "../domain" }
+
+[lints]
+workspace = true

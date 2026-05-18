@@ -1,0 +1,16 @@
+[package]
+name = "xtunes-app"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "xtunes"
+path = "src/main.rs"
+
+[dependencies]
+xtunes-app-runtime = { path = "../app_runtime" }
+xtunes-ui-gtk = { path = "../ui_gtk" }
+
+[lints]
+workspace = true

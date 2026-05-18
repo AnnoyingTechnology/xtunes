@@ -1,0 +1,15 @@
+[package]
+name = "xtunes-playback"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "xtunes_playback"
+path = "src/lib.rs"
+
+[dependencies]
+xtunes-domain = { path = "../domain" }
+
+[lints]
+workspace = true

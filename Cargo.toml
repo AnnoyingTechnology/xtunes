@@ -1,0 +1,31 @@
+[workspace]
+members = [
+  "crates/app",
+  "crates/app_runtime",
+  "crates/desktop",
+  "crates/domain",
+  "crates/importer",
+  "crates/library_store",
+  "crates/metadata",
+  "crates/playback",
+  "crates/search",
+  "crates/settings",
+  "crates/ui_gtk",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+gtk = { package = "gtk4", version = "0.10" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+unwrap_used = "warn"

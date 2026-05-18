@@ -1,0 +1,15 @@
+[package]
+name = "xtunes-settings"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "xtunes_settings"
+path = "src/lib.rs"
+
+[dependencies]
+xtunes-domain = { path = "../domain" }
+
+[lints]
+workspace = true
