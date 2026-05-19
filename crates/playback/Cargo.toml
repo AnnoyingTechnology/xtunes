@@ -9,6 +9,7 @@ name = "xtunes_playback"
 path = "src/lib.rs"
 
 [dependencies]
+gstreamer = "0.24.5"
 xtunes-domain = { path = "../domain" }
 
 [lints]

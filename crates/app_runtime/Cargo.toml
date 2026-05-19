@@ -13,6 +13,7 @@ xtunes-settings = { path = "../settings" }
 xtunes-domain = { path = "../domain" }
 xtunes-library-store = { path = "../library_store" }
 xtunes-metadata = { path = "../metadata" }
+xtunes-playback = { path = "../playback" }
 
 [lints]
 workspace = true

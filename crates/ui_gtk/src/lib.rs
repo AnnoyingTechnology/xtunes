@@ -4,16 +4,18 @@ use std::{cell::RefCell, rc::Rc};
 
 use gtk::gdk::prelude::ToplevelExt;
 use gtk::prelude::*;
-use gtk::{gdk, pango};
+use gtk::{gdk, glib, pango};
 use preferences::{install_preferences_action, settings_button};
 use track_table::{
-    TrackTable, TrackTableRow, build_track_table, mock_library_tracks, mock_playlist_tracks,
+    TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table, mock_library_tracks,
+    mock_playlist_tracks,
 };
 
 pub use xtunes_app_runtime::{
     ApplicationCommand, ApplicationQuery, ApplicationRuntime, ApplicationRuntimeError,
     LibraryScanSummary, UserSettings,
 };
+use xtunes_app_runtime::{PlaybackCommand, TrackId};
 
 mod preferences;
 mod track_table;
@@ -78,6 +80,7 @@ fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::App
     window.add_css_class("app-window");
     window.set_resizable(true);
     install_app_css();
+    install_keyboard_shortcuts(&window, runtime.clone());
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.add_css_class("app-shell");
@@ -89,8 +92,9 @@ fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::App
     sidebar.set_visible(false);
 
     let library_tracks = initial_library_table_rows(&runtime.borrow());
-    let songs_table = build_track_table(library_tracks.clone());
-    let content_stack = build_content_stack(songs_table.widget(), &library_tracks);
+    let track_activated = track_activated_callback(&runtime);
+    let songs_table = build_track_table(library_tracks.clone(), Some(track_activated.clone()));
+    let content_stack = build_content_stack(songs_table.widget(), &library_tracks, track_activated);
     let (status_bar, status_summary) = build_status_bar(&library_tracks);
     let library_changed = library_changed_callback(&runtime, &songs_table, &status_summary);
     install_preferences_action(app, &window, runtime.clone(), library_changed.clone());
@@ -159,6 +163,56 @@ fn runtime_library_table_rows(runtime: &ApplicationRuntime) -> Vec<TrackTableRow
         .iter()
         .map(TrackTableRow::from_track)
         .collect()
+}
+
+fn track_activated_callback(runtime: &SharedRuntime) -> TrackActivatedCallback {
+    let runtime = runtime.clone();
+
+    Rc::new(move |track_id: TrackId| {
+        let _result = runtime
+            .borrow_mut()
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
+                track_id,
+            )));
+    })
+}
+
+fn install_keyboard_shortcuts(window: &gtk::ApplicationWindow, runtime: SharedRuntime) {
+    let key_controller = gtk::EventControllerKey::new();
+    key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+    let runtime = runtime.clone();
+    let window_for_focus = window.clone();
+    key_controller.connect_key_pressed(move |_controller, key, _keycode, _state| {
+        if key != gdk::Key::space || focus_accepts_text(&window_for_focus) {
+            return glib::Propagation::Proceed;
+        }
+
+        let _result = runtime
+            .borrow_mut()
+            .handle_command(ApplicationCommand::Playback(
+                PlaybackCommand::TogglePlayPause,
+            ));
+        glib::Propagation::Stop
+    });
+    window.add_controller(key_controller);
+}
+
+fn focus_accepts_text(window: &gtk::ApplicationWindow) -> bool {
+    let Some(mut focus) = gtk::prelude::RootExt::focus(window) else {
+        return false;
+    };
+
+    loop {
+        if focus.is::<gtk::Editable>() {
+            return true;
+        }
+
+        let Some(parent) = focus.parent() else {
+            return false;
+        };
+        focus = parent;
+    }
 }
 
 fn install_window_state_chrome(window: &gtk::ApplicationWindow, window_frame: &gtk::Box) {
@@ -919,13 +973,15 @@ fn build_sidebar() -> gtk::Box {
 fn build_content_stack(
     songs_view: gtk::ScrolledWindow,
     library_tracks: &[TrackTableRow],
+    track_activated: TrackActivatedCallback,
 ) -> gtk::Stack {
     let stack = gtk::Stack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
 
     let albums_view = build_album_area();
-    let playlists_view = build_track_table(mock_playlist_tracks(library_tracks)).widget();
+    let playlists_view =
+        build_track_table(mock_playlist_tracks(library_tracks), Some(track_activated)).widget();
 
     stack.add_named(&songs_view, Some(SONGS_VIEW));
     stack.add_named(&albums_view, Some(ALBUMS_VIEW));

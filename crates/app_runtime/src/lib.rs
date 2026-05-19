@@ -3,11 +3,12 @@
 use std::path::{Path, PathBuf};
 
 pub use xtunes_domain::{
-    ApplicationCommand, ApplicationQuery, PlayStatistics, PlaybackState, Track, TrackId,
-    TrackLocation, UserSettings,
+    ApplicationCommand, ApplicationQuery, PlayStatistics, PlaybackCommand, PlaybackState, Track,
+    TrackId, TrackLocation, TrackPlaybackSource, UserSettings,
 };
 use xtunes_library_store::LibraryStore;
 use xtunes_metadata::{LibraryScanner, MetadataService};
+use xtunes_playback::PlaybackService;
 use xtunes_settings::SettingsStore;
 
 pub type ApplicationRuntimeResult<T> = Result<T, ApplicationRuntimeError>;
@@ -17,8 +18,11 @@ pub enum ApplicationRuntimeError {
     LibraryScanFailed,
     LibraryServicesUnavailable,
     LibraryStoreFailed,
+    PlaybackFailed,
+    PlaybackServiceUnavailable,
     SettingsLoadFailed,
     SettingsSaveFailed,
+    TrackUnavailable,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -33,6 +37,7 @@ pub struct ApplicationRuntime {
     settings_store: Option<Box<dyn SettingsStore>>,
     library_store: Option<Box<dyn LibraryStore>>,
     metadata_service: Option<Box<dyn MetadataService>>,
+    playback_service: Option<Box<dyn PlaybackService>>,
     library_tracks: Vec<Track>,
     last_scan_library_path: Option<PathBuf>,
     last_scan_summary: Option<LibraryScanSummary>,
@@ -45,6 +50,7 @@ impl ApplicationRuntime {
             settings_store: None,
             library_store: None,
             metadata_service: None,
+            playback_service: None,
             library_tracks: Vec::new(),
             last_scan_library_path: None,
             last_scan_summary: None,
@@ -63,6 +69,7 @@ impl ApplicationRuntime {
             settings_store: Some(settings_store),
             library_store: None,
             metadata_service: None,
+            playback_service: None,
             library_tracks: Vec::new(),
             last_scan_library_path: None,
             last_scan_summary: None,
@@ -77,6 +84,11 @@ impl ApplicationRuntime {
         self.library_tracks = library_store.tracks().unwrap_or_default();
         self.library_store = Some(library_store);
         self.metadata_service = Some(metadata_service);
+        self
+    }
+
+    pub fn with_playback_service(mut self, playback_service: Box<dyn PlaybackService>) -> Self {
+        self.playback_service = Some(playback_service);
         self
     }
 
@@ -96,8 +108,18 @@ impl ApplicationRuntime {
         self.last_scan_summary.as_ref()
     }
 
+    pub fn playback_state(&self) -> PlaybackState {
+        self.playback_service
+            .as_deref()
+            .map(PlaybackService::state)
+            .unwrap_or_default()
+    }
+
     pub fn handle_command(&mut self, command: ApplicationCommand) -> ApplicationRuntimeResult<()> {
         match command {
+            ApplicationCommand::Playback(command) => {
+                self.handle_playback_command(command)?;
+            }
             ApplicationCommand::UpdateSettings(settings) => {
                 if let Some(settings_store) = &self.settings_store {
                     settings_store
@@ -110,6 +132,64 @@ impl ApplicationRuntime {
                 self.scan_library(library_path)?;
             }
             _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn handle_playback_command(&self, command: PlaybackCommand) -> ApplicationRuntimeResult<()> {
+        let playback_service = self
+            .playback_service
+            .as_deref()
+            .ok_or(ApplicationRuntimeError::PlaybackServiceUnavailable)?;
+
+        match command {
+            PlaybackCommand::PlayTrack(track_id) => {
+                let track = self
+                    .library_tracks
+                    .iter()
+                    .find(|track| track.id == track_id)
+                    .ok_or(ApplicationRuntimeError::TrackUnavailable)?;
+                playback_service
+                    .play_track(TrackPlaybackSource::new(
+                        track_id,
+                        track.location.path.clone(),
+                    ))
+                    .map_err(|_| ApplicationRuntimeError::PlaybackFailed)?;
+            }
+            PlaybackCommand::Pause => {
+                playback_service
+                    .pause()
+                    .map_err(|_| ApplicationRuntimeError::PlaybackFailed)?;
+            }
+            PlaybackCommand::Resume => {
+                playback_service
+                    .resume()
+                    .map_err(|_| ApplicationRuntimeError::PlaybackFailed)?;
+            }
+            PlaybackCommand::TogglePlayPause => match playback_service.state() {
+                PlaybackState::Playing { .. } => {
+                    playback_service
+                        .pause()
+                        .map_err(|_| ApplicationRuntimeError::PlaybackFailed)?;
+                }
+                PlaybackState::Paused { .. } => {
+                    playback_service
+                        .resume()
+                        .map_err(|_| ApplicationRuntimeError::PlaybackFailed)?;
+                }
+                PlaybackState::Stopped | PlaybackState::Loading { .. } => {}
+            },
+            PlaybackCommand::Stop => {
+                playback_service
+                    .stop()
+                    .map_err(|_| ApplicationRuntimeError::PlaybackFailed)?;
+            }
+            PlaybackCommand::Seek(position) => {
+                playback_service
+                    .seek(position)
+                    .map_err(|_| ApplicationRuntimeError::PlaybackFailed)?;
+            }
         }
 
         Ok(())
@@ -171,9 +251,13 @@ mod tests {
         sync::{Mutex, MutexGuard},
     };
 
-    use xtunes_domain::{ApplicationCommand, Playlist, PlaylistId, Rating, UserSettings};
-    use xtunes_library_store::{InMemoryLibraryStore, StoreResult};
-    use xtunes_metadata::{MetadataChange, MetadataError, MetadataResult, TrackMetadata};
+    use xtunes_domain::{
+        ApplicationCommand, PlayStatistics, PlaybackCommand, PlaybackState, Playlist, PlaylistId,
+        Rating, Track, TrackId, TrackLocation, TrackMetadata, UserSettings,
+    };
+    use xtunes_library_store::{InMemoryLibraryStore, LibraryStore, StoreResult};
+    use xtunes_metadata::{MetadataChange, MetadataError, MetadataResult};
+    use xtunes_playback::NullPlaybackService;
     use xtunes_settings::{SettingsError, SettingsResult, SettingsStore};
 
     use super::{ApplicationRuntime, ApplicationRuntimeError, MetadataService};
@@ -272,6 +356,38 @@ mod tests {
         assert_eq!(runtime.settings(), &updated_settings);
     }
 
+    #[test]
+    fn runtime_plays_tracks_through_playback_service() {
+        let track_id = positive_track_id();
+        let store = InMemoryLibraryStore::new();
+        let track = Track {
+            id: track_id,
+            location: TrackLocation::new("/music/track.flac"),
+            metadata: TrackMetadata::default(),
+            rating: Rating::unrated(),
+            statistics: PlayStatistics::default(),
+        };
+        assert_eq!(store.save_track(track), Ok(()));
+
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(Box::new(store), Box::new(TestMetadataService))
+            .with_playback_service(Box::new(NullPlaybackService::new()));
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
+                track_id
+            ))),
+            Ok(())
+        );
+        assert_eq!(
+            runtime.playback_state(),
+            PlaybackState::Playing {
+                track_id,
+                position: std::time::Duration::ZERO,
+            }
+        );
+    }
+
     #[derive(Debug)]
     struct TestSettingsStore {
         settings: Mutex<UserSettings>,
@@ -332,6 +448,13 @@ mod tests {
             .expect("system clock after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("xtunes_runtime_test_{unique_suffix}"))
+    }
+
+    fn positive_track_id() -> TrackId {
+        match TrackId::new(1) {
+            Some(track_id) => track_id,
+            None => unreachable!("hard-coded positive track id should be valid"),
+        }
     }
 
     fn _assert_store_result_is_public<T>(result: StoreResult<T>) -> StoreResult<T> {

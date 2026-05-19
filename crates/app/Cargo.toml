@@ -12,6 +12,7 @@ path = "src/main.rs"
 xtunes-app-runtime = { path = "../app_runtime" }
 xtunes-library-store = { path = "../library_store" }
 xtunes-metadata = { path = "../metadata" }
+xtunes-playback = { path = "../playback" }
 xtunes-settings = { path = "../settings" }
 xtunes-ui-gtk = { path = "../ui_gtk" }
 

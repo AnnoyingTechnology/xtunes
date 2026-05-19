@@ -300,6 +300,9 @@ fn scan_error_text(error: ApplicationRuntimeError) -> &'static str {
             "Library scanning is not available in this build."
         }
         ApplicationRuntimeError::LibraryStoreFailed => "The library database could not be updated.",
+        ApplicationRuntimeError::PlaybackFailed
+        | ApplicationRuntimeError::PlaybackServiceUnavailable
+        | ApplicationRuntimeError::TrackUnavailable => "Playback is not available.",
         ApplicationRuntimeError::SettingsLoadFailed
         | ApplicationRuntimeError::SettingsSaveFailed => "The library path could not be saved.",
     }

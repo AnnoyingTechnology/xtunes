@@ -16,5 +16,9 @@ fn main() {
         );
     }
 
+    if let Ok(playback_service) = xtunes_playback::GStreamerPlaybackService::new() {
+        runtime = runtime.with_playback_service(Box::new(playback_service));
+    }
+
     xtunes_ui_gtk::run(runtime);
 }

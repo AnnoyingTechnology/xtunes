@@ -3,10 +3,12 @@ use gtk::prelude::*;
 use gtk::{gio, glib};
 use std::cmp::Ordering as CmpOrdering;
 use std::path::Path;
-use xtunes_app_runtime::Track;
+use std::rc::Rc;
+use xtunes_app_runtime::{Track, TrackId};
 
 #[derive(Clone, Debug)]
 pub(crate) struct TrackTableRow {
+    track_id: Option<TrackId>,
     track_name: String,
     artist: String,
     album: String,
@@ -23,6 +25,8 @@ pub(crate) struct TrackTableRow {
     track_number: Option<u32>,
     pub(crate) file_size_bytes: u64,
 }
+
+pub(crate) type TrackActivatedCallback = Rc<dyn Fn(TrackId)>;
 
 #[derive(Clone)]
 pub(crate) struct TrackTable {
@@ -108,6 +112,7 @@ const MAX_RATING: u8 = 5;
 impl TrackTableRow {
     pub(crate) fn from_track(track: &Track) -> Self {
         Self {
+            track_id: Some(track.id),
             track_name: non_empty_text(&track.metadata.title)
                 .or_else(|| file_stem_text(&track.location.path))
                 .unwrap_or_default(),
@@ -280,7 +285,10 @@ impl TrackTableColumn {
     }
 }
 
-pub(crate) fn build_track_table(rows: Vec<TrackTableRow>) -> TrackTable {
+pub(crate) fn build_track_table(
+    rows: Vec<TrackTableRow>,
+    track_activated: Option<TrackActivatedCallback>,
+) -> TrackTable {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     for row in rows {
         store.append(&glib::BoxedAnyObject::new(row));
@@ -322,6 +330,25 @@ pub(crate) fn build_track_table(rows: Vec<TrackTableRow>) -> TrackTable {
     let selection = gtk::SingleSelection::new(Some(sorted_rows));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
+    if let Some(track_activated) = track_activated {
+        let selection_for_activate = selection.clone();
+        table.connect_activate(move |_table, position| {
+            let Some(track_id) = selection_for_activate
+                .item(position)
+                .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+                .and_then(|row_object| {
+                    row_object
+                        .try_borrow::<TrackTableRow>()
+                        .ok()
+                        .and_then(|row| row.track_id)
+                })
+            else {
+                return;
+            };
+
+            track_activated(track_id);
+        });
+    }
     table.set_model(Some(&selection));
 
     let scroller = gtk::ScrolledWindow::new();
@@ -496,6 +523,7 @@ fn mock_track(
     file_size_bytes: u64,
 ) -> TrackTableRow {
     TrackTableRow {
+        track_id: None,
         track_name: track_name.to_owned(),
         artist: artist.to_owned(),
         album: album.to_owned(),

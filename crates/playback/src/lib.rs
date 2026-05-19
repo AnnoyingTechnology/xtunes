@@ -2,13 +2,18 @@
 
 use std::{cell::RefCell, time::Duration};
 
+use gst::prelude::*;
+use gstreamer as gst;
 pub use xtunes_domain::{PlaybackCommand, PlaybackState, TrackPlaybackSource};
 
 pub type PlaybackResult<T> = Result<T, PlaybackError>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlaybackError {
+    BackendUnavailable,
     MissingSourcePath,
+    PlaybackFailed,
+    SourceUriFailed,
 }
 
 pub trait PlaybackService {
@@ -82,6 +87,114 @@ impl PlaybackService for NullPlaybackService {
     fn state(&self) -> PlaybackState {
         self.state.borrow().clone()
     }
+}
+
+#[derive(Debug)]
+pub struct GStreamerPlaybackService {
+    playbin: gst::Element,
+    state: RefCell<PlaybackState>,
+}
+
+impl GStreamerPlaybackService {
+    pub fn new() -> PlaybackResult<Self> {
+        gst::init().map_err(|_| PlaybackError::BackendUnavailable)?;
+        let playbin = gst::ElementFactory::make("playbin")
+            .build()
+            .map_err(|_| PlaybackError::BackendUnavailable)?;
+
+        Ok(Self {
+            playbin,
+            state: RefCell::new(PlaybackState::Stopped),
+        })
+    }
+}
+
+impl PlaybackService for GStreamerPlaybackService {
+    fn play_track(&self, source: TrackPlaybackSource) -> PlaybackResult<()> {
+        if source.path.as_os_str().is_empty() {
+            return Err(PlaybackError::MissingSourcePath);
+        }
+
+        let uri = gst::glib::filename_to_uri(&source.path, None)
+            .map_err(|_| PlaybackError::SourceUriFailed)?;
+
+        self.playbin
+            .set_state(gst::State::Null)
+            .map_err(|_| PlaybackError::PlaybackFailed)?;
+        self.playbin.set_property("uri", uri.as_str());
+        self.playbin
+            .set_state(gst::State::Playing)
+            .map_err(|_| PlaybackError::PlaybackFailed)?;
+        self.state.replace(PlaybackState::Playing {
+            track_id: source.track_id,
+            position: Duration::ZERO,
+        });
+
+        Ok(())
+    }
+
+    fn pause(&self) -> PlaybackResult<()> {
+        self.playbin
+            .set_state(gst::State::Paused)
+            .map_err(|_| PlaybackError::PlaybackFailed)?;
+        let current = self.state();
+        if let PlaybackState::Playing { track_id, position } = current {
+            self.state
+                .replace(PlaybackState::Paused { track_id, position });
+        }
+
+        Ok(())
+    }
+
+    fn resume(&self) -> PlaybackResult<()> {
+        self.playbin
+            .set_state(gst::State::Playing)
+            .map_err(|_| PlaybackError::PlaybackFailed)?;
+        let current = self.state();
+        if let PlaybackState::Paused { track_id, position } = current {
+            self.state
+                .replace(PlaybackState::Playing { track_id, position });
+        }
+
+        Ok(())
+    }
+
+    fn stop(&self) -> PlaybackResult<()> {
+        self.playbin
+            .set_state(gst::State::Null)
+            .map_err(|_| PlaybackError::PlaybackFailed)?;
+        self.state.replace(PlaybackState::Stopped);
+
+        Ok(())
+    }
+
+    fn seek(&self, position: Duration) -> PlaybackResult<()> {
+        self.playbin
+            .seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                clock_time_from_duration(position),
+            )
+            .map_err(|_| PlaybackError::PlaybackFailed)?;
+
+        let next = match self.state() {
+            PlaybackState::Playing { track_id, .. } => {
+                PlaybackState::Playing { track_id, position }
+            }
+            PlaybackState::Paused { track_id, .. } => PlaybackState::Paused { track_id, position },
+            other => other,
+        };
+        self.state.replace(next);
+
+        Ok(())
+    }
+
+    fn state(&self) -> PlaybackState {
+        self.state.borrow().clone()
+    }
+}
+
+fn clock_time_from_duration(duration: Duration) -> gst::ClockTime {
+    gst::ClockTime::from_nseconds(duration.as_nanos().min(u128::from(u64::MAX)) as u64)
 }
 
 #[cfg(test)]
