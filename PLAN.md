@@ -224,6 +224,26 @@ Album view can remain rough during this phase. Advanced browsing views,
 visualizers, streaming, device sync, cloud sync, folder sync, and multi-machine
 sync are out of scope.
 
+## Later Statistics Views
+
+Add one or two library statistics views after the core table, playlist, search,
+rating, playback, settings, and import workflows are solid.
+
+The first statistics views should stay practical and library-focused:
+
+- distribution of tracks by genre
+- distribution of tracks by bitrate range
+
+Initial bitrate ranges:
+
+- `<= 128 kbps`
+- `> 128 kbps and < 256 kbps`
+- `>= 256 kbps and <= 320 kbps`
+- `> 320 kbps`
+
+Treat these as diagnostic library views, not social, recommendation, cloud, or
+listening-insight features.
+
 ## Runtime
 
 Run GTK on the main thread. Move slow work to background tasks:
