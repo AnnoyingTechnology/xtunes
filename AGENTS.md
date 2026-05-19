@@ -54,7 +54,7 @@ Prioritize:
 - playlist sidebar stays below the media top bar, left of the main content
 - mode switcher belongs to the main content column, not to the full window root
 - predictable iTunes-like library and playlist behavior
-- first-class light and dark theme support
+- first-class native GTK light and dark appearance; do not add an xTunes theme picker
 - fast search/filtering over a large local music library
 - settings/preferences
 - robust import from Rhythmbox library data

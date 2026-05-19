@@ -2,32 +2,55 @@ use gtk::glib::variant::ToVariant;
 use gtk::prelude::*;
 use gtk::{gio, glib};
 use std::cmp::Ordering as CmpOrdering;
+use std::path::Path;
+use xtunes_app_runtime::Track;
 
 #[derive(Clone, Debug)]
 pub(crate) struct TrackTableRow {
-    track_name: &'static str,
-    artist: &'static str,
-    album: &'static str,
-    genre: &'static str,
-    year: u16,
-    bpm: u16,
-    bitrate_kbps: u16,
+    track_name: String,
+    artist: String,
+    album: String,
+    genre: String,
+    year: Option<i32>,
+    bpm: Option<u16>,
+    bitrate_kbps: Option<u32>,
     file_type: AudioFileType,
     pub(crate) duration_seconds: u64,
     rating: u8,
-    plays: u32,
-    last_played: Option<&'static str>,
-    date_added: &'static str,
-    track_number: u16,
+    plays: u64,
+    last_played: Option<String>,
+    date_added: String,
+    track_number: Option<u32>,
     pub(crate) file_size_bytes: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct TrackTable {
+    scroller: gtk::ScrolledWindow,
+    store: gio::ListStore,
+}
+
+impl TrackTable {
+    pub(crate) fn widget(&self) -> gtk::ScrolledWindow {
+        self.scroller.clone()
+    }
+
+    pub(crate) fn replace_rows(&self, rows: Vec<TrackTableRow>) {
+        self.store.remove_all();
+        for row in rows {
+            self.store.append(&glib::BoxedAnyObject::new(row));
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AudioFileType {
     Flac,
     M4a,
+    Mp4,
     Mp3,
     Ogg,
+    Unknown,
 }
 
 impl AudioFileType {
@@ -35,8 +58,10 @@ impl AudioFileType {
         match self {
             Self::Flac => "FLAC",
             Self::M4a => "M4A",
+            Self::Mp4 => "MP4",
             Self::Mp3 => "MP3",
             Self::Ogg => "OGG",
+            Self::Unknown => "",
         }
     }
 }
@@ -79,6 +104,54 @@ const TRACK_TABLE_COLUMNS: &[TrackTableColumn] = &[
 const EMPTY_STAR: &str = "☆";
 const FILLED_STAR: &str = "★";
 const MAX_RATING: u8 = 5;
+
+impl TrackTableRow {
+    pub(crate) fn from_track(track: &Track) -> Self {
+        Self {
+            track_name: non_empty_text(&track.metadata.title)
+                .or_else(|| file_stem_text(&track.location.path))
+                .unwrap_or_default(),
+            artist: non_empty_text(&track.metadata.artist).unwrap_or_default(),
+            album: non_empty_text(&track.metadata.album).unwrap_or_default(),
+            genre: non_empty_text(&track.metadata.genre).unwrap_or_default(),
+            year: track.metadata.year,
+            bpm: None,
+            bitrate_kbps: track.metadata.bitrate_kbps,
+            file_type: AudioFileType::from_path(&track.location.path),
+            duration_seconds: track
+                .metadata
+                .duration
+                .map(|duration| duration.as_secs())
+                .unwrap_or_default(),
+            rating: track.rating.stars(),
+            plays: track.statistics.play_count,
+            last_played: None,
+            date_added: String::new(),
+            track_number: track.metadata.track_number,
+            file_size_bytes: std::fs::metadata(&track.location.path)
+                .map(|metadata| metadata.len())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+impl AudioFileType {
+    fn from_path(path: &Path) -> Self {
+        match path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("flac") => Self::Flac,
+            Some("m4a") | Some("m4b") => Self::M4a,
+            Some("mp4") => Self::Mp4,
+            Some("mp3") => Self::Mp3,
+            Some("ogg") | Some("oga") | Some("opus") => Self::Ogg,
+            _ => Self::Unknown,
+        }
+    }
+}
 
 impl TrackTableColumn {
     fn title(self) -> &'static str {
@@ -167,29 +240,32 @@ impl TrackTableColumn {
 
     fn text(self, row: &TrackTableRow) -> String {
         match self {
-            Self::TrackName => row.track_name.to_owned(),
-            Self::Artist => row.artist.to_owned(),
-            Self::Album => row.album.to_owned(),
-            Self::Genre => row.genre.to_owned(),
-            Self::Year => row.year.to_string(),
-            Self::Bpm => row.bpm.to_string(),
-            Self::Bitrate => format!("{} kbps", row.bitrate_kbps),
+            Self::TrackName => row.track_name.clone(),
+            Self::Artist => row.artist.clone(),
+            Self::Album => row.album.clone(),
+            Self::Genre => row.genre.clone(),
+            Self::Year => optional_number_text(row.year),
+            Self::Bpm => optional_number_text(row.bpm),
+            Self::Bitrate => row
+                .bitrate_kbps
+                .map(|bitrate| format!("{bitrate} kbps"))
+                .unwrap_or_default(),
             Self::FileType => row.file_type.label().to_owned(),
             Self::Duration => track_duration_text(row.duration_seconds),
             Self::Rating => row.rating.to_string(),
             Self::Plays => row.plays.to_string(),
-            Self::LastPlayed => row.last_played.unwrap_or("").to_owned(),
-            Self::DateAdded => row.date_added.to_owned(),
-            Self::TrackNumber => row.track_number.to_string(),
+            Self::LastPlayed => row.last_played.clone().unwrap_or_default(),
+            Self::DateAdded => row.date_added.clone(),
+            Self::TrackNumber => optional_number_text(row.track_number),
         }
     }
 
     fn compare(self, left: &TrackTableRow, right: &TrackTableRow) -> CmpOrdering {
         match self {
-            Self::TrackName => compare_text(left.track_name, right.track_name),
-            Self::Artist => compare_text(left.artist, right.artist),
-            Self::Album => compare_text(left.album, right.album),
-            Self::Genre => compare_text(left.genre, right.genre),
+            Self::TrackName => compare_text(&left.track_name, &right.track_name),
+            Self::Artist => compare_text(&left.artist, &right.artist),
+            Self::Album => compare_text(&left.album, &right.album),
+            Self::Genre => compare_text(&left.genre, &right.genre),
             Self::Year => left.year.cmp(&right.year),
             Self::Bpm => left.bpm.cmp(&right.bpm),
             Self::Bitrate => left.bitrate_kbps.cmp(&right.bitrate_kbps),
@@ -198,13 +274,13 @@ impl TrackTableColumn {
             Self::Rating => left.rating.cmp(&right.rating),
             Self::Plays => left.plays.cmp(&right.plays),
             Self::LastPlayed => left.last_played.cmp(&right.last_played),
-            Self::DateAdded => left.date_added.cmp(right.date_added),
+            Self::DateAdded => left.date_added.cmp(&right.date_added),
             Self::TrackNumber => left.track_number.cmp(&right.track_number),
         }
     }
 }
 
-pub(crate) fn build_track_table(rows: Vec<TrackTableRow>) -> gtk::ScrolledWindow {
+pub(crate) fn build_track_table(rows: Vec<TrackTableRow>) -> TrackTable {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     for row in rows {
         store.append(&glib::BoxedAnyObject::new(row));
@@ -242,7 +318,7 @@ pub(crate) fn build_track_table(rows: Vec<TrackTableRow>) -> gtk::ScrolledWindow
 
     table.insert_action_group("columns", Some(&column_actions));
 
-    let sorted_rows = gtk::SortListModel::new(Some(store), table.sorter());
+    let sorted_rows = gtk::SortListModel::new(Some(store.clone()), table.sorter());
     let selection = gtk::SingleSelection::new(Some(sorted_rows));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
@@ -253,152 +329,189 @@ pub(crate) fn build_track_table(rows: Vec<TrackTableRow>) -> gtk::ScrolledWindow
     scroller.set_vexpand(true);
     scroller.set_hexpand(true);
     scroller.set_child(Some(&table));
-    scroller
+    TrackTable { scroller, store }
 }
 
 pub(crate) fn mock_library_tracks() -> Vec<TrackTableRow> {
     vec![
-        TrackTableRow {
-            track_name: "Midnight City",
-            artist: "M83",
-            album: "Hurry Up, We're Dreaming",
-            genre: "Electronic",
-            year: 2011,
-            bpm: 105,
-            bitrate_kbps: 911,
-            file_type: AudioFileType::Flac,
-            duration_seconds: 244,
-            rating: 5,
-            plays: 42,
-            last_played: Some("2026-05-14"),
-            date_added: "2024-08-12",
-            track_number: 2,
-            file_size_bytes: 32_800_000,
-        },
-        TrackTableRow {
-            track_name: "Lisztomania",
-            artist: "Phoenix",
-            album: "Wolfgang Amadeus Phoenix",
-            genre: "Indie Rock",
-            year: 2009,
-            bpm: 150,
-            bitrate_kbps: 320,
-            file_type: AudioFileType::Mp3,
-            duration_seconds: 241,
-            rating: 5,
-            plays: 77,
-            last_played: Some("2026-05-11"),
-            date_added: "2023-11-03",
-            track_number: 1,
-            file_size_bytes: 9_700_000,
-        },
-        TrackTableRow {
-            track_name: "Heartbeats",
-            artist: "The Knife",
-            album: "Deep Cuts",
-            genre: "Synthpop",
-            year: 2003,
-            bpm: 88,
-            bitrate_kbps: 256,
-            file_type: AudioFileType::M4a,
-            duration_seconds: 231,
-            rating: 4,
-            plays: 31,
-            last_played: Some("2026-04-29"),
-            date_added: "2022-02-18",
-            track_number: 4,
-            file_size_bytes: 7_600_000,
-        },
-        TrackTableRow {
-            track_name: "Reckoner",
-            artist: "Radiohead",
-            album: "In Rainbows",
-            genre: "Alternative",
-            year: 2007,
-            bpm: 105,
-            bitrate_kbps: 833,
-            file_type: AudioFileType::Flac,
-            duration_seconds: 290,
-            rating: 5,
-            plays: 58,
-            last_played: Some("2026-05-08"),
-            date_added: "2021-09-07",
-            track_number: 7,
-            file_size_bytes: 38_400_000,
-        },
-        TrackTableRow {
-            track_name: "Paper Planes",
-            artist: "M.I.A.",
-            album: "Kala",
-            genre: "Hip-Hop",
-            year: 2007,
-            bpm: 86,
-            bitrate_kbps: 320,
-            file_type: AudioFileType::Mp3,
-            duration_seconds: 204,
-            rating: 4,
-            plays: 49,
-            last_played: Some("2026-03-19"),
-            date_added: "2020-12-21",
-            track_number: 11,
-            file_size_bytes: 8_300_000,
-        },
-        TrackTableRow {
-            track_name: "Intro",
-            artist: "The xx",
-            album: "xx",
-            genre: "Indie Pop",
-            year: 2009,
-            bpm: 100,
-            bitrate_kbps: 763,
-            file_type: AudioFileType::Ogg,
-            duration_seconds: 127,
-            rating: 4,
-            plays: 64,
-            last_played: Some("2026-05-01"),
-            date_added: "2023-01-15",
-            track_number: 1,
-            file_size_bytes: 11_400_000,
-        },
-        TrackTableRow {
-            track_name: "Get Lucky",
-            artist: "Daft Punk",
-            album: "Random Access Memories",
-            genre: "Disco",
-            year: 2013,
-            bpm: 116,
-            bitrate_kbps: 921,
-            file_type: AudioFileType::Flac,
-            duration_seconds: 369,
-            rating: 5,
-            plays: 86,
-            last_played: Some("2026-05-15"),
-            date_added: "2024-04-09",
-            track_number: 8,
-            file_size_bytes: 48_900_000,
-        },
-        TrackTableRow {
-            track_name: "Electric Feel",
-            artist: "MGMT",
-            album: "Oracular Spectacular",
-            genre: "Psychedelic Pop",
-            year: 2007,
-            bpm: 103,
-            bitrate_kbps: 320,
-            file_type: AudioFileType::Mp3,
-            duration_seconds: 229,
-            rating: 4,
-            plays: 35,
-            last_played: Some("2026-02-26"),
-            date_added: "2022-10-30",
-            track_number: 4,
-            file_size_bytes: 9_200_000,
-        },
+        mock_track(
+            "Midnight City",
+            "M83",
+            "Hurry Up, We're Dreaming",
+            "Electronic",
+            2011,
+            105,
+            911,
+            AudioFileType::Flac,
+            244,
+            5,
+            42,
+            "2026-05-14",
+            "2024-08-12",
+            2,
+            32_800_000,
+        ),
+        mock_track(
+            "Lisztomania",
+            "Phoenix",
+            "Wolfgang Amadeus Phoenix",
+            "Indie Rock",
+            2009,
+            150,
+            320,
+            AudioFileType::Mp3,
+            241,
+            5,
+            77,
+            "2026-05-11",
+            "2023-11-03",
+            1,
+            9_700_000,
+        ),
+        mock_track(
+            "Heartbeats",
+            "The Knife",
+            "Deep Cuts",
+            "Synthpop",
+            2003,
+            88,
+            256,
+            AudioFileType::M4a,
+            231,
+            4,
+            31,
+            "2026-04-29",
+            "2022-02-18",
+            4,
+            7_600_000,
+        ),
+        mock_track(
+            "Reckoner",
+            "Radiohead",
+            "In Rainbows",
+            "Alternative",
+            2007,
+            105,
+            833,
+            AudioFileType::Flac,
+            290,
+            5,
+            58,
+            "2026-05-08",
+            "2021-09-07",
+            7,
+            38_400_000,
+        ),
+        mock_track(
+            "Paper Planes",
+            "M.I.A.",
+            "Kala",
+            "Hip-Hop",
+            2007,
+            86,
+            320,
+            AudioFileType::Mp3,
+            204,
+            4,
+            49,
+            "2026-03-19",
+            "2020-12-21",
+            11,
+            8_300_000,
+        ),
+        mock_track(
+            "Intro",
+            "The xx",
+            "xx",
+            "Indie Pop",
+            2009,
+            100,
+            763,
+            AudioFileType::Ogg,
+            127,
+            4,
+            64,
+            "2026-05-01",
+            "2023-01-15",
+            1,
+            11_400_000,
+        ),
+        mock_track(
+            "Get Lucky",
+            "Daft Punk",
+            "Random Access Memories",
+            "Disco",
+            2013,
+            116,
+            921,
+            AudioFileType::Flac,
+            369,
+            5,
+            86,
+            "2026-05-15",
+            "2024-04-09",
+            8,
+            48_900_000,
+        ),
+        mock_track(
+            "Electric Feel",
+            "MGMT",
+            "Oracular Spectacular",
+            "Psychedelic Pop",
+            2007,
+            103,
+            320,
+            AudioFileType::Mp3,
+            229,
+            4,
+            35,
+            "2026-02-26",
+            "2022-10-30",
+            4,
+            9_200_000,
+        ),
     ]
 }
 
 pub(crate) fn mock_playlist_tracks(library_tracks: &[TrackTableRow]) -> Vec<TrackTableRow> {
     library_tracks.iter().take(5).cloned().collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mock_track(
+    track_name: &str,
+    artist: &str,
+    album: &str,
+    genre: &str,
+    year: i32,
+    bpm: u16,
+    bitrate_kbps: u32,
+    file_type: AudioFileType,
+    duration_seconds: u64,
+    rating: u8,
+    plays: u64,
+    last_played: &str,
+    date_added: &str,
+    track_number: u32,
+    file_size_bytes: u64,
+) -> TrackTableRow {
+    TrackTableRow {
+        track_name: track_name.to_owned(),
+        artist: artist.to_owned(),
+        album: album.to_owned(),
+        genre: genre.to_owned(),
+        year: Some(year),
+        bpm: Some(bpm),
+        bitrate_kbps: Some(bitrate_kbps),
+        file_type,
+        duration_seconds,
+        rating,
+        plays,
+        last_played: Some(last_played.to_owned()),
+        date_added: date_added.to_owned(),
+        track_number: Some(track_number),
+        file_size_bytes,
+    }
 }
 
 fn build_table_column(column: TrackTableColumn, header_menu: &gio::Menu) -> gtk::ColumnViewColumn {
@@ -693,6 +806,26 @@ fn compare_track_objects(
 
 fn compare_text(left: &str, right: &str) -> CmpOrdering {
     left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase())
+}
+
+fn optional_number_text<T: std::fmt::Display>(value: Option<T>) -> String {
+    value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+fn non_empty_text(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn file_stem_text(path: &Path) -> Option<String> {
+    path.file_stem()
+        .and_then(|file_stem| file_stem.to_str())
+        .map(str::trim)
+        .filter(|file_stem| !file_stem.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn to_gtk_ordering(ordering: CmpOrdering) -> gtk::Ordering {

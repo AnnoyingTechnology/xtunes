@@ -1,22 +1,27 @@
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ThemeMode {
-    #[default]
-    System,
-    Light,
-    Dark,
-}
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UserSettings {
-    pub theme_mode: ThemeMode,
+    pub library_path: Option<PathBuf>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ThemeMode, UserSettings};
+    use std::path::PathBuf;
+
+    use super::UserSettings;
 
     #[test]
-    fn system_theme_is_the_default() {
-        assert_eq!(UserSettings::default().theme_mode, ThemeMode::System);
+    fn library_path_is_unset_by_default() {
+        assert_eq!(UserSettings::default().library_path, None);
+    }
+
+    #[test]
+    fn settings_can_hold_a_library_path() {
+        let settings = UserSettings {
+            library_path: Some(PathBuf::from("/music")),
+        };
+
+        assert_eq!(settings.library_path, Some(PathBuf::from("/music")));
     }
 }

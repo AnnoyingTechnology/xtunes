@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use crate::{
     LibraryQuery, MetadataChange, PlaybackCommand, PlaylistId, Rating, TrackId, UserSettings,
@@ -39,6 +39,9 @@ pub enum ApplicationCommand {
         change: MetadataChange,
     },
     UpdateSettings(UserSettings),
+    ScanLibrary {
+        library_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

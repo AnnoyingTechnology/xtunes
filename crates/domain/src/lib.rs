@@ -18,6 +18,6 @@ pub use playback::{PlaybackCommand, PlaybackState, TrackPlaybackSource};
 pub use playlist::{Playlist, PlaylistEntry};
 pub use query::{LibraryQuery, SortDirection, TrackSort, TrackSortColumn};
 pub use rating::Rating;
-pub use settings::{ThemeMode, UserSettings};
+pub use settings::UserSettings;
 pub use statistics::PlayStatistics;
 pub use track::{Track, TrackLocation};

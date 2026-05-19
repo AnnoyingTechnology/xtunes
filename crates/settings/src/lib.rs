@@ -1,13 +1,23 @@
 #![forbid(unsafe_code)]
 
-use std::sync::{Mutex, MutexGuard};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::{Mutex, MutexGuard},
+};
 
-pub use xtunes_domain::{ThemeMode, UserSettings};
+use directories::BaseDirs;
+use serde::{Deserialize, Serialize};
+
+pub use xtunes_domain::UserSettings;
 
 pub type SettingsResult<T> = Result<T, SettingsError>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SettingsError {
+    ConfigDirectoryUnavailable,
+    LoadFailed,
+    SaveFailed,
     StoreUnavailable,
 }
 
@@ -52,38 +62,133 @@ impl SettingsStore for InMemorySettingsStore {
     }
 }
 
+#[derive(Debug)]
+pub struct TomlSettingsStore {
+    path: PathBuf,
+}
+
+impl TomlSettingsStore {
+    pub fn open_default() -> SettingsResult<Self> {
+        let base_dirs = BaseDirs::new().ok_or(SettingsError::ConfigDirectoryUnavailable)?;
+        Ok(Self::new(
+            base_dirs.config_dir().join("xtunes").join("settings.toml"),
+        ))
+    }
+
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl SettingsStore for TomlSettingsStore {
+    fn load_settings(&self) -> SettingsResult<UserSettings> {
+        if !self.path.exists() {
+            return Ok(UserSettings::default());
+        }
+
+        let document = fs::read_to_string(&self.path).map_err(|_| SettingsError::LoadFailed)?;
+        toml::from_str::<SettingsDocument>(&document)
+            .map(SettingsDocument::into_settings)
+            .map_err(|_| SettingsError::LoadFailed)
+    }
+
+    fn save_settings(&self, settings: UserSettings) -> SettingsResult<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).map_err(|_| SettingsError::SaveFailed)?;
+        }
+
+        let document = SettingsDocument::from_settings(settings);
+        let serialized =
+            toml::to_string_pretty(&document).map_err(|_| SettingsError::SaveFailed)?;
+        fs::write(&self.path, serialized).map_err(|_| SettingsError::SaveFailed)
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct SettingsDocument {
+    library_path: Option<PathBuf>,
+}
+
+impl SettingsDocument {
+    fn from_settings(settings: UserSettings) -> Self {
+        Self {
+            library_path: settings.library_path,
+        }
+    }
+
+    fn into_settings(self) -> UserSettings {
+        UserSettings {
+            library_path: self.library_path,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{InMemorySettingsStore, SettingsStore, ThemeMode, UserSettings};
+    use std::{fs, path::PathBuf};
+
+    use super::{InMemorySettingsStore, SettingsStore, TomlSettingsStore, UserSettings};
 
     #[test]
-    fn in_memory_settings_store_defaults_to_system_theme() {
+    fn in_memory_settings_store_defaults_to_no_library_path() {
         let store = InMemorySettingsStore::default();
 
         assert_eq!(
             store.load_settings(),
-            Ok(UserSettings {
-                theme_mode: ThemeMode::System
-            })
+            Ok(UserSettings { library_path: None })
         );
     }
 
     #[test]
     fn in_memory_settings_store_saves_settings() {
         let store = InMemorySettingsStore::default();
+        let settings = UserSettings {
+            library_path: Some(PathBuf::from("/music")),
+        };
 
-        assert_eq!(
-            store.save_settings(UserSettings {
-                theme_mode: ThemeMode::Dark
-            }),
-            Ok(())
-        );
+        assert_eq!(store.save_settings(settings.clone()), Ok(()));
 
-        assert_eq!(
-            store.load_settings(),
-            Ok(UserSettings {
-                theme_mode: ThemeMode::Dark
-            })
-        );
+        assert_eq!(store.load_settings(), Ok(settings));
+    }
+
+    #[test]
+    fn toml_settings_store_defaults_when_file_is_missing() {
+        let path = unique_settings_path();
+        let store = TomlSettingsStore::new(&path);
+
+        assert_eq!(store.load_settings(), Ok(UserSettings::default()));
+    }
+
+    #[test]
+    fn toml_settings_store_saves_and_loads_library_path() {
+        let path = unique_settings_path();
+        let store = TomlSettingsStore::new(&path);
+        let settings = UserSettings {
+            library_path: Some(PathBuf::from("/music")),
+        };
+
+        assert_eq!(store.save_settings(settings.clone()), Ok(()));
+        assert_eq!(store.load_settings(), Ok(settings));
+
+        let root = path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .expect("test path has two parents");
+        fs::remove_dir_all(root).expect("remove test settings directory");
+    }
+
+    fn unique_settings_path() -> PathBuf {
+        let unique_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("xtunes_settings_test_{unique_suffix}"))
+            .join("xtunes")
+            .join("settings.toml")
     }
 }

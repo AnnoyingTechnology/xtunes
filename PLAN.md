@@ -24,7 +24,7 @@ crates/
   playback/       GStreamer playback controller
   importer/       Rhythmbox import pipeline
   search/         Query, filtering, sorting, and indexing behavior
-  settings/       User preferences, including theme mode
+  settings/       User preferences, starting with the library folder
   desktop/        MPRIS, media keys, and D-Bus integration
   ui_gtk/         GTK4 interface
   app_runtime/    Application wiring, commands, state, and background tasks
@@ -66,7 +66,6 @@ Core vocabulary:
 - `PlaybackCommand`
 - `MetadataChange`
 - `UserSettings`
-- `ThemeMode`
 
 SQLite is the canonical library index after import. File paths should not be
 treated as permanent track identity.
@@ -119,6 +118,13 @@ Queries include:
 
 GTK should call commands and observe application state. GTK widgets must not
 write directly to SQLite, GStreamer, or metadata files.
+
+Keep `ui_gtk` split by durable interface sections instead of letting `lib.rs`
+absorb the application. The GTK crate can own GTK-specific view models and
+callbacks, but large widgets should live in focused modules such as
+`preferences`, `track_table`, `top_bar`, `mode_bar`, `status_bar`, and
+`playlist_sidebar`. Each module should expose small constructors and typed
+callbacks rather than reaching across the UI tree directly.
 
 ## UI Direction
 
@@ -189,15 +195,10 @@ light and dark modes.
 The playlist sidebar should be visibly darker than adjacent content in both
 light and dark modes.
 
-Support light, dark, and system theme modes:
-
-```text
-ThemeMode::System
-ThemeMode::Light
-ThemeMode::Dark
-```
-
-Keep theme tokens centralized. Avoid scattered CSS constants.
+Light and dark appearance should follow native GTK/system theme behavior. Do
+not add an xTunes theme picker. Keep theme-aware CSS tokens centralized and
+make every custom tint, row state, control, and window surface work in both
+native light and native dark modes.
 
 The interface-first shell should cover the everyday core workflow before deep
 backend wiring:
@@ -215,8 +216,8 @@ backend wiring:
 - rating display and editing
 - playback controls, current-track display, pause/play state, and volume state
 - status bar counts, durations, and selection summary
-- settings dialog shell, especially theme mode
-- light, dark, and system theme behavior
+- settings dialog shell, especially library path and manual scan
+- native light and dark theme behavior
 - keyboard behavior, especially spacebar play/pause
 - empty and populated library states
 
@@ -285,7 +286,7 @@ Build the first version in this order:
 6. Add search, filtering, sorting, selection, and status summaries over fake data.
 7. Add rating display/editing over fake data through the real command path.
 8. Add playback controls/state over a fake playback service.
-9. Add the settings shell and light/dark/system theme behavior.
+9. Add the settings shell, library path, manual scan action, and native light/dark validation.
 10. Add SQLite schema and explicit migrations behind the runtime contracts.
 11. Import Rhythmbox tracks, playlists, and ratings.
 12. Play the selected track through GStreamer.

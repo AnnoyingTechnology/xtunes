@@ -12,6 +12,7 @@ pub struct TrackMetadata {
     pub disc_number: Option<u32>,
     pub year: Option<i32>,
     pub duration: Option<Duration>,
+    pub bitrate_kbps: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

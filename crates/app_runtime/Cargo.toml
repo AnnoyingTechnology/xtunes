@@ -9,7 +9,10 @@ name = "xtunes_app_runtime"
 path = "src/lib.rs"
 
 [dependencies]
+xtunes-settings = { path = "../settings" }
 xtunes-domain = { path = "../domain" }
+xtunes-library-store = { path = "../library_store" }
+xtunes-metadata = { path = "../metadata" }
 
 [lints]
 workspace = true

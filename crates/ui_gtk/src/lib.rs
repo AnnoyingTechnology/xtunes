@@ -1,12 +1,21 @@
 #![forbid(unsafe_code)]
 
+use std::{cell::RefCell, rc::Rc};
+
 use gtk::gdk::prelude::ToplevelExt;
 use gtk::prelude::*;
-use gtk::{gdk, gio, glib, pango};
-use track_table::{TrackTableRow, build_track_table, mock_library_tracks, mock_playlist_tracks};
+use gtk::{gdk, pango};
+use preferences::{install_preferences_action, settings_button};
+use track_table::{
+    TrackTable, TrackTableRow, build_track_table, mock_library_tracks, mock_playlist_tracks,
+};
 
-pub use xtunes_app_runtime::{ApplicationCommand, ApplicationQuery, ApplicationRuntime};
+pub use xtunes_app_runtime::{
+    ApplicationCommand, ApplicationQuery, ApplicationRuntime, ApplicationRuntimeError,
+    LibraryScanSummary, UserSettings,
+};
 
+mod preferences;
 mod track_table;
 
 const TITLEBAR_HEIGHT: i32 = 72;
@@ -20,7 +29,7 @@ const NOW_PLAYING_HORIZONTAL_MARGIN: i32 = TITLEBAR_HEIGHT / 2;
 const NOW_PLAYING_ICON_SIZE: i32 = 16;
 const NOW_PLAYING_SIDE_WIDTH: i32 = 58;
 const NOW_PLAYING_WIDTH: i32 = 600;
-const PREFERENCES_HEIGHT: i32 = 190;
+const PREFERENCES_HEIGHT: i32 = 230;
 const PREFERENCES_WIDTH: i32 = 520;
 const RESIZE_CORNER_SIZE: i32 = 18;
 const RESIZE_EDGE_THICKNESS: i32 = 6;
@@ -34,6 +43,9 @@ const SONGS_VIEW: &str = "songs";
 const ALBUMS_VIEW: &str = "albums";
 const PLAYLISTS_VIEW: &str = "playlists";
 
+pub(crate) type SharedRuntime = Rc<RefCell<ApplicationRuntime>>;
+pub(crate) type LibraryChangedCallback = Rc<dyn Fn()>;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MainViewMode {
     Songs,
@@ -41,20 +53,21 @@ enum MainViewMode {
     Playlists,
 }
 
-pub fn run(_runtime: ApplicationRuntime) {
+pub fn run(runtime: ApplicationRuntime) {
     let app = gtk::Application::builder()
         .application_id("io.github.AnnoyingTechnology.xtunes")
         .build();
+    let runtime = Rc::new(RefCell::new(runtime));
 
     app.connect_activate(move |app| {
-        let window = build_main_window(app);
+        let window = build_main_window(app, runtime.clone());
         window.present();
     });
 
     app.run();
 }
 
-fn build_main_window(app: &gtk::Application) -> gtk::ApplicationWindow {
+fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::ApplicationWindow {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .decorated(false)
@@ -65,7 +78,6 @@ fn build_main_window(app: &gtk::Application) -> gtk::ApplicationWindow {
     window.add_css_class("app-window");
     window.set_resizable(true);
     install_app_css();
-    install_preferences_action(app, &window);
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.add_css_class("app-shell");
@@ -76,20 +88,30 @@ fn build_main_window(app: &gtk::Application) -> gtk::ApplicationWindow {
     let sidebar = build_sidebar();
     sidebar.set_visible(false);
 
-    let library_tracks = mock_library_tracks();
-    let content_stack = build_content_stack(&library_tracks);
+    let library_tracks = initial_library_table_rows(&runtime.borrow());
+    let songs_table = build_track_table(library_tracks.clone());
+    let content_stack = build_content_stack(songs_table.widget(), &library_tracks);
+    let (status_bar, status_summary) = build_status_bar(&library_tracks);
+    let library_changed = library_changed_callback(&runtime, &songs_table, &status_summary);
+    install_preferences_action(app, &window, runtime.clone(), library_changed.clone());
 
     let main_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     main_content.set_hexpand(true);
     main_content.set_vexpand(true);
-    main_content.append(&build_mode_bar(&window, &sidebar, &content_stack));
+    main_content.append(&build_mode_bar(
+        &window,
+        &sidebar,
+        &content_stack,
+        runtime,
+        library_changed,
+    ));
     main_content.append(&content_stack);
 
     let content_area = build_content_area(&sidebar, &main_content);
 
     root.append(&build_titlebar());
     root.append(&content_area);
-    root.append(&build_status_bar(&library_tracks));
+    root.append(&status_bar);
 
     let window_frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
     window_frame.add_css_class("csd");
@@ -104,6 +126,39 @@ fn build_main_window(app: &gtk::Application) -> gtk::ApplicationWindow {
     window.set_child(Some(&shell));
 
     window
+}
+
+fn library_changed_callback(
+    runtime: &SharedRuntime,
+    songs_table: &TrackTable,
+    status_summary: &gtk::Label,
+) -> LibraryChangedCallback {
+    let runtime = runtime.clone();
+    let songs_table = songs_table.clone();
+    let status_summary = status_summary.clone();
+
+    Rc::new(move || {
+        let rows = runtime_library_table_rows(&runtime.borrow());
+        songs_table.replace_rows(rows.clone());
+        update_status_summary(&status_summary, &rows);
+    })
+}
+
+fn initial_library_table_rows(runtime: &ApplicationRuntime) -> Vec<TrackTableRow> {
+    let rows = runtime_library_table_rows(runtime);
+    if rows.is_empty() && runtime.settings().library_path.is_none() {
+        mock_library_tracks()
+    } else {
+        rows
+    }
+}
+
+fn runtime_library_table_rows(runtime: &ApplicationRuntime) -> Vec<TrackTableRow> {
+    runtime
+        .library_tracks()
+        .iter()
+        .map(TrackTableRow::from_track)
+        .collect()
 }
 
 fn install_window_state_chrome(window: &gtk::ApplicationWindow, window_frame: &gtk::Box) {
@@ -134,126 +189,6 @@ fn update_window_state_chrome(window: &gtk::ApplicationWindow, window_frame: &gt
     window_frame.set_margin_end(margin);
     window_frame.set_margin_bottom(margin);
     window_frame.set_margin_start(margin);
-}
-
-fn install_preferences_action(app: &gtk::Application, window: &gtk::ApplicationWindow) {
-    if app.lookup_action("preferences").is_some() {
-        return;
-    }
-
-    let preferences = gio::SimpleAction::new("preferences", None);
-    let window = window.clone();
-    preferences.connect_activate(move |_action, _parameter| {
-        open_preferences_window(&window);
-    });
-    app.add_action(&preferences);
-    app.set_accels_for_action("app.preferences", &["<Primary>comma"]);
-}
-
-fn open_preferences_window(parent: &gtk::ApplicationWindow) {
-    let window = gtk::Window::builder()
-        .title("Library Path")
-        .decorated(false)
-        .transient_for(parent)
-        .modal(false)
-        .default_width(PREFERENCES_WIDTH + WINDOW_SHADOW_MARGIN * 2)
-        .default_height(PREFERENCES_HEIGHT + WINDOW_SHADOW_MARGIN * 2)
-        .resizable(false)
-        .build();
-    window.add_css_class("app-window");
-
-    let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    frame.add_css_class("preferences-frame");
-    frame.set_margin_top(WINDOW_SHADOW_MARGIN);
-    frame.set_margin_end(WINDOW_SHADOW_MARGIN);
-    frame.set_margin_bottom(WINDOW_SHADOW_MARGIN);
-    frame.set_margin_start(WINDOW_SHADOW_MARGIN);
-    frame.set_size_request(PREFERENCES_WIDTH, PREFERENCES_HEIGHT);
-
-    let panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    panel.add_css_class("preferences-panel");
-    panel.set_overflow(gtk::Overflow::Hidden);
-
-    let close_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    close_row.set_margin_top(8);
-    close_row.set_margin_end(8);
-    close_row.set_margin_start(8);
-
-    let close_icon = gtk::Image::from_icon_name("window-close-symbolic");
-    close_icon.set_pixel_size(14);
-
-    let close_button = gtk::Button::new();
-    close_button.add_css_class("flat");
-    close_button.add_css_class("preference-close-button");
-    close_button.set_child(Some(&close_icon));
-    close_button.set_tooltip_text(Some("Close"));
-    close_button.set_halign(gtk::Align::End);
-    close_button.set_valign(gtk::Align::Center);
-    close_button.set_hexpand(true);
-
-    let window_for_close = window.clone();
-    close_button.connect_clicked(move |_| {
-        window_for_close.close();
-    });
-    close_row.append(&close_button);
-
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 14);
-    content.set_margin_top(24);
-    content.set_margin_end(24);
-    content.set_margin_bottom(24);
-    content.set_margin_start(24);
-
-    let label_group = gtk::Box::new(gtk::Orientation::Vertical, 3);
-
-    let library_path_label = gtk::Label::new(Some("Library path"));
-    library_path_label.set_xalign(0.0);
-
-    let library_path_help = gtk::Label::new(Some(
-        "Files in this folder are automatically added to your library.",
-    ));
-    library_path_help.add_css_class("preference-helper");
-    library_path_help.set_xalign(0.0);
-    library_path_help.set_wrap(true);
-
-    label_group.append(&library_path_label);
-    label_group.append(&library_path_help);
-
-    let path_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-
-    let path_entry = gtk::Entry::new();
-    path_entry.set_hexpand(true);
-    path_entry.set_placeholder_text(Some("/home/julien/Music"));
-
-    let folder_icon = gtk::Image::from_icon_name("folder-open-symbolic");
-    let folder_button = gtk::Button::new();
-    folder_button.add_css_class("flat");
-    folder_button.add_css_class("settings-button");
-    folder_button.set_child(Some(&folder_icon));
-    folder_button.set_tooltip_text(Some("Choose folder"));
-
-    path_row.append(&path_entry);
-    path_row.append(&folder_button);
-
-    content.append(&label_group);
-    content.append(&path_row);
-    panel.append(&close_row);
-    panel.append(&content);
-    frame.append(&panel);
-    window.set_child(Some(&frame));
-
-    let key_controller = gtk::EventControllerKey::new();
-    let window_for_escape = window.clone();
-    key_controller.connect_key_pressed(move |_controller, key, _keycode, _state| {
-        if key == gdk::Key::Escape {
-            window_for_escape.close();
-            glib::Propagation::Stop
-        } else {
-            glib::Propagation::Proceed
-        }
-    });
-    window.add_controller(key_controller);
-
-    window.present();
 }
 
 fn build_content_area(sidebar: &gtk::Box, main_content: &gtk::Box) -> gtk::Paned {
@@ -854,6 +789,8 @@ fn build_mode_bar(
     window: &gtk::ApplicationWindow,
     sidebar: &gtk::Box,
     content_stack: &gtk::Stack,
+    runtime: SharedRuntime,
+    library_changed: LibraryChangedCallback,
 ) -> gtk::CenterBox {
     let mode_bar = gtk::CenterBox::new();
     mode_bar.add_css_class("mode-bar");
@@ -881,28 +818,9 @@ fn build_mode_bar(
     mode_buttons.append(&playlists);
     mode_bar.set_center_widget(Some(&mode_buttons));
 
-    let settings = settings_button(window);
+    let settings = settings_button(window, runtime, library_changed);
     mode_bar.set_end_widget(Some(&settings));
     mode_bar
-}
-
-fn settings_button(window: &gtk::ApplicationWindow) -> gtk::Button {
-    let icon = gtk::Image::from_icon_name("preferences-system-symbolic");
-    icon.set_pixel_size(18);
-
-    let button = gtk::Button::new();
-    button.add_css_class("flat");
-    button.add_css_class("settings-button");
-    button.set_child(Some(&icon));
-    button.set_tooltip_text(Some("Preferences"));
-    button.set_valign(gtk::Align::Center);
-
-    let window = window.clone();
-    button.connect_clicked(move |_| {
-        open_preferences_window(&window);
-    });
-
-    button
 }
 
 fn connect_mode_button(
@@ -998,14 +916,16 @@ fn build_sidebar() -> gtk::Box {
     sidebar
 }
 
-fn build_content_stack(library_tracks: &[TrackTableRow]) -> gtk::Stack {
+fn build_content_stack(
+    songs_view: gtk::ScrolledWindow,
+    library_tracks: &[TrackTableRow],
+) -> gtk::Stack {
     let stack = gtk::Stack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
 
-    let songs_view = build_track_table(library_tracks.to_vec());
     let albums_view = build_album_area();
-    let playlists_view = build_track_table(mock_playlist_tracks(library_tracks));
+    let playlists_view = build_track_table(mock_playlist_tracks(library_tracks)).widget();
 
     stack.add_named(&songs_view, Some(SONGS_VIEW));
     stack.add_named(&albums_view, Some(ALBUMS_VIEW));
@@ -1050,12 +970,21 @@ fn build_album_area() -> gtk::ScrolledWindow {
     scroller
 }
 
-fn build_status_bar(library_tracks: &[TrackTableRow]) -> gtk::CenterBox {
+fn build_status_bar(library_tracks: &[TrackTableRow]) -> (gtk::CenterBox, gtk::Label) {
     let status = gtk::CenterBox::new();
     status.add_css_class("status-bar");
     status.set_height_request(STATUS_BAR_HEIGHT);
     status.set_hexpand(true);
 
+    let summary = gtk::Label::new(None);
+    summary.set_xalign(0.5);
+    update_status_summary(&summary, library_tracks);
+    status.set_center_widget(Some(&summary));
+
+    (status, summary)
+}
+
+fn update_status_summary(summary: &gtk::Label, library_tracks: &[TrackTableRow]) {
     let duration_seconds = library_tracks
         .iter()
         .map(|track| track.duration_seconds)
@@ -1064,14 +993,12 @@ fn build_status_bar(library_tracks: &[TrackTableRow]) -> gtk::CenterBox {
         .iter()
         .map(|track| track.file_size_bytes)
         .sum();
-    let summary = gtk::Label::new(Some(&library_status_text(
+
+    summary.set_text(&library_status_text(
         library_tracks.len(),
         duration_seconds,
         size_bytes,
-    )));
-    summary.set_xalign(0.5);
-    status.set_center_widget(Some(&summary));
-    status
+    ));
 }
 
 fn library_status_text(track_count: usize, duration_seconds: u64, size_bytes: u64) -> String {

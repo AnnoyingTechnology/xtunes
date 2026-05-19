@@ -1,6 +1,20 @@
 #![forbid(unsafe_code)]
 
 fn main() {
-    let runtime = xtunes_app_runtime::ApplicationRuntime::new();
+    let mut runtime = xtunes_settings::TomlSettingsStore::open_default()
+        .ok()
+        .and_then(|settings_store| {
+            xtunes_app_runtime::ApplicationRuntime::with_settings_store(Box::new(settings_store))
+                .ok()
+        })
+        .unwrap_or_default();
+
+    if let Ok(library_store) = xtunes_library_store::SqliteLibraryStore::open_default() {
+        runtime = runtime.with_library_services(
+            Box::new(library_store),
+            Box::new(xtunes_metadata::LoftyMetadataService),
+        );
+    }
+
     xtunes_ui_gtk::run(runtime);
 }

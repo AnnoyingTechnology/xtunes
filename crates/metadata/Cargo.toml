@@ -9,6 +9,7 @@ name = "xtunes_metadata"
 path = "src/lib.rs"
 
 [dependencies]
+lofty = "0.24.0"
 xtunes-domain = { path = "../domain" }
 
 [lints]
