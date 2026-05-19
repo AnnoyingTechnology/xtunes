@@ -353,6 +353,7 @@ fn install_app_css() {
             border: none;
             border-radius: 0;
             min-height: 6px;
+            min-width: 6px;
         }
 
         .song-progress progress {
@@ -360,6 +361,7 @@ fn install_app_css() {
             border: none;
             border-radius: 0;
             min-height: 6px;
+            min-width: 6px;
         }
 
         .volume-slider trough {
