@@ -1,18 +1,96 @@
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::sync::mpsc;
 
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
+use glib::ControlFlow;
 
 use super::{
     ApplicationCommand, ApplicationRuntimeError, LibraryChangedCallback, LibraryScanSummary,
     PREFERENCES_HEIGHT, PREFERENCES_WIDTH, SharedRuntime, UserSettings, WINDOW_SHADOW_MARGIN,
 };
 
+/// Spawn a library scan on a background thread. Uses `mpsc::channel` to send incremental
+/// track discoveries and a final completion message back, then polls them on the main loop
+/// via `idle_add_local` — which does not require `Send`, so GTK widgets and `Rc<RefCell<T>>`
+/// can be captured safely.
+///
+/// `append_row` is called for each discovered track during scanning (append-only, O(1)).
+/// `refresh_status` updates the status bar summary once at completion without table rebuild.
+fn spawn_scan_on_thread(
+    params: xtunes_app_runtime::ScanParameters,
+    status_label: gtk::Label,
+    button: gtk::Button,
+    runtime: SharedRuntime,
+    refresh_status: LibraryChangedCallback,
+    append_row: super::AppendRowCallback,
+) {
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        xtunes_app_runtime::run_incremental_scan(params, tx);
+    });
+
+    // Poll the channel on the main loop. `idle_add_local` does not require `Send`,
+    // so we can capture GTK widgets and Rc<RefCell<T>> directly.
+    let rx_cell = RefCell::new(Some(rx));
+    glib::idle_add_local(move || {
+        let mut rx_opt = rx_cell.borrow_mut();
+        let Some(rx) = rx_opt.as_ref() else {
+            return ControlFlow::Break;
+        };
+
+        // Drain all available messages this tick for responsive UI
+        loop {
+            match rx.try_recv() {
+                Ok(xtunes_app_runtime::ScanMessage::TrackFound(track)) => {
+                    runtime.borrow_mut().apply_scanned_track(track.clone());
+                    append_row(&track);
+                }
+                Ok(xtunes_app_runtime::ScanMessage::Done(Ok(summary))) => {
+                    *rx_opt = None;
+                    drop(rx_opt);
+                    runtime.borrow_mut().finalize_scan(summary.clone());
+                    drop(runtime.borrow_mut());
+                    refresh_status();
+                    status_label.set_text(&scan_summary_text(&summary));
+                    button.set_sensitive(true);
+                    return ControlFlow::Break;
+                }
+                Ok(xtunes_app_runtime::ScanMessage::Done(Err(error))) => {
+                    *rx_opt = None;
+                    drop(rx_opt);
+                    status_label.set_text(scan_error_text(error));
+                    button.set_sensitive(true);
+                    return ControlFlow::Break;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    break;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    *rx_opt = None;
+                    drop(rx_opt);
+                    status_label.set_text("Scan was cancelled.");
+                    button.set_sensitive(true);
+                    return ControlFlow::Break;
+                }
+            }
+        }
+
+        // Update progress label only — rows appended individually, no table rebuild needed
+        let track_count = runtime.borrow().library_tracks().len();
+        status_label.set_text(&format!("Scanning… {} tracks found", track_count));
+        ControlFlow::Continue
+    });
+}
+
 pub(crate) fn install_preferences_action(
     app: &gtk::Application,
     window: &gtk::ApplicationWindow,
     runtime: SharedRuntime,
-    library_changed: LibraryChangedCallback,
+    append_row: super::AppendRowCallback,
+    refresh_status: LibraryChangedCallback,
 ) {
     if app.lookup_action("preferences").is_some() {
         return;
@@ -21,9 +99,15 @@ pub(crate) fn install_preferences_action(
     let preferences = gio::SimpleAction::new("preferences", None);
     let window = window.clone();
     let runtime = runtime.clone();
-    let library_changed = library_changed.clone();
+    let append_row = append_row.clone();
+    let refresh_status = refresh_status.clone();
     preferences.connect_activate(move |_action, _parameter| {
-        open_preferences_window(&window, runtime.clone(), library_changed.clone());
+        open_preferences_window(
+            &window,
+            runtime.clone(),
+            append_row.clone(),
+            refresh_status.clone(),
+        );
     });
     app.add_action(&preferences);
     app.set_accels_for_action("app.preferences", &["<Primary>comma"]);
@@ -32,7 +116,8 @@ pub(crate) fn install_preferences_action(
 pub(crate) fn settings_button(
     window: &gtk::ApplicationWindow,
     runtime: SharedRuntime,
-    library_changed: LibraryChangedCallback,
+    append_row: super::AppendRowCallback,
+    refresh_status: LibraryChangedCallback,
 ) -> gtk::Button {
     let icon = gtk::Image::from_icon_name("preferences-system-symbolic");
     icon.set_pixel_size(18);
@@ -46,9 +131,15 @@ pub(crate) fn settings_button(
 
     let window = window.clone();
     let runtime = runtime.clone();
-    let library_changed = library_changed.clone();
+    let append_row = append_row.clone();
+    let refresh_status = refresh_status.clone();
     button.connect_clicked(move |_| {
-        open_preferences_window(&window, runtime.clone(), library_changed.clone());
+        open_preferences_window(
+            &window,
+            runtime.clone(),
+            append_row.clone(),
+            refresh_status.clone(),
+        );
     });
 
     button
@@ -57,7 +148,8 @@ pub(crate) fn settings_button(
 fn open_preferences_window(
     parent: &gtk::ApplicationWindow,
     runtime: SharedRuntime,
-    library_changed: LibraryChangedCallback,
+    append_row: super::AppendRowCallback,
+    refresh_status: LibraryChangedCallback,
 ) {
     let window = gtk::Window::builder()
         .title("Library Path")
@@ -172,24 +264,48 @@ fn open_preferences_window(
     let runtime_for_scan = runtime.clone();
     let path_entry_for_scan = path_entry.clone();
     let scan_status_for_scan = scan_status.clone();
-    let library_changed_for_scan = library_changed.clone();
+    let refresh_status_for_scan = refresh_status.clone();
+    let append_row_for_scan = append_row.clone();
+    let scan_button_for_scan = scan_button.clone();
     scan_button.connect_clicked(move |_| {
+        scan_button_for_scan.set_sensitive(false);
         scan_status_for_scan.set_text("Scanning...");
-        let scan_message =
-            match save_library_path_from_entry(&runtime_for_scan, &path_entry_for_scan) {
-                Ok(()) => {
-                    match request_library_scan_from_entry(&runtime_for_scan, &path_entry_for_scan) {
-                        Ok(Some(summary)) => {
-                            library_changed_for_scan();
-                            scan_summary_text(&summary)
-                        }
-                        Ok(None) => "Choose a library folder before scanning.".to_owned(),
-                        Err(error) => scan_error_text(error).to_owned(),
-                    }
-                }
-                Err(error) => scan_error_text(error).to_owned(),
-            };
-        scan_status_for_scan.set_text(&scan_message);
+
+        let path_text = path_entry_for_scan.text().trim().to_owned();
+        if path_text.is_empty() {
+            scan_status_for_scan.set_text("Choose a library folder before scanning.");
+            scan_button_for_scan.set_sensitive(true);
+            return;
+        }
+
+        let save_result = save_library_path_from_entry(&runtime_for_scan, &path_entry_for_scan);
+        if save_result.is_err() {
+            scan_status_for_scan.set_text(scan_error_text(
+                save_result.unwrap_err(),
+            ));
+            scan_button_for_scan.set_sensitive(true);
+            return;
+        }
+
+        let library_path = PathBuf::from(path_text);
+        let scan_params = runtime_for_scan.borrow().take_scan_parameters(library_path);
+
+        match scan_params {
+            Ok(params) => {
+                spawn_scan_on_thread(
+                    params,
+                    scan_status_for_scan.clone(),
+                    scan_button_for_scan.clone(),
+                    runtime_for_scan.clone(),
+                    refresh_status_for_scan.clone(),
+                    append_row_for_scan.clone(),
+                );
+            }
+            Err(error) => {
+                scan_status_for_scan.set_text(scan_error_text(error));
+                scan_button_for_scan.set_sensitive(true);
+            }
+        }
     });
 
     path_row.append(&path_entry);
@@ -267,23 +383,6 @@ fn save_library_path_from_entry(
     runtime
         .borrow_mut()
         .handle_command(ApplicationCommand::UpdateSettings(settings))
-}
-
-fn request_library_scan_from_entry(
-    runtime: &SharedRuntime,
-    path_entry: &gtk::Entry,
-) -> Result<Option<LibraryScanSummary>, ApplicationRuntimeError> {
-    let path_text = path_entry.text().trim().to_owned();
-    if path_text.is_empty() {
-        return Ok(None);
-    }
-
-    let mut runtime = runtime.borrow_mut();
-    runtime.handle_command(ApplicationCommand::ScanLibrary {
-        library_path: PathBuf::from(path_text),
-    })?;
-
-    Ok(runtime.last_scan_summary().cloned())
 }
 
 fn scan_summary_text(summary: &LibraryScanSummary) -> String {

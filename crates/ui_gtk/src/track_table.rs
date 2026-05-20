@@ -45,6 +45,12 @@ impl TrackTable {
             self.store.append(&glib::BoxedAnyObject::new(row));
         }
     }
+
+    /// Append a single row without removing existing ones. GTK4's SortListModel will
+    /// automatically place it in sorted order.
+    pub(crate) fn append_row(&self, row: TrackTableRow) {
+        self.store.append(&glib::BoxedAnyObject::new(row));
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

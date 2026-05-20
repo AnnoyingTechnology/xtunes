@@ -47,6 +47,8 @@ const PLAYLISTS_VIEW: &str = "playlists";
 
 pub(crate) type SharedRuntime = Rc<RefCell<ApplicationRuntime>>;
 pub(crate) type LibraryChangedCallback = Rc<dyn Fn()>;
+/// Called for each track discovered during an incremental scan (append-only, O(1)).
+pub(crate) type AppendRowCallback = Rc<dyn Fn(&xtunes_app_runtime::Track)>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MainViewMode {
@@ -96,8 +98,16 @@ fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::App
     let songs_table = build_track_table(library_tracks.clone(), Some(track_activated.clone()));
     let content_stack = build_content_stack(songs_table.widget(), &library_tracks, track_activated);
     let (status_bar, status_summary) = build_status_bar(&library_tracks);
-    let library_changed = library_changed_callback(&runtime, &songs_table, &status_summary);
-    install_preferences_action(app, &window, runtime.clone(), library_changed.clone());
+    let _library_changed = library_changed_callback(&runtime, &songs_table, &status_summary);
+    let append_row = append_row_callback(&runtime, &songs_table);
+    let refresh_status = refresh_status_callback(&runtime, &status_summary);
+    install_preferences_action(
+        app,
+        &window,
+        runtime.clone(),
+        append_row.clone(),
+        refresh_status.clone(),
+    );
 
     let main_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     main_content.set_hexpand(true);
@@ -107,7 +117,8 @@ fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::App
         &sidebar,
         &content_stack,
         runtime,
-        library_changed,
+        append_row.clone(),
+        refresh_status.clone(),
     ));
     main_content.append(&content_stack);
 
@@ -144,6 +155,30 @@ fn library_changed_callback(
     Rc::new(move || {
         let rows = runtime_library_table_rows(&runtime.borrow());
         songs_table.replace_rows(rows.clone());
+        update_status_summary(&status_summary, &rows);
+    })
+}
+
+fn append_row_callback(
+    _runtime: &SharedRuntime,
+    songs_table: &TrackTable,
+) -> AppendRowCallback {
+    let songs_table = songs_table.clone();
+
+    Rc::new(move |track: &xtunes_app_runtime::Track| {
+        songs_table.append_row(TrackTableRow::from_track(track));
+    })
+}
+
+fn refresh_status_callback(
+    runtime: &SharedRuntime,
+    status_summary: &gtk::Label,
+) -> LibraryChangedCallback {
+    let runtime = runtime.clone();
+    let status_summary = status_summary.clone();
+
+    Rc::new(move || {
+        let rows = runtime_library_table_rows(&runtime.borrow());
         update_status_summary(&status_summary, &rows);
     })
 }
@@ -844,7 +879,8 @@ fn build_mode_bar(
     sidebar: &gtk::Box,
     content_stack: &gtk::Stack,
     runtime: SharedRuntime,
-    library_changed: LibraryChangedCallback,
+    append_row: AppendRowCallback,
+    refresh_status: LibraryChangedCallback,
 ) -> gtk::CenterBox {
     let mode_bar = gtk::CenterBox::new();
     mode_bar.add_css_class("mode-bar");
@@ -872,7 +908,7 @@ fn build_mode_bar(
     mode_buttons.append(&playlists);
     mode_bar.set_center_widget(Some(&mode_buttons));
 
-    let settings = settings_button(window, runtime, library_changed);
+    let settings = settings_button(window, runtime, append_row, refresh_status);
     mode_bar.set_end_widget(Some(&settings));
     mode_bar
 }

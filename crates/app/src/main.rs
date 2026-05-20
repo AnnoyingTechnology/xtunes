@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use std::sync::Arc;
+
 fn main() {
     let mut runtime = xtunes_settings::TomlSettingsStore::open_default()
         .ok()
@@ -11,8 +13,8 @@ fn main() {
 
     if let Ok(library_store) = xtunes_library_store::SqliteLibraryStore::open_default() {
         runtime = runtime.with_library_services(
-            Box::new(library_store),
-            Box::new(xtunes_metadata::LoftyMetadataService),
+            Arc::new(library_store),
+            Arc::new(xtunes_metadata::LoftyMetadataService),
         );
     }
 

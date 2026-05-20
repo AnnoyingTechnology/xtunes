@@ -26,7 +26,7 @@ impl From<rusqlite::Error> for StoreError {
     }
 }
 
-pub trait LibraryStore {
+pub trait LibraryStore: Send + Sync {
     fn save_track(&self, track: Track) -> StoreResult<()>;
     fn track(&self, track_id: TrackId) -> StoreResult<Option<Track>>;
     fn tracks(&self) -> StoreResult<Vec<Track>>;

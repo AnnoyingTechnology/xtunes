@@ -33,7 +33,7 @@ pub enum MetadataError {
     ReadFailed,
 }
 
-pub trait MetadataService {
+pub trait MetadataService: Send + Sync {
     fn read_metadata(&self, path: &Path) -> MetadataResult<TrackMetadata>;
     fn write_metadata(&self, path: &Path, change: MetadataChange) -> MetadataResult<()>;
     fn read_rating(&self, path: &Path) -> MetadataResult<Option<Rating>>;
@@ -83,13 +83,32 @@ where
         }
 
         let mut scan = LibraryScan::default();
-        self.scan_directory(library_path, &mut scan);
+        self.scan_directory(library_path, &mut scan, None::<&dyn Fn(ScannedTrack)>);
         scan.tracks
             .sort_by(|left, right| left.path.cmp(&right.path));
         Ok(scan)
     }
 
-    fn scan_directory(&self, directory: &Path, scan: &mut LibraryScan) {
+    /// Scan with a callback invoked after each track is found.
+    pub fn scan_incremental<F>(&self, library_path: &Path, on_track: F) -> Result<LibraryScan, LibraryScanError>
+    where
+        F: Fn(ScannedTrack),
+    {
+        if !library_path.is_dir() {
+            return Err(LibraryScanError::LibraryPathUnavailable);
+        }
+
+        let mut scan = LibraryScan::default();
+        self.scan_directory(library_path, &mut scan, Some(&on_track));
+        scan.tracks
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(scan)
+    }
+
+    fn scan_directory<F>(&self, directory: &Path, scan: &mut LibraryScan, on_track: Option<&F>)
+    where
+        F: Fn(ScannedTrack) + ?Sized,
+    {
         let Ok(entries) = fs::read_dir(directory) else {
             scan.failures.push(ScanFailure {
                 path: directory.to_path_buf(),
@@ -101,14 +120,17 @@ where
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                self.scan_directory(&path, scan);
+                self.scan_directory(&path, scan, on_track);
             } else {
-                self.scan_file(path, scan);
+                self.scan_file(path, scan, on_track);
             }
         }
     }
 
-    fn scan_file(&self, path: PathBuf, scan: &mut LibraryScan) {
+    fn scan_file<F>(&self, path: PathBuf, scan: &mut LibraryScan, on_track: Option<&F>)
+    where
+        F: Fn(ScannedTrack) + ?Sized,
+    {
         if audio_format_from_path(&path).is_err() {
             scan.skipped_unsupported_files += 1;
             return;
@@ -130,11 +152,15 @@ where
             }
         };
 
-        scan.tracks.push(ScannedTrack {
+        let scanned = ScannedTrack {
             path,
             metadata,
             rating,
-        });
+        };
+        if let Some(cb) = on_track {
+            cb(scanned.clone());
+        }
+        scan.tracks.push(scanned);
     }
 }
 
