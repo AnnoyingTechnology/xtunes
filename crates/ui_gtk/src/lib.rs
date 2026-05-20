@@ -882,7 +882,8 @@ fn build_titlebar(now_playing: gtk::Box) -> Titlebar {
 
     let left_controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     left_controls.set_valign(gtk::Align::Center);
-    left_controls.append(&horizontal_spacer(TITLEBAR_LEFT_PADDING));
+    left_controls.set_margin_start(NOW_PLAYING_HORIZONTAL_MARGIN);
+    left_controls.set_margin_end(NOW_PLAYING_HORIZONTAL_MARGIN);
     left_controls.append(&previous);
     left_controls.append(&play_pause);
     left_controls.append(&next);

@@ -7,6 +7,7 @@ use std::{
 
 use lofty::{
     config::WriteOptions,
+    picture::PictureType,
     prelude::{Accessor, AudioFile, TaggedFileExt},
     tag::{
         ItemKey, Tag,
@@ -38,6 +39,7 @@ pub trait MetadataService: Send + Sync {
     fn write_metadata(&self, path: &Path, change: MetadataChange) -> MetadataResult<()>;
     fn read_rating(&self, path: &Path) -> MetadataResult<Option<Rating>>;
     fn write_rating(&self, path: &Path, rating: Rating) -> MetadataResult<()>;
+    fn read_artwork(&self, path: &Path) -> MetadataResult<Option<Vec<u8>>>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -224,6 +226,22 @@ impl MetadataService for LoftyMetadataService {
         tagged_file
             .save_to_path(path, WriteOptions::default())
             .map_err(|_| MetadataError::WriteFailed)
+    }
+
+    fn read_artwork(&self, path: &Path) -> MetadataResult<Option<Vec<u8>>> {
+        audio_format_from_path(path)?;
+        let tagged_file = lofty::read_from_path(path).map_err(|_| MetadataError::ReadFailed)?;
+        let Some(tag) = tagged_file
+            .primary_tag()
+            .or_else(|| tagged_file.first_tag())
+        else {
+            return Ok(None);
+        };
+
+        let picture = tag
+            .get_picture_type(PictureType::CoverFront)
+            .or_else(|| tag.pictures().first());
+        Ok(picture.map(|picture| picture.data().to_vec()))
     }
 }
 
@@ -421,6 +439,10 @@ mod tests {
 
         fn write_rating(&self, _path: &Path, _rating: Rating) -> MetadataResult<()> {
             Ok(())
+        }
+
+        fn read_artwork(&self, _path: &Path) -> MetadataResult<Option<Vec<u8>>> {
+            Ok(None)
         }
     }
 

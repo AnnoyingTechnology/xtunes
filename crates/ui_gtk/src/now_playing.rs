@@ -1,5 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
+    path::PathBuf,
     rc::Rc,
     time::Duration,
 };
@@ -14,6 +15,7 @@ use xtunes_app_runtime::{
 
 #[derive(Clone)]
 pub(crate) struct NowPlayingView {
+    runtime: SharedRuntime,
     area: gtk::Box,
     title: MarqueeLabel,
     artist_album: MarqueeLabel,
@@ -24,6 +26,8 @@ pub(crate) struct NowPlayingView {
     shuffle_button: gtk::Button,
     repeat_icon: gtk::Image,
     repeat_button: gtk::Button,
+    artwork_image: gtk::Image,
+    artwork_path: Rc<RefCell<Option<PathBuf>>>,
     duration: Rc<Cell<Duration>>,
 }
 
@@ -72,6 +76,15 @@ impl NowPlayingView {
         let artwork = gtk::Box::new(gtk::Orientation::Vertical, 0);
         artwork.add_css_class("now-playing-artwork");
         artwork.set_size_request(TITLEBAR_HEIGHT, TITLEBAR_HEIGHT);
+        artwork.set_overflow(gtk::Overflow::Hidden);
+
+        let artwork_image = gtk::Image::new();
+        artwork_image.set_pixel_size(TITLEBAR_HEIGHT);
+        artwork_image.set_halign(gtk::Align::Fill);
+        artwork_image.set_valign(gtk::Align::Fill);
+        artwork_image.set_visible(false);
+        artwork.append(&artwork_image);
+        let artwork_path: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
 
         let details = gtk::Box::new(gtk::Orientation::Vertical, 0);
         details.set_hexpand(true);
@@ -113,6 +126,7 @@ impl NowPlayingView {
         install_hover_pause(&area, &title, &artist_album, marquee_paused);
 
         let view = Self {
+            runtime: runtime.clone(),
             area,
             title,
             artist_album,
@@ -123,6 +137,8 @@ impl NowPlayingView {
             shuffle_button: shuffle.button,
             repeat_icon: repeat.icon,
             repeat_button: repeat.button,
+            artwork_image,
+            artwork_path,
             duration,
         };
         install_playback_option_controls(&view, runtime.clone());
@@ -135,7 +151,37 @@ impl NowPlayingView {
         self.area.clone()
     }
 
+    fn sync_artwork(&self, track: Option<&Track>) {
+        let new_path = track.map(|track| track.location.path.clone());
+        {
+            let current = self.artwork_path.borrow();
+            if *current == new_path {
+                return;
+            }
+        }
+        *self.artwork_path.borrow_mut() = new_path.clone();
+
+        let texture = new_path
+            .as_deref()
+            .and_then(|path| self.runtime.borrow().read_artwork(path))
+            .and_then(texture_from_bytes);
+
+        match texture {
+            Some(texture) => {
+                self.artwork_image.set_paintable(Some(&texture));
+                self.artwork_image.set_visible(true);
+            }
+            None => {
+                self.artwork_image
+                    .set_paintable(None::<&gdk::Paintable>);
+                self.artwork_image.set_visible(false);
+            }
+        }
+    }
+
     pub(crate) fn refresh(&self, now_playing: &NowPlaying) {
+        self.sync_artwork(now_playing.track.as_ref());
+
         let Some(track) = &now_playing.track else {
             self.title.set_text("");
             self.artist_album.set_text("");
@@ -162,6 +208,11 @@ impl NowPlayingView {
         sync_playback_option_icon(&self.shuffle_icon, now_playing.options.shuffle_enabled);
         sync_playback_option_icon(&self.repeat_icon, now_playing.options.repeat_enabled);
     }
+}
+
+fn texture_from_bytes(bytes: Vec<u8>) -> Option<gdk::Texture> {
+    let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(bytes)).ok()?;
+    Some(gdk::Texture::for_pixbuf(&pixbuf))
 }
 
 fn install_playback_option_controls(view: &NowPlayingView, runtime: SharedRuntime) {

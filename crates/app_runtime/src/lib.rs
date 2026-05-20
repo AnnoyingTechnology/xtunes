@@ -196,6 +196,12 @@ impl ApplicationRuntime {
         }
     }
 
+    pub fn read_artwork(&self, path: &Path) -> Option<Vec<u8>> {
+        self.metadata_service
+            .as_deref()
+            .and_then(|service| service.read_artwork(path).ok().flatten())
+    }
+
     pub fn handle_command(&mut self, command: ApplicationCommand) -> ApplicationRuntimeResult<()> {
         match command {
             ApplicationCommand::Playback(command) => {
@@ -953,6 +959,10 @@ mod tests {
 
         fn write_rating(&self, _path: &Path, _rating: Rating) -> MetadataResult<()> {
             Ok(())
+        }
+
+        fn read_artwork(&self, _path: &Path) -> MetadataResult<Option<Vec<u8>>> {
+            Ok(None)
         }
     }
 
