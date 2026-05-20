@@ -4,7 +4,8 @@ use std::{cell::RefCell, rc::Rc};
 
 use gtk::gdk::prelude::ToplevelExt;
 use gtk::prelude::*;
-use gtk::{gdk, glib, pango};
+use gtk::{gdk, glib};
+use now_playing::NowPlayingView;
 use preferences::{install_preferences_action, settings_button};
 use track_table::{
     TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table, mock_library_tracks,
@@ -17,6 +18,7 @@ pub use xtunes_app_runtime::{
 };
 use xtunes_app_runtime::{PlaybackCommand, TrackId};
 
+mod now_playing;
 mod preferences;
 mod track_table;
 
@@ -47,6 +49,7 @@ const PLAYLISTS_VIEW: &str = "playlists";
 
 pub(crate) type SharedRuntime = Rc<RefCell<ApplicationRuntime>>;
 pub(crate) type LibraryChangedCallback = Rc<dyn Fn()>;
+type PlaybackChangedCallback = Rc<dyn Fn()>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MainViewMode {
@@ -80,7 +83,10 @@ fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::App
     window.add_css_class("app-window");
     window.set_resizable(true);
     install_app_css();
-    install_keyboard_shortcuts(&window, runtime.clone());
+
+    let now_playing = NowPlayingView::new(runtime.clone());
+    let playback_changed = playback_changed_callback(&runtime, &now_playing);
+    install_keyboard_shortcuts(&window, runtime.clone(), playback_changed.clone());
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.add_css_class("app-shell");
@@ -92,7 +98,7 @@ fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::App
     sidebar.set_visible(false);
 
     let library_tracks = initial_library_table_rows(&runtime.borrow());
-    let track_activated = track_activated_callback(&runtime);
+    let track_activated = track_activated_callback(&runtime, playback_changed);
     let songs_table = build_track_table(library_tracks.clone(), Some(track_activated.clone()));
     let content_stack = build_content_stack(songs_table.widget(), &library_tracks, track_activated);
     let (status_bar, status_summary) = build_status_bar(&library_tracks);
@@ -106,14 +112,14 @@ fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::App
         &window,
         &sidebar,
         &content_stack,
-        runtime,
+        runtime.clone(),
         library_changed,
     ));
     main_content.append(&content_stack);
 
     let content_area = build_content_area(&sidebar, &main_content);
 
-    root.append(&build_titlebar());
+    root.append(&build_titlebar(now_playing.widget()));
     root.append(&content_area);
     root.append(&status_bar);
 
@@ -165,7 +171,22 @@ fn runtime_library_table_rows(runtime: &ApplicationRuntime) -> Vec<TrackTableRow
         .collect()
 }
 
-fn track_activated_callback(runtime: &SharedRuntime) -> TrackActivatedCallback {
+fn playback_changed_callback(
+    runtime: &SharedRuntime,
+    now_playing: &NowPlayingView,
+) -> PlaybackChangedCallback {
+    let runtime = runtime.clone();
+    let now_playing = now_playing.clone();
+
+    Rc::new(move || {
+        now_playing.refresh(&runtime.borrow().now_playing());
+    })
+}
+
+fn track_activated_callback(
+    runtime: &SharedRuntime,
+    playback_changed: PlaybackChangedCallback,
+) -> TrackActivatedCallback {
     let runtime = runtime.clone();
 
     Rc::new(move |track_id: TrackId| {
@@ -174,10 +195,15 @@ fn track_activated_callback(runtime: &SharedRuntime) -> TrackActivatedCallback {
             .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
                 track_id,
             )));
+        playback_changed();
     })
 }
 
-fn install_keyboard_shortcuts(window: &gtk::ApplicationWindow, runtime: SharedRuntime) {
+fn install_keyboard_shortcuts(
+    window: &gtk::ApplicationWindow,
+    runtime: SharedRuntime,
+    playback_changed: PlaybackChangedCallback,
+) {
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
 
@@ -193,6 +219,7 @@ fn install_keyboard_shortcuts(window: &gtk::ApplicationWindow, runtime: SharedRu
             .handle_command(ApplicationCommand::Playback(
                 PlaybackCommand::TogglePlayPause,
             ));
+        playback_changed();
         glib::Propagation::Stop
     });
     window.add_controller(key_controller);
@@ -327,6 +354,10 @@ fn install_app_css() {
         .now-playing-artist,
         .now-playing-time {
             color: alpha(@theme_fg_color, 0.58);
+        }
+
+        .marquee-label {
+            min-height: 19px;
         }
 
         .now-playing-time {
@@ -691,7 +722,7 @@ fn resize_handle(
     handle
 }
 
-fn build_titlebar() -> gtk::WindowHandle {
+fn build_titlebar(now_playing: gtk::Box) -> gtk::WindowHandle {
     let topbar = gtk::CenterBox::new();
     topbar.add_css_class("titlebar");
     topbar.set_hexpand(true);
@@ -736,107 +767,12 @@ fn build_titlebar() -> gtk::WindowHandle {
     right_controls.append(&window_controls);
 
     topbar.set_start_widget(Some(&left_controls));
-    topbar.set_center_widget(Some(&build_now_playing_area()));
+    topbar.set_center_widget(Some(&now_playing));
     topbar.set_end_widget(Some(&right_controls));
 
     let handle = gtk::WindowHandle::new();
     handle.set_child(Some(&topbar));
     handle
-}
-
-fn build_now_playing_area() -> gtk::Box {
-    let area = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    area.add_css_class("now-playing-area");
-    area.set_width_request(NOW_PLAYING_WIDTH);
-    area.set_height_request(TITLEBAR_HEIGHT);
-    area.set_hexpand(false);
-    area.set_halign(gtk::Align::Center);
-    area.set_margin_start(NOW_PLAYING_HORIZONTAL_MARGIN);
-    area.set_margin_end(NOW_PLAYING_HORIZONTAL_MARGIN);
-    area.set_valign(gtk::Align::Fill);
-
-    let artwork = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    artwork.add_css_class("now-playing-artwork");
-    artwork.set_size_request(TITLEBAR_HEIGHT, TITLEBAR_HEIGHT);
-
-    let details = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    details.set_hexpand(true);
-    details.set_vexpand(true);
-
-    let detail_content = gtk::CenterBox::new();
-    detail_content.set_hexpand(true);
-    detail_content.set_vexpand(true);
-    detail_content.set_valign(gtk::Align::Fill);
-    detail_content.set_start_widget(Some(&now_playing_side_status(
-        "media-playlist-shuffle-symbolic",
-        "Shuffle",
-        "1:24",
-    )));
-    detail_content.set_center_widget(Some(&now_playing_metadata()));
-    detail_content.set_end_widget(Some(&now_playing_side_status(
-        "media-playlist-repeat-symbolic",
-        "Repeat",
-        "-2:40",
-    )));
-
-    let progress = gtk::ProgressBar::new();
-    progress.add_css_class("song-progress");
-    progress.set_fraction(0.35);
-    progress.set_hexpand(true);
-    progress.set_halign(gtk::Align::Fill);
-    progress.set_valign(gtk::Align::End);
-
-    details.append(&detail_content);
-    details.append(&progress);
-
-    area.append(&artwork);
-    area.append(&details);
-    area
-}
-
-fn now_playing_metadata() -> gtk::Box {
-    let metadata = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    metadata.set_halign(gtk::Align::Center);
-    metadata.set_valign(gtk::Align::Center);
-    metadata.set_hexpand(true);
-
-    let title = gtk::Label::new(Some("Midnight City"));
-    title.add_css_class("now-playing-title");
-    title.set_ellipsize(pango::EllipsizeMode::End);
-    title.set_max_width_chars(32);
-    title.set_xalign(0.5);
-
-    let artist = gtk::Label::new(Some("M83"));
-    artist.add_css_class("now-playing-artist");
-    artist.set_ellipsize(pango::EllipsizeMode::End);
-    artist.set_max_width_chars(36);
-    artist.set_xalign(0.5);
-
-    metadata.append(&title);
-    metadata.append(&artist);
-    metadata
-}
-
-fn now_playing_side_status(icon_name: &str, tooltip: &str, time_text: &str) -> gtk::Box {
-    let status = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    status.set_width_request(NOW_PLAYING_SIDE_WIDTH);
-    status.set_halign(gtk::Align::Center);
-    status.set_valign(gtk::Align::Center);
-
-    let icon = gtk::Image::from_icon_name(icon_name);
-    icon.add_css_class("now-playing-side-icon");
-    icon.set_pixel_size(NOW_PLAYING_ICON_SIZE);
-    icon.set_tooltip_text(Some(tooltip));
-    icon.set_halign(gtk::Align::Center);
-
-    let time = gtk::Label::new(Some(time_text));
-    time.add_css_class("now-playing-time");
-    time.set_halign(gtk::Align::Center);
-    time.set_xalign(0.5);
-
-    status.append(&icon);
-    status.append(&time);
-    status
 }
 
 fn build_mode_bar(

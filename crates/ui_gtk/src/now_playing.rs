@@ -1,0 +1,703 @@
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    time::Duration,
+};
+
+use gtk::prelude::*;
+use gtk::{cairo, gdk, glib};
+
+use super::{NOW_PLAYING_ICON_SIZE, NOW_PLAYING_SIDE_WIDTH, SharedRuntime, TITLEBAR_HEIGHT};
+use xtunes_app_runtime::{
+    ApplicationCommand, NowPlaying, PlaybackCommand, PlaybackState, Track, TrackMetadata,
+};
+
+#[derive(Clone)]
+pub(crate) struct NowPlayingView {
+    area: gtk::Box,
+    title: MarqueeLabel,
+    artist_album: MarqueeLabel,
+    elapsed: gtk::Label,
+    remaining: gtk::Label,
+    progress: gtk::ProgressBar,
+    duration: Rc<Cell<Duration>>,
+}
+
+#[derive(Clone)]
+struct MarqueeLabel {
+    root: gtk::Overlay,
+    canvas: gtk::DrawingArea,
+    draw_model: MarqueeDrawModel,
+    x_position: Rc<Cell<f64>>,
+    paused: Rc<Cell<bool>>,
+}
+
+#[derive(Clone)]
+struct MarqueeDrawModel {
+    text: Rc<RefCell<String>>,
+    text_width: Rc<Cell<f64>>,
+    x_position: Rc<Cell<f64>>,
+    fade_active: Rc<Cell<bool>>,
+    style: MarqueeTextStyle,
+}
+
+const MARQUEE_EDGE_FADE_WIDTH: f64 = 28.0;
+const MARQUEE_FRAME_MS: u64 = 33;
+const MARQUEE_HEIGHT: i32 = 19;
+const MARQUEE_LOOP_GAP: f64 = 48.0;
+const MARQUEE_SPEED: f64 = 0.75;
+const MARQUEE_VIEWPORT_WIDTH: i32 = 400;
+
+impl NowPlayingView {
+    pub(crate) fn new(runtime: SharedRuntime) -> Self {
+        let area = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        area.add_css_class("now-playing-area");
+        area.set_size_request(super::NOW_PLAYING_WIDTH, TITLEBAR_HEIGHT);
+        area.set_hexpand(false);
+        area.set_halign(gtk::Align::Center);
+        area.set_margin_start(super::NOW_PLAYING_HORIZONTAL_MARGIN);
+        area.set_margin_end(super::NOW_PLAYING_HORIZONTAL_MARGIN);
+        area.set_valign(gtk::Align::Fill);
+
+        let artwork = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        artwork.add_css_class("now-playing-artwork");
+        artwork.set_size_request(TITLEBAR_HEIGHT, TITLEBAR_HEIGHT);
+
+        let details = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        details.set_hexpand(true);
+        details.set_vexpand(true);
+
+        let marquee_paused = Rc::new(Cell::new(false));
+        let title = MarqueeLabel::new("now-playing-title", marquee_paused.clone());
+        let artist_album = MarqueeLabel::new("now-playing-artist", marquee_paused.clone());
+        let metadata = metadata_box(&title, &artist_album);
+
+        let elapsed = time_label();
+        let remaining = time_label();
+        let detail_content = gtk::CenterBox::new();
+        detail_content.set_hexpand(true);
+        detail_content.set_vexpand(true);
+        detail_content.set_valign(gtk::Align::Fill);
+        detail_content.set_start_widget(Some(&side_status(
+            "media-playlist-shuffle-symbolic",
+            "Shuffle",
+            &elapsed,
+        )));
+        detail_content.set_center_widget(Some(&metadata));
+        detail_content.set_end_widget(Some(&side_status(
+            "media-playlist-repeat-symbolic",
+            "Repeat",
+            &remaining,
+        )));
+
+        let progress = gtk::ProgressBar::new();
+        progress.add_css_class("song-progress");
+        progress.set_fraction(0.0);
+        progress.set_hexpand(true);
+        progress.set_halign(gtk::Align::Fill);
+        progress.set_valign(gtk::Align::End);
+        progress.set_cursor_from_name(Some("pointer"));
+
+        let duration = Rc::new(Cell::new(Duration::ZERO));
+        install_progress_seeking(&progress, runtime.clone(), duration.clone());
+
+        details.append(&detail_content);
+        details.append(&progress);
+        area.append(&artwork);
+        area.append(&details);
+
+        install_hover_pause(&area, &title, &artist_album, marquee_paused);
+
+        let view = Self {
+            area,
+            title,
+            artist_album,
+            elapsed,
+            remaining,
+            progress,
+            duration,
+        };
+        view.refresh(&runtime.borrow().now_playing());
+        install_refresh_timer(&view, runtime);
+        view
+    }
+
+    pub(crate) fn widget(&self) -> gtk::Box {
+        self.area.clone()
+    }
+
+    pub(crate) fn refresh(&self, now_playing: &NowPlaying) {
+        let Some(track) = &now_playing.track else {
+            self.title.set_text("");
+            self.artist_album.set_text("");
+            self.elapsed.set_text("");
+            self.remaining.set_text("");
+            self.progress.set_fraction(0.0);
+            self.duration.set(Duration::ZERO);
+            return;
+        };
+
+        let duration = track.metadata.duration.unwrap_or_default();
+        self.duration.set(duration);
+        let position = playback_position(&now_playing.state).unwrap_or_default();
+        self.title.set_text(&track_title(track));
+        self.artist_album
+            .set_text(&artist_album_text(&track.metadata));
+        self.elapsed.set_text(&time_text(position));
+        self.remaining
+            .set_text(&remaining_time_text(position, duration));
+        self.progress
+            .set_fraction(progress_fraction(position, duration));
+    }
+}
+
+fn install_progress_seeking(
+    progress: &gtk::ProgressBar,
+    runtime: SharedRuntime,
+    duration: Rc<Cell<Duration>>,
+) {
+    let click = gtk::GestureClick::new();
+    click.set_button(gdk::BUTTON_PRIMARY);
+    click.set_exclusive(true);
+    let progress_for_click = progress.clone();
+    let runtime_for_click = runtime.clone();
+    let duration_for_click = duration.clone();
+    click.connect_pressed(move |click, _press_count, x, _y| {
+        claim_gesture_sequence(click);
+        commit_seek_from_progress_x(
+            &progress_for_click,
+            &runtime_for_click,
+            &duration_for_click,
+            x,
+        );
+    });
+    progress.add_controller(click);
+
+    let drag = gtk::GestureDrag::new();
+    drag.set_button(gdk::BUTTON_PRIMARY);
+    drag.set_exclusive(true);
+    let progress_for_drag = progress.clone();
+    let duration_for_drag = duration.clone();
+    drag.connect_drag_begin(move |drag, x, _y| {
+        claim_gesture_sequence(drag);
+        preview_progress_from_x(&progress_for_drag, &duration_for_drag, x);
+    });
+
+    let progress_for_drag_update = progress.clone();
+    let duration_for_drag_update = duration.clone();
+    drag.connect_drag_update(move |drag, offset_x, _offset_y| {
+        claim_gesture_sequence(drag);
+        let Some((start_x, _start_y)) = drag.start_point() else {
+            return;
+        };
+        preview_progress_from_x(
+            &progress_for_drag_update,
+            &duration_for_drag_update,
+            start_x + offset_x,
+        );
+    });
+
+    let progress_for_drag_end = progress.clone();
+    let runtime_for_drag_end = runtime.clone();
+    let duration_for_drag_end = duration.clone();
+    drag.connect_drag_end(move |drag, offset_x, _offset_y| {
+        claim_gesture_sequence(drag);
+        let Some((start_x, _start_y)) = drag.start_point() else {
+            return;
+        };
+        commit_seek_from_progress_x(
+            &progress_for_drag_end,
+            &runtime_for_drag_end,
+            &duration_for_drag_end,
+            start_x + offset_x,
+        );
+    });
+    progress.add_controller(drag);
+}
+
+fn claim_gesture_sequence(gesture: &impl IsA<gtk::Gesture>) {
+    let _claimed = gesture.set_state(gtk::EventSequenceState::Claimed);
+}
+
+fn preview_progress_from_x(
+    progress: &gtk::ProgressBar,
+    duration: &Cell<Duration>,
+    x: f64,
+) -> Option<f64> {
+    if duration.get().is_zero() {
+        return None;
+    }
+
+    let fraction = progress_fraction_from_x(x, progress.width())?;
+    progress.set_fraction(fraction);
+    Some(fraction)
+}
+
+fn commit_seek_from_progress_x(
+    progress: &gtk::ProgressBar,
+    runtime: &SharedRuntime,
+    duration: &Cell<Duration>,
+    x: f64,
+) {
+    let Some(fraction) = preview_progress_from_x(progress, duration, x) else {
+        return;
+    };
+
+    commit_seek_to_fraction(runtime, duration.get(), fraction);
+}
+
+fn commit_seek_to_fraction(runtime: &SharedRuntime, duration: Duration, fraction: f64) {
+    if duration.is_zero() {
+        return;
+    }
+
+    let position = duration.mul_f64(fraction.clamp(0.0, 1.0));
+    let _result = runtime
+        .borrow_mut()
+        .handle_command(ApplicationCommand::Playback(PlaybackCommand::Seek(
+            position,
+        )));
+}
+
+fn progress_fraction_from_x(x: f64, width: i32) -> Option<f64> {
+    if width <= 0 {
+        return None;
+    }
+
+    Some((x / f64::from(width)).clamp(0.0, 1.0))
+}
+
+fn install_refresh_timer(view: &NowPlayingView, runtime: SharedRuntime) {
+    let view = view.clone();
+    glib::timeout_add_seconds_local(1, move || {
+        view.refresh(&runtime.borrow().now_playing());
+        glib::ControlFlow::Continue
+    });
+}
+
+fn metadata_box(title: &MarqueeLabel, artist_album: &MarqueeLabel) -> gtk::Box {
+    let metadata = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    metadata.set_halign(gtk::Align::Center);
+    metadata.set_valign(gtk::Align::Center);
+    metadata.set_hexpand(true);
+    metadata.append(&title.widget());
+    metadata.append(&artist_album.widget());
+    metadata
+}
+
+impl MarqueeLabel {
+    fn new(css_class: &str, paused: Rc<Cell<bool>>) -> Self {
+        let width = MARQUEE_VIEWPORT_WIDTH;
+        let root = gtk::Overlay::new();
+        root.add_css_class("marquee-label");
+        root.set_size_request(width, MARQUEE_HEIGHT);
+        root.set_hexpand(false);
+        root.set_halign(gtk::Align::Center);
+        root.set_overflow(gtk::Overflow::Hidden);
+
+        let canvas = gtk::DrawingArea::new();
+        canvas.add_css_class(css_class);
+        canvas.set_content_width(width);
+        canvas.set_content_height(MARQUEE_HEIGHT);
+        canvas.set_size_request(width, MARQUEE_HEIGHT);
+        canvas.set_hexpand(false);
+        canvas.set_halign(gtk::Align::Center);
+        canvas.set_overflow(gtk::Overflow::Hidden);
+
+        let text = Rc::new(RefCell::new(String::new()));
+        let text_width = Rc::new(Cell::new(0.0));
+        let x_position = Rc::new(Cell::new(0.0));
+        let fade_active = Rc::new(Cell::new(false));
+        let draw_model = MarqueeDrawModel {
+            text,
+            text_width,
+            x_position: x_position.clone(),
+            fade_active,
+            style: MarqueeTextStyle::from_css_class(css_class),
+        };
+        install_marquee_draw_func(&canvas, &draw_model);
+
+        root.set_child(Some(&canvas));
+
+        let marquee = Self {
+            root,
+            canvas,
+            draw_model,
+            x_position,
+            paused,
+        };
+        marquee.install_animation();
+        marquee
+    }
+
+    fn widget(&self) -> gtk::Overlay {
+        self.root.clone()
+    }
+
+    fn set_text(&self, text: &str) {
+        if self.draw_model.text.borrow().as_str() == text {
+            return;
+        }
+
+        self.draw_model.text.replace(text.to_owned());
+        self.reset_to_start();
+        self.canvas.queue_draw();
+    }
+
+    fn reset_to_start(&self) {
+        self.x_position.set(0.0);
+        self.canvas.queue_draw();
+    }
+
+    fn install_animation(&self) {
+        let marquee = self.clone();
+        glib::timeout_add_local(Duration::from_millis(MARQUEE_FRAME_MS), move || {
+            marquee.advance();
+            glib::ControlFlow::Continue
+        });
+    }
+
+    fn advance(&self) {
+        let viewport_width = self.canvas.width();
+        let text_width = self.draw_model.text_width.get();
+        let overflows = viewport_width > 0 && text_width > f64::from(viewport_width) + 1.0;
+        let should_scroll = overflows && !self.paused.get();
+
+        self.draw_model.fade_active.set(should_scroll);
+
+        if !should_scroll {
+            self.reset_to_start();
+            return;
+        }
+
+        let mut x_position = self.x_position.get() - MARQUEE_SPEED;
+        if x_position <= -text_width - MARQUEE_LOOP_GAP {
+            x_position = 0.0;
+        }
+
+        self.x_position.set(x_position);
+        self.canvas.queue_draw();
+    }
+}
+
+fn install_marquee_draw_func(canvas: &gtk::DrawingArea, draw_model: &MarqueeDrawModel) {
+    let draw_model = draw_model.clone();
+
+    canvas.set_draw_func(move |canvas, context, width, height| {
+        draw_marquee_text(canvas, context, width, height, &draw_model);
+    });
+}
+
+#[derive(Clone, Copy)]
+enum MarqueeTextStyle {
+    Title,
+    Secondary,
+}
+
+impl MarqueeTextStyle {
+    fn from_css_class(css_class: &str) -> Self {
+        if css_class == "now-playing-title" {
+            Self::Title
+        } else {
+            Self::Secondary
+        }
+    }
+
+    fn font_size(self) -> f64 {
+        match self {
+            Self::Title => 13.0,
+            Self::Secondary => 12.0,
+        }
+    }
+
+    fn font_weight(self) -> cairo::FontWeight {
+        match self {
+            Self::Title => cairo::FontWeight::Bold,
+            Self::Secondary => cairo::FontWeight::Normal,
+        }
+    }
+
+    fn alpha(self) -> f64 {
+        match self {
+            Self::Title => 1.0,
+            Self::Secondary => 0.58,
+        }
+    }
+}
+
+fn draw_marquee_text(
+    canvas: &gtk::DrawingArea,
+    context: &cairo::Context,
+    width: i32,
+    height: i32,
+    draw_model: &MarqueeDrawModel,
+) {
+    let text = draw_model.text.borrow();
+    if text.is_empty() {
+        draw_model.text_width.set(0.0);
+        return;
+    }
+
+    let _result = context.save();
+    context.rectangle(0.0, 0.0, f64::from(width), f64::from(height));
+    context.clip();
+    context.select_font_face(
+        "Sans",
+        cairo::FontSlant::Normal,
+        draw_model.style.font_weight(),
+    );
+    context.set_font_size(draw_model.style.font_size());
+    set_text_source(
+        context,
+        &canvas.style_context().color(),
+        draw_model.style.alpha(),
+        f64::from(width),
+        draw_model.fade_active.get(),
+    );
+
+    let Ok(extents) = context.text_extents(&text) else {
+        let _result = context.restore();
+        return;
+    };
+    let measured_width = extents.x_advance().max(0.0);
+    draw_model.text_width.set(measured_width);
+
+    let x = if measured_width > f64::from(width) + 1.0 {
+        draw_model.x_position.get()
+    } else {
+        (f64::from(width) - measured_width) / 2.0
+    };
+    let y = (f64::from(height) - extents.height()) / 2.0 - extents.y_bearing();
+    draw_text_at(context, &text, x, y);
+
+    if measured_width > f64::from(width) + 1.0 {
+        draw_text_at(context, &text, x + measured_width + MARQUEE_LOOP_GAP, y);
+    }
+
+    let _result = context.restore();
+}
+
+fn set_context_color(context: &cairo::Context, color: &gtk::gdk::RGBA, alpha: f64) {
+    context.set_source_rgba(
+        f64::from(color.red()),
+        f64::from(color.green()),
+        f64::from(color.blue()),
+        f64::from(color.alpha()) * alpha,
+    );
+}
+
+fn set_text_source(
+    context: &cairo::Context,
+    color: &gtk::gdk::RGBA,
+    alpha: f64,
+    width: f64,
+    fade_active: bool,
+) {
+    if !fade_active || width <= 0.0 {
+        set_context_color(context, color, alpha);
+        return;
+    }
+
+    let gradient = cairo::LinearGradient::new(0.0, 0.0, width, 0.0);
+    let red = f64::from(color.red());
+    let green = f64::from(color.green());
+    let blue = f64::from(color.blue());
+    let alpha = f64::from(color.alpha()) * alpha;
+    let fade_stop = (MARQUEE_EDGE_FADE_WIDTH / width).clamp(0.0, 0.5);
+
+    gradient.add_color_stop_rgba(0.0, red, green, blue, 0.0);
+    gradient.add_color_stop_rgba(fade_stop, red, green, blue, alpha);
+    gradient.add_color_stop_rgba(1.0 - fade_stop, red, green, blue, alpha);
+    gradient.add_color_stop_rgba(1.0, red, green, blue, 0.0);
+    let _result = context.set_source(&gradient);
+}
+
+fn draw_text_at(context: &cairo::Context, text: &str, x: f64, y: f64) {
+    context.move_to(x, y);
+    let _result = context.show_text(text);
+}
+
+fn install_hover_pause(
+    area: &gtk::Box,
+    title: &MarqueeLabel,
+    artist_album: &MarqueeLabel,
+    marquee_paused: Rc<Cell<bool>>,
+) {
+    let motion = gtk::EventControllerMotion::new();
+    let title_for_enter = title.clone();
+    let artist_album_for_enter = artist_album.clone();
+    let marquee_paused_for_enter = marquee_paused.clone();
+    motion.connect_enter(move |_motion, _x, _y| {
+        marquee_paused_for_enter.set(true);
+        title_for_enter.reset_to_start();
+        artist_album_for_enter.reset_to_start();
+    });
+
+    motion.connect_leave(move |_motion| {
+        marquee_paused.set(false);
+    });
+    area.add_controller(motion);
+}
+
+fn side_status(icon_name: &str, tooltip: &str, time: &gtk::Label) -> gtk::Box {
+    let status = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    status.set_width_request(NOW_PLAYING_SIDE_WIDTH);
+    status.set_halign(gtk::Align::Center);
+    status.set_valign(gtk::Align::Center);
+
+    let icon = gtk::Image::from_icon_name(icon_name);
+    icon.add_css_class("now-playing-side-icon");
+    icon.set_pixel_size(NOW_PLAYING_ICON_SIZE);
+    icon.set_tooltip_text(Some(tooltip));
+    icon.set_halign(gtk::Align::Center);
+
+    status.append(&icon);
+    status.append(time);
+    status
+}
+
+fn time_label() -> gtk::Label {
+    let label = gtk::Label::new(None);
+    label.add_css_class("now-playing-time");
+    label.set_halign(gtk::Align::Center);
+    label.set_xalign(0.5);
+    label
+}
+
+fn track_title(track: &Track) -> String {
+    non_empty_text(&track.metadata.title)
+        .or_else(|| {
+            track
+                .location
+                .path
+                .file_stem()
+                .and_then(|file_stem| file_stem.to_str())
+                .map(str::trim)
+                .filter(|file_stem| !file_stem.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_default()
+}
+
+fn artist_album_text(metadata: &TrackMetadata) -> String {
+    match (
+        non_empty_text(&metadata.artist),
+        non_empty_text(&metadata.album),
+    ) {
+        (Some(artist), Some(album)) => format!("{artist} - {album}"),
+        (Some(artist), None) => artist,
+        (None, Some(album)) => album,
+        (None, None) => String::new(),
+    }
+}
+
+fn non_empty_text(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn playback_position(state: &PlaybackState) -> Option<Duration> {
+    match state {
+        PlaybackState::Playing { position, .. } | PlaybackState::Paused { position, .. } => {
+            Some(*position)
+        }
+        PlaybackState::Stopped | PlaybackState::Loading { .. } => None,
+    }
+}
+
+fn remaining_time_text(position: Duration, duration: Duration) -> String {
+    if duration.is_zero() {
+        return String::new();
+    }
+
+    format!("-{}", time_text(duration.saturating_sub(position)))
+}
+
+fn time_text(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let hours = seconds / 3_600;
+    let minutes = seconds % 3_600 / 60;
+    let seconds = seconds % 60;
+
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+fn progress_fraction(position: Duration, duration: Duration) -> f64 {
+    if duration.is_zero() {
+        return 0.0;
+    }
+
+    (position.as_secs_f64() / duration.as_secs_f64()).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use xtunes_app_runtime::TrackMetadata;
+
+    use super::{
+        artist_album_text, progress_fraction, progress_fraction_from_x, remaining_time_text,
+        time_text,
+    };
+
+    #[test]
+    fn artist_album_joins_available_fields() {
+        let metadata = TrackMetadata {
+            artist: Some("M83".to_owned()),
+            album: Some("Hurry Up".to_owned()),
+            ..TrackMetadata::default()
+        };
+
+        assert_eq!(artist_album_text(&metadata), "M83 - Hurry Up");
+    }
+
+    #[test]
+    fn time_text_uses_minutes_until_one_hour() {
+        assert_eq!(time_text(Duration::from_secs(245)), "4:05");
+    }
+
+    #[test]
+    fn time_text_uses_hours_when_needed() {
+        assert_eq!(time_text(Duration::from_secs(3_665)), "1:01:05");
+    }
+
+    #[test]
+    fn remaining_time_is_negative_duration_left() {
+        assert_eq!(
+            remaining_time_text(Duration::from_secs(40), Duration::from_secs(100)),
+            "-1:00"
+        );
+    }
+
+    #[test]
+    fn progress_fraction_is_clamped() {
+        assert_eq!(
+            progress_fraction(Duration::from_secs(150), Duration::from_secs(100)),
+            1.0
+        );
+    }
+
+    #[test]
+    fn progress_fraction_from_x_maps_coordinates_to_fraction() {
+        assert_eq!(progress_fraction_from_x(25.0, 100), Some(0.25));
+    }
+
+    #[test]
+    fn progress_fraction_from_x_clamps_outside_coordinates() {
+        assert_eq!(progress_fraction_from_x(-10.0, 100), Some(0.0));
+        assert_eq!(progress_fraction_from_x(120.0, 100), Some(1.0));
+    }
+
+    #[test]
+    fn progress_fraction_from_x_ignores_unallocated_width() {
+        assert_eq!(progress_fraction_from_x(50.0, 0), None);
+    }
+}

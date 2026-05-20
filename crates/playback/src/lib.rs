@@ -189,12 +189,34 @@ impl PlaybackService for GStreamerPlaybackService {
     }
 
     fn state(&self) -> PlaybackState {
-        self.state.borrow().clone()
+        match self.state.borrow().clone() {
+            PlaybackState::Playing { track_id, position } => PlaybackState::Playing {
+                track_id,
+                position: self.current_position().unwrap_or(position),
+            },
+            PlaybackState::Paused { track_id, position } => PlaybackState::Paused {
+                track_id,
+                position: self.current_position().unwrap_or(position),
+            },
+            state => state,
+        }
+    }
+}
+
+impl GStreamerPlaybackService {
+    fn current_position(&self) -> Option<Duration> {
+        self.playbin
+            .query_position::<gst::ClockTime>()
+            .map(duration_from_clock_time)
     }
 }
 
 fn clock_time_from_duration(duration: Duration) -> gst::ClockTime {
     gst::ClockTime::from_nseconds(duration.as_nanos().min(u128::from(u64::MAX)) as u64)
+}
+
+fn duration_from_clock_time(clock_time: gst::ClockTime) -> Duration {
+    Duration::from_nanos(clock_time.nseconds())
 }
 
 #[cfg(test)]

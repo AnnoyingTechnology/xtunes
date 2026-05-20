@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 pub use xtunes_domain::{
     ApplicationCommand, ApplicationQuery, PlayStatistics, PlaybackCommand, PlaybackState, Track,
-    TrackId, TrackLocation, TrackPlaybackSource, UserSettings,
+    TrackId, TrackLocation, TrackMetadata, TrackPlaybackSource, UserSettings,
 };
 use xtunes_library_store::LibraryStore;
 use xtunes_metadata::{LibraryScanner, MetadataService};
@@ -30,6 +30,12 @@ pub struct LibraryScanSummary {
     pub scanned_tracks: usize,
     pub skipped_unsupported_files: usize,
     pub failed_files: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NowPlaying {
+    pub track: Option<Track>,
+    pub state: PlaybackState,
 }
 
 pub struct ApplicationRuntime {
@@ -113,6 +119,19 @@ impl ApplicationRuntime {
             .as_deref()
             .map(PlaybackService::state)
             .unwrap_or_default()
+    }
+
+    pub fn now_playing(&self) -> NowPlaying {
+        let state = self.playback_state();
+        let track = playback_track_id(&state)
+            .and_then(|track_id| {
+                self.library_tracks
+                    .iter()
+                    .find(|track| track.id == track_id)
+            })
+            .cloned();
+
+        NowPlaying { track, state }
     }
 
     pub fn handle_command(&mut self, command: ApplicationCommand) -> ApplicationRuntimeResult<()> {
@@ -235,6 +254,15 @@ impl ApplicationRuntime {
         });
         self.library_tracks = tracks;
         Ok(())
+    }
+}
+
+fn playback_track_id(state: &PlaybackState) -> Option<TrackId> {
+    match state {
+        PlaybackState::Loading { track_id }
+        | PlaybackState::Playing { track_id, .. }
+        | PlaybackState::Paused { track_id, .. } => Some(*track_id),
+        PlaybackState::Stopped => None,
     }
 }
 
@@ -385,6 +413,10 @@ mod tests {
                 track_id,
                 position: std::time::Duration::ZERO,
             }
+        );
+        assert_eq!(
+            runtime.now_playing().track.map(|track| track.id),
+            Some(track_id)
         );
     }
 
