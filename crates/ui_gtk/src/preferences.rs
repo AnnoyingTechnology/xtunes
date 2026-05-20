@@ -4,15 +4,15 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 
 use super::{
-    ApplicationCommand, ApplicationRuntimeError, LibraryChangedCallback, LibraryScanSummary,
-    PREFERENCES_HEIGHT, PREFERENCES_WIDTH, SharedRuntime, UserSettings, WINDOW_SHADOW_MARGIN,
+    ApplicationCommand, ApplicationRuntimeError, LibraryScanRequestedCallback, PREFERENCES_HEIGHT,
+    PREFERENCES_WIDTH, SharedRuntime, UserSettings, WINDOW_SHADOW_MARGIN,
 };
 
 pub(crate) fn install_preferences_action(
     app: &gtk::Application,
     window: &gtk::ApplicationWindow,
     runtime: SharedRuntime,
-    library_changed: LibraryChangedCallback,
+    scan_requested: LibraryScanRequestedCallback,
 ) {
     if app.lookup_action("preferences").is_some() {
         return;
@@ -21,9 +21,9 @@ pub(crate) fn install_preferences_action(
     let preferences = gio::SimpleAction::new("preferences", None);
     let window = window.clone();
     let runtime = runtime.clone();
-    let library_changed = library_changed.clone();
+    let scan_requested = scan_requested.clone();
     preferences.connect_activate(move |_action, _parameter| {
-        open_preferences_window(&window, runtime.clone(), library_changed.clone());
+        open_preferences_window(&window, runtime.clone(), scan_requested.clone());
     });
     app.add_action(&preferences);
     app.set_accels_for_action("app.preferences", &["<Primary>comma"]);
@@ -32,7 +32,7 @@ pub(crate) fn install_preferences_action(
 pub(crate) fn settings_button(
     window: &gtk::ApplicationWindow,
     runtime: SharedRuntime,
-    library_changed: LibraryChangedCallback,
+    scan_requested: LibraryScanRequestedCallback,
 ) -> gtk::Button {
     let icon = gtk::Image::from_icon_name("preferences-system-symbolic");
     icon.set_pixel_size(18);
@@ -46,9 +46,9 @@ pub(crate) fn settings_button(
 
     let window = window.clone();
     let runtime = runtime.clone();
-    let library_changed = library_changed.clone();
+    let scan_requested = scan_requested.clone();
     button.connect_clicked(move |_| {
-        open_preferences_window(&window, runtime.clone(), library_changed.clone());
+        open_preferences_window(&window, runtime.clone(), scan_requested.clone());
     });
 
     button
@@ -57,7 +57,7 @@ pub(crate) fn settings_button(
 fn open_preferences_window(
     parent: &gtk::ApplicationWindow,
     runtime: SharedRuntime,
-    library_changed: LibraryChangedCallback,
+    scan_requested: LibraryScanRequestedCallback,
 ) {
     let window = gtk::Window::builder()
         .title("Library Path")
@@ -172,21 +172,22 @@ fn open_preferences_window(
     let runtime_for_scan = runtime.clone();
     let path_entry_for_scan = path_entry.clone();
     let scan_status_for_scan = scan_status.clone();
-    let library_changed_for_scan = library_changed.clone();
+    let scan_requested_for_scan = scan_requested.clone();
     scan_button.connect_clicked(move |_| {
-        scan_status_for_scan.set_text("Scanning...");
+        if path_entry_for_scan.text().trim().is_empty() {
+            scan_status_for_scan.set_text("Choose a library folder before scanning.");
+            return;
+        }
+
         let scan_message =
             match save_library_path_from_entry(&runtime_for_scan, &path_entry_for_scan) {
-                Ok(()) => {
-                    match request_library_scan_from_entry(&runtime_for_scan, &path_entry_for_scan) {
-                        Ok(Some(summary)) => {
-                            library_changed_for_scan();
-                            scan_summary_text(&summary)
-                        }
-                        Ok(None) => "Choose a library folder before scanning.".to_owned(),
-                        Err(error) => scan_error_text(error).to_owned(),
-                    }
-                }
+                Ok(()) => match request_library_scan_from_entry(
+                    &path_entry_for_scan,
+                    &scan_requested_for_scan,
+                ) {
+                    Ok(()) => "Scan started. Progress is shown in the status bar.".to_owned(),
+                    Err(error) => scan_error_text(error).to_owned(),
+                },
                 Err(error) => scan_error_text(error).to_owned(),
             };
         scan_status_for_scan.set_text(&scan_message);
@@ -270,27 +271,15 @@ fn save_library_path_from_entry(
 }
 
 fn request_library_scan_from_entry(
-    runtime: &SharedRuntime,
     path_entry: &gtk::Entry,
-) -> Result<Option<LibraryScanSummary>, ApplicationRuntimeError> {
+    scan_requested: &LibraryScanRequestedCallback,
+) -> Result<(), ApplicationRuntimeError> {
     let path_text = path_entry.text().trim().to_owned();
     if path_text.is_empty() {
-        return Ok(None);
+        return Err(ApplicationRuntimeError::LibraryScanFailed);
     }
 
-    let mut runtime = runtime.borrow_mut();
-    runtime.handle_command(ApplicationCommand::ScanLibrary {
-        library_path: PathBuf::from(path_text),
-    })?;
-
-    Ok(runtime.last_scan_summary().cloned())
-}
-
-fn scan_summary_text(summary: &LibraryScanSummary) -> String {
-    format!(
-        "Scanned {} tracks. Skipped {} unsupported files. {} files failed.",
-        summary.scanned_tracks, summary.skipped_unsupported_files, summary.failed_files
-    )
+    scan_requested(PathBuf::from(path_text))
 }
 
 fn scan_error_text(error: ApplicationRuntimeError) -> &'static str {
@@ -300,6 +289,7 @@ fn scan_error_text(error: ApplicationRuntimeError) -> &'static str {
             "Library scanning is not available in this build."
         }
         ApplicationRuntimeError::LibraryStoreFailed => "The library database could not be updated.",
+        ApplicationRuntimeError::BackgroundTaskRunning => "A library scan is already running.",
         ApplicationRuntimeError::PlaybackFailed
         | ApplicationRuntimeError::PlaybackServiceUnavailable
         | ApplicationRuntimeError::TrackUnavailable => "Playback is not available.",

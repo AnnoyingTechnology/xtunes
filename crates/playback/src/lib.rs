@@ -4,7 +4,7 @@ use std::{cell::RefCell, time::Duration};
 
 use gst::prelude::*;
 use gstreamer as gst;
-pub use xtunes_domain::{PlaybackCommand, PlaybackState, TrackPlaybackSource};
+pub use xtunes_domain::{PlaybackCommand, PlaybackState, TrackPlaybackSource, VolumePercent};
 
 pub type PlaybackResult<T> = Result<T, PlaybackError>;
 
@@ -22,12 +22,15 @@ pub trait PlaybackService {
     fn resume(&self) -> PlaybackResult<()>;
     fn stop(&self) -> PlaybackResult<()>;
     fn seek(&self, position: Duration) -> PlaybackResult<()>;
+    fn set_volume(&self, volume: VolumePercent) -> PlaybackResult<()>;
+    fn volume(&self) -> VolumePercent;
     fn state(&self) -> PlaybackState;
 }
 
 #[derive(Debug, Default)]
 pub struct NullPlaybackService {
     state: RefCell<PlaybackState>,
+    volume: RefCell<VolumePercent>,
 }
 
 impl NullPlaybackService {
@@ -84,6 +87,15 @@ impl PlaybackService for NullPlaybackService {
         Ok(())
     }
 
+    fn set_volume(&self, volume: VolumePercent) -> PlaybackResult<()> {
+        self.volume.replace(volume);
+        Ok(())
+    }
+
+    fn volume(&self) -> VolumePercent {
+        *self.volume.borrow()
+    }
+
     fn state(&self) -> PlaybackState {
         self.state.borrow().clone()
     }
@@ -93,6 +105,7 @@ impl PlaybackService for NullPlaybackService {
 pub struct GStreamerPlaybackService {
     playbin: gst::Element,
     state: RefCell<PlaybackState>,
+    volume: RefCell<VolumePercent>,
 }
 
 impl GStreamerPlaybackService {
@@ -105,6 +118,7 @@ impl GStreamerPlaybackService {
         Ok(Self {
             playbin,
             state: RefCell::new(PlaybackState::Stopped),
+            volume: RefCell::new(VolumePercent::default()),
         })
     }
 }
@@ -188,6 +202,16 @@ impl PlaybackService for GStreamerPlaybackService {
         Ok(())
     }
 
+    fn set_volume(&self, volume: VolumePercent) -> PlaybackResult<()> {
+        self.playbin.set_property("volume", volume.as_scalar());
+        self.volume.replace(volume);
+        Ok(())
+    }
+
+    fn volume(&self) -> VolumePercent {
+        *self.volume.borrow()
+    }
+
     fn state(&self) -> PlaybackState {
         match self.state.borrow().clone() {
             PlaybackState::Playing { track_id, position } => PlaybackState::Playing {
@@ -225,7 +249,9 @@ mod tests {
 
     use xtunes_domain::TrackId;
 
-    use super::{NullPlaybackService, PlaybackError, PlaybackService, PlaybackState};
+    use super::{
+        NullPlaybackService, PlaybackError, PlaybackService, PlaybackState, VolumePercent,
+    };
     use crate::TrackPlaybackSource;
 
     #[test]
@@ -297,6 +323,16 @@ mod tests {
             )),
             Err(PlaybackError::MissingSourcePath)
         );
+    }
+
+    #[test]
+    fn null_service_tracks_volume() {
+        let playback = NullPlaybackService::new();
+        let volume = VolumePercent::new(42).expect("valid test volume");
+
+        assert_eq!(playback.set_volume(volume), Ok(()));
+
+        assert_eq!(playback.volume(), volume);
     }
 
     fn positive_track_id() -> TrackId {

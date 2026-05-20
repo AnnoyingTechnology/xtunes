@@ -3,7 +3,7 @@
 ## Summary
 
 `xTunes` is a Linux-only, Debian-first music library/player built with Rust,
-GTK4, GStreamer, and SQLite. The product target is an iTunes 11-like desktop
+GTK4, GStreamer, and SQLite. The product target is an iTunes 8~12-like desktop
 music manager centered on a dense table/list workflow.
 
 Rhythmbox is an import source only. The application owns its database, playlists,
@@ -58,6 +58,8 @@ Core vocabulary:
 - `Playlist`
 - `PlaylistId`
 - `PlaylistEntry`
+- `SmartPlaylist`
+- `SmartPlaylistRule`
 - `Rating`
 - `PlayStatistics`
 - `LibraryQuery`
@@ -84,12 +86,58 @@ The first schema should cover:
 - tracks
 - track locations
 - playlists
+- smart playlists
+- smart playlist rules
 - playlist entries
 - metadata
 - ratings
 - play statistics
 - settings
 - schema migrations
+
+## Library Management Roadmap
+
+Start with a non-destructive library model.
+
+In the first stage, scanning a configured library folder should index the files
+where they already are. xTunes must not rename, move, copy, or reorganize files
+unless the user explicitly enables a future managed-library setting. Manual file
+addition should also be accepted without forcing those files into a specific
+filesystem layout.
+
+Keep the model compatible with a later `Keep my library organized` setting. When
+enabled, that mode should copy added/imported files into clean subfolders under
+the configured library folder. The exact naming template is still to be
+confirmed, but the intended shape is close to:
+
+```text
+Artist/Album/NN Title.ext
+```
+
+The fuller candidate pattern is:
+
+```text
+$if2(%albumartist%,%artist%)/$if($ne(%albumartist%,),%album%/,)$if($gt(%totaldiscs%,1),%discnumber%-,)$if($ne(%albumartist%,),$num(%tracknumber%,2) ,)$if(%_multiartist%,%artist% - ,)%title%
+```
+
+Do not implement managed-library organization in the first stage, but avoid
+scan and database assumptions that would make it painful later. In particular:
+
+- track identity must remain stable and must not be derived only from the file
+  path
+- the database should be able to distinguish the track from its current file
+  location
+- rescans must update existing tracks instead of blindly appending duplicates
+- missing files should remain visible in the library instead of disappearing
+  silently
+- the scanner should report added, updated, missing, skipped, and failed files
+  as explicit outcomes
+
+When a file recorded in the database no longer exists on disk, table views
+should show a warning symbol on that row. Attempting to play the missing track
+should offer a `Locate` workflow that lets the user choose the replacement file
+manually. Relocating should update the track location while preserving playlists,
+rating, metadata cache, and listening statistics.
 
 ## Application Flow
 
@@ -100,8 +148,10 @@ Commands include:
 - play selected track
 - pause/resume/stop
 - seek
+- set volume
 - set rating
 - create, rename, and delete playlist
+- create, rename, update, and delete smart playlist
 - add/remove/reorder playlist entries
 - update metadata
 - update settings
@@ -110,6 +160,7 @@ Queries include:
 
 - list tracks with filter and sort
 - list playlists
+- list smart playlists
 - get track details
 - search tracks
 - get play statistics
@@ -176,6 +227,7 @@ MainWindow
     Track count
     Total duration
     Selection summary
+    Background task status, bottom right
 ```
 
 Avoid a separate empty window titlebar. The app owns its top chrome, and the
@@ -216,6 +268,8 @@ backend wiring:
 - rating display and editing
 - playback controls, current-track display, pause/play state, and volume state
 - status bar counts, durations, and selection summary
+- status bar background task feedback, especially scanning status in the bottom
+  right with a rotating sync icon
 - settings dialog shell, especially library path and manual scan
 - native light and dark theme behavior
 - keyboard behavior, especially spacebar play/pause
@@ -224,6 +278,29 @@ backend wiring:
 Album view can remain rough during this phase. Advanced browsing views,
 visualizers, streaming, device sync, cloud sync, folder sync, and multi-machine
 sync are out of scope.
+
+When album view becomes real, artwork should influence the track dropdown
+surface. For each album, detect the two dominant artwork colors. Use the main
+dominant color for the expanded track container and choose text/accent colors
+with enough contrast, derived from or compatible with the artwork palette. This
+must work in native light and dark modes without becoming unreadable.
+
+Smart playlists are in scope after regular playlist and table behavior is
+stable. They should be rule-based saved queries over the local library, not a
+cloud/recommendation feature.
+
+Playback controls should be wired through the real command path:
+
+- previous track
+- play/pause
+- next track
+- volume
+
+The volume control must avoid accidental software amplification near the top of
+the range. Values from `95%` through `99.9%` should be magnetized to `100%` or
+back below the danger range so the user cannot casually leave the player at an
+almost-maximum software volume. This protects a clean listening chain from
+unintentional non-unity gain behavior.
 
 ## Later Statistics Views
 
@@ -257,6 +334,11 @@ Run GTK on the main thread. Move slow work to background tasks:
 
 Use typed messages between background tasks and the application runtime. Avoid
 shared mutable UI state.
+
+Background task state is application state, not preferences-window state. Manual
+scan can be launched from the settings dialog, but its progress and completion
+feedback should be surfaced in the bottom status bar, bottom right, with a
+rotating sync icon while active.
 
 Wrap GStreamer behind a playback service so no other crate depends on pipeline
 details.
@@ -294,3 +376,26 @@ Build the first version in this order:
 14. Persist settings.
 
 This slice should prove the full architecture without adding non-core features.
+
+## Distribution
+
+Target Debian as the primary distribution platform. The project should produce a
+`.deb` package that installs cleanly on Debian stable and Ubuntu LTS without
+requiring users to build from source or add third-party repositories.
+
+Package deliverables:
+
+- a `debian/` directory with standard packaging metadata (`control`, `rules`,
+  `changelog`, `copyright`, etc.)
+- correct dependency declarations for GTK4, GStreamer, and SQLite runtime
+  libraries
+- a desktop entry and icon installed to standard XDG locations
+- a reproducible build via `dpkg-buildpackage` or `debuild`
+
+Keep packaging simple and conventional. Use `debhelper` and `dh-cargo` (or
+cargo invocation from `debian/rules`) as appropriate for a Rust project. Avoid
+custom install scripts when standard `dh_install` suffices.
+
+Ubuntu compatibility should follow naturally from targeting Debian, but do not
+add Ubuntu-specific patches or PPA infrastructure in the first pass. A clean
+Debian source package that builds on both is the goal.

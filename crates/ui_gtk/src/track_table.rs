@@ -1,6 +1,7 @@
 use gtk::glib::variant::ToVariant;
 use gtk::prelude::*;
 use gtk::{gio, glib};
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering as CmpOrdering;
 use std::path::Path;
 use std::rc::Rc;
@@ -24,14 +25,24 @@ pub(crate) struct TrackTableRow {
     date_added: String,
     track_number: Option<u32>,
     pub(crate) file_size_bytes: u64,
+    is_missing: bool,
 }
 
 pub(crate) type TrackActivatedCallback = Rc<dyn Fn(TrackId)>;
+
+struct StatusBinding {
+    list_item: gtk::ListItem,
+    icon: gtk::Image,
+}
+
+type StatusBindingsList = Rc<RefCell<Vec<StatusBinding>>>;
 
 #[derive(Clone)]
 pub(crate) struct TrackTable {
     scroller: gtk::ScrolledWindow,
     store: gio::ListStore,
+    playing_track_id: Rc<Cell<Option<TrackId>>>,
+    status_bindings: StatusBindingsList,
 }
 
 impl TrackTable {
@@ -43,6 +54,16 @@ impl TrackTable {
         self.store.remove_all();
         for row in rows {
             self.store.append(&glib::BoxedAnyObject::new(row));
+        }
+    }
+
+    pub(crate) fn set_playing_track_id(&self, playing_track_id: Option<TrackId>) {
+        if self.playing_track_id.get() == playing_track_id {
+            return;
+        }
+        self.playing_track_id.set(playing_track_id);
+        for binding in self.status_bindings.borrow().iter() {
+            refresh_status_icon(&binding.list_item, &binding.icon, playing_track_id);
         }
     }
 }
@@ -108,9 +129,16 @@ const TRACK_TABLE_COLUMNS: &[TrackTableColumn] = &[
 const EMPTY_STAR: &str = "☆";
 const FILLED_STAR: &str = "★";
 const MAX_RATING: u8 = 5;
+const STATUS_COLUMN_WIDTH: i32 = 26;
+const STATUS_ICON_SIZE: i32 = 14;
+const STATUS_ICON_PLAYING: &str = "audio-volume-high-symbolic";
+const STATUS_ICON_MISSING: &str = "dialog-warning-symbolic";
 
 impl TrackTableRow {
     pub(crate) fn from_track(track: &Track) -> Self {
+        let file_metadata = std::fs::metadata(&track.location.path).ok();
+        let is_missing = track.location.is_missing() || file_metadata.is_none();
+
         Self {
             track_id: Some(track.id),
             track_name: non_empty_text(&track.metadata.title)
@@ -133,9 +161,10 @@ impl TrackTableRow {
             last_played: None,
             date_added: String::new(),
             track_number: track.metadata.track_number,
-            file_size_bytes: std::fs::metadata(&track.location.path)
+            file_size_bytes: file_metadata
                 .map(|metadata| metadata.len())
                 .unwrap_or_default(),
+            is_missing,
         }
     }
 }
@@ -303,6 +332,14 @@ pub(crate) fn build_track_table(
     table.set_show_row_separators(false);
     table.set_single_click_activate(false);
 
+    let playing_track_id: Rc<Cell<Option<TrackId>>> = Rc::new(Cell::new(None));
+    let status_bindings: StatusBindingsList = Rc::new(RefCell::new(Vec::new()));
+
+    table.append_column(&build_status_column(
+        playing_track_id.clone(),
+        status_bindings.clone(),
+    ));
+
     let header_menu = build_column_visibility_menu();
     let column_actions = gio::SimpleActionGroup::new();
 
@@ -356,7 +393,12 @@ pub(crate) fn build_track_table(
     scroller.set_vexpand(true);
     scroller.set_hexpand(true);
     scroller.set_child(Some(&table));
-    TrackTable { scroller, store }
+    TrackTable {
+        scroller,
+        store,
+        playing_track_id,
+        status_bindings,
+    }
 }
 
 pub(crate) fn mock_library_tracks() -> Vec<TrackTableRow> {
@@ -539,6 +581,7 @@ fn mock_track(
         date_added: date_added.to_owned(),
         track_number: Some(track_number),
         file_size_bytes,
+        is_missing: false,
     }
 }
 
@@ -570,6 +613,135 @@ fn build_filler_column() -> gtk::ColumnViewColumn {
     table_column
 }
 
+fn build_status_column(
+    playing_track_id: Rc<Cell<Option<TrackId>>>,
+    bindings: StatusBindingsList,
+) -> gtk::ColumnViewColumn {
+    let factory = build_status_cell_factory(playing_track_id, bindings);
+    let table_column = gtk::ColumnViewColumn::new(None, Some(factory));
+    table_column.set_resizable(false);
+    table_column.set_fixed_width(STATUS_COLUMN_WIDTH);
+    table_column.set_visible(true);
+    table_column
+}
+
+fn build_status_cell_factory(
+    playing_track_id: Rc<Cell<Option<TrackId>>>,
+    bindings: StatusBindingsList,
+) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+
+    let bindings_for_setup = bindings.clone();
+    factory.connect_setup(move |_factory, item| {
+        let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+
+        let cell = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        cell.add_css_class("track-table-cell");
+        cell.set_hexpand(true);
+        cell.set_vexpand(true);
+        cell.set_halign(gtk::Align::Fill);
+        cell.set_valign(gtk::Align::Fill);
+        install_cell_selection_sync(list_item, &cell);
+
+        let icon = gtk::Image::new();
+        icon.set_pixel_size(STATUS_ICON_SIZE);
+        icon.set_halign(gtk::Align::Center);
+        icon.set_valign(gtk::Align::Center);
+        icon.set_hexpand(true);
+        icon.add_css_class("track-table-status-icon");
+        cell.append(&icon);
+
+        list_item.set_child(Some(&cell));
+
+        bindings_for_setup.borrow_mut().push(StatusBinding {
+            list_item: list_item.clone(),
+            icon,
+        });
+    });
+
+    let bindings_for_teardown = bindings;
+    factory.connect_teardown(move |_factory, item| {
+        let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        bindings_for_teardown
+            .borrow_mut()
+            .retain(|binding| binding.list_item != *list_item);
+    });
+
+    let playing_for_bind = playing_track_id;
+    factory.connect_bind(move |_factory, item| {
+        let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let Some(cell) = list_item
+            .child()
+            .and_then(|child| child.downcast::<gtk::Box>().ok())
+        else {
+            return;
+        };
+        apply_row_tint(&cell, list_item.position());
+        sync_row_selection_class(&cell, list_item.is_selected());
+
+        let Some(icon) = cell
+            .first_child()
+            .and_then(|child| child.downcast::<gtk::Image>().ok())
+        else {
+            return;
+        };
+        refresh_status_icon(list_item, &icon, playing_for_bind.get());
+    });
+
+    factory
+}
+
+fn refresh_status_icon(
+    list_item: &gtk::ListItem,
+    icon: &gtk::Image,
+    playing_track_id: Option<TrackId>,
+) {
+    let Some(row_object) = list_item
+        .item()
+        .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+    else {
+        clear_status_icon(icon);
+        return;
+    };
+    let Ok(row) = row_object.try_borrow::<TrackTableRow>() else {
+        clear_status_icon(icon);
+        return;
+    };
+
+    icon.remove_css_class("track-table-status-playing");
+    icon.remove_css_class("track-table-status-missing");
+
+    if row.is_missing {
+        icon.set_icon_name(Some(STATUS_ICON_MISSING));
+        icon.add_css_class("track-table-status-missing");
+        icon.set_visible(true);
+        return;
+    }
+
+    if matches!(
+        (row.track_id, playing_track_id),
+        (Some(track_id), Some(playing_id)) if track_id == playing_id
+    ) {
+        icon.set_icon_name(Some(STATUS_ICON_PLAYING));
+        icon.add_css_class("track-table-status-playing");
+        icon.set_visible(true);
+        return;
+    }
+
+    clear_status_icon(icon);
+}
+
+fn clear_status_icon(icon: &gtk::Image) {
+    icon.set_icon_name(None);
+    icon.set_visible(false);
+}
+
 fn build_text_cell_factory(column: TrackTableColumn) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(move |_factory, item| {
@@ -583,6 +755,7 @@ fn build_text_cell_factory(column: TrackTableColumn) -> gtk::SignalListItemFacto
         cell.set_vexpand(true);
         cell.set_halign(gtk::Align::Fill);
         cell.set_valign(gtk::Align::Fill);
+        install_cell_selection_sync(list_item, &cell);
 
         let label = gtk::Label::new(None);
         label.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -607,6 +780,7 @@ fn build_text_cell_factory(column: TrackTableColumn) -> gtk::SignalListItemFacto
             return;
         };
         apply_row_tint(&cell, list_item.position());
+        sync_row_selection_class(&cell, list_item.is_selected());
 
         let Some(label) = cell
             .first_child()
@@ -643,6 +817,7 @@ fn build_rating_cell_factory() -> gtk::SignalListItemFactory {
         cell.set_vexpand(true);
         cell.set_halign(gtk::Align::Fill);
         cell.set_valign(gtk::Align::Fill);
+        install_cell_selection_sync(list_item, &cell);
         list_item.set_child(Some(&cell));
     });
 
@@ -657,6 +832,7 @@ fn build_rating_cell_factory() -> gtk::SignalListItemFactory {
             return;
         };
         apply_row_tint(&cell, list_item.position());
+        sync_row_selection_class(&cell, list_item.is_selected());
         clear_box_children(&cell);
 
         let Some(row_object) = list_item
@@ -722,6 +898,7 @@ fn build_filler_factory() -> gtk::SignalListItemFactory {
         cell.set_vexpand(true);
         cell.set_halign(gtk::Align::Fill);
         cell.set_valign(gtk::Align::Fill);
+        install_cell_selection_sync(list_item, &cell);
         list_item.set_child(Some(&cell));
     });
 
@@ -736,6 +913,7 @@ fn build_filler_factory() -> gtk::SignalListItemFactory {
             return;
         };
         apply_row_tint(&cell, list_item.position());
+        sync_row_selection_class(&cell, list_item.is_selected());
     });
 
     factory
@@ -748,6 +926,22 @@ fn apply_row_tint(cell: &gtk::Box, row_position: u32) {
         cell.add_css_class("track-table-row-even");
     } else {
         cell.add_css_class("track-table-row-odd");
+    }
+}
+
+fn install_cell_selection_sync(list_item: &gtk::ListItem, cell: &gtk::Box) {
+    let cell_for_selection = cell.clone();
+    list_item.connect_selected_notify(move |list_item| {
+        sync_row_selection_class(&cell_for_selection, list_item.is_selected());
+    });
+    sync_row_selection_class(cell, list_item.is_selected());
+}
+
+fn sync_row_selection_class(cell: &gtk::Box, selected: bool) {
+    if selected {
+        cell.add_css_class("track-table-row-selected");
+    } else {
+        cell.remove_css_class("track-table-row-selected");
     }
 }
 

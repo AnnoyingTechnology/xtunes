@@ -1,13 +1,18 @@
 #![forbid(unsafe_code)]
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 pub use xtunes_domain::{
-    ApplicationCommand, ApplicationQuery, PlayStatistics, PlaybackCommand, PlaybackState, Track,
-    TrackId, TrackLocation, TrackMetadata, TrackPlaybackSource, UserSettings,
+    ApplicationCommand, ApplicationQuery, PlayStatistics, PlaybackCommand, PlaybackOptions,
+    PlaybackState, Track, TrackAvailability, TrackId, TrackLocation, TrackMetadata,
+    TrackPlaybackSource, UserSettings, VolumePercent,
 };
 use xtunes_library_store::LibraryStore;
-use xtunes_metadata::{LibraryScanner, MetadataService};
+use xtunes_metadata::{LibraryScan, LibraryScanner, MetadataService, ScannedTrack};
 use xtunes_playback::PlaybackService;
 use xtunes_settings::SettingsStore;
 
@@ -18,6 +23,7 @@ pub enum ApplicationRuntimeError {
     LibraryScanFailed,
     LibraryServicesUnavailable,
     LibraryStoreFailed,
+    BackgroundTaskRunning,
     PlaybackFailed,
     PlaybackServiceUnavailable,
     SettingsLoadFailed,
@@ -28,25 +34,65 @@ pub enum ApplicationRuntimeError {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LibraryScanSummary {
     pub scanned_tracks: usize,
+    pub added_tracks: usize,
+    pub updated_tracks: usize,
+    pub missing_tracks: usize,
     pub skipped_unsupported_files: usize,
     pub failed_files: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum BackgroundTaskStatus {
+    #[default]
+    Idle,
+    LibraryScanRunning,
+    LibraryScanCompleted(LibraryScanSummary),
+    LibraryScanFailed(ApplicationRuntimeError),
+}
+
+impl BackgroundTaskStatus {
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::LibraryScanRunning)
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NowPlaying {
     pub track: Option<Track>,
     pub state: PlaybackState,
+    pub options: PlaybackOptions,
+}
+
+pub struct LibraryScanTask {
+    library_path: PathBuf,
+    existing_tracks: Vec<Track>,
+    library_store: Arc<dyn LibraryStore>,
+    metadata_service: Arc<dyn MetadataService>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LibraryScanResult {
+    pub tracks: Vec<Track>,
+    pub summary: LibraryScanSummary,
 }
 
 pub struct ApplicationRuntime {
     settings: UserSettings,
     settings_store: Option<Box<dyn SettingsStore>>,
-    library_store: Option<Box<dyn LibraryStore>>,
-    metadata_service: Option<Box<dyn MetadataService>>,
+    library_store: Option<Arc<dyn LibraryStore>>,
+    metadata_service: Option<Arc<dyn MetadataService>>,
     playback_service: Option<Box<dyn PlaybackService>>,
+    playback_options: PlaybackOptions,
     library_tracks: Vec<Track>,
     last_scan_library_path: Option<PathBuf>,
     last_scan_summary: Option<LibraryScanSummary>,
+    background_task_status: BackgroundTaskStatus,
+}
+
+#[derive(Clone, Copy)]
+enum TrackStep {
+    Previous,
+    Next,
 }
 
 impl ApplicationRuntime {
@@ -57,9 +103,11 @@ impl ApplicationRuntime {
             library_store: None,
             metadata_service: None,
             playback_service: None,
+            playback_options: PlaybackOptions::default(),
             library_tracks: Vec::new(),
             last_scan_library_path: None,
             last_scan_summary: None,
+            background_task_status: BackgroundTaskStatus::Idle,
         }
     }
 
@@ -76,16 +124,18 @@ impl ApplicationRuntime {
             library_store: None,
             metadata_service: None,
             playback_service: None,
+            playback_options: PlaybackOptions::default(),
             library_tracks: Vec::new(),
             last_scan_library_path: None,
             last_scan_summary: None,
+            background_task_status: BackgroundTaskStatus::Idle,
         })
     }
 
     pub fn with_library_services(
         mut self,
-        library_store: Box<dyn LibraryStore>,
-        metadata_service: Box<dyn MetadataService>,
+        library_store: Arc<dyn LibraryStore>,
+        metadata_service: Arc<dyn MetadataService>,
     ) -> Self {
         self.library_tracks = library_store.tracks().unwrap_or_default();
         self.library_store = Some(library_store);
@@ -114,11 +164,19 @@ impl ApplicationRuntime {
         self.last_scan_summary.as_ref()
     }
 
+    pub fn background_task_status(&self) -> &BackgroundTaskStatus {
+        &self.background_task_status
+    }
+
     pub fn playback_state(&self) -> PlaybackState {
         self.playback_service
             .as_deref()
             .map(PlaybackService::state)
             .unwrap_or_default()
+    }
+
+    pub fn playback_options(&self) -> PlaybackOptions {
+        self.playback_options
     }
 
     pub fn now_playing(&self) -> NowPlaying {
@@ -131,7 +189,11 @@ impl ApplicationRuntime {
             })
             .cloned();
 
-        NowPlaying { track, state }
+        NowPlaying {
+            track,
+            state,
+            options: self.playback_options,
+        }
     }
 
     pub fn handle_command(&mut self, command: ApplicationCommand) -> ApplicationRuntimeResult<()> {
@@ -156,7 +218,22 @@ impl ApplicationRuntime {
         Ok(())
     }
 
-    fn handle_playback_command(&self, command: PlaybackCommand) -> ApplicationRuntimeResult<()> {
+    fn handle_playback_command(
+        &mut self,
+        command: PlaybackCommand,
+    ) -> ApplicationRuntimeResult<()> {
+        match command {
+            PlaybackCommand::ToggleShuffle => {
+                self.playback_options = self.playback_options.with_shuffle_toggled();
+                return Ok(());
+            }
+            PlaybackCommand::ToggleRepeat => {
+                self.playback_options = self.playback_options.with_repeat_toggled();
+                return Ok(());
+            }
+            _ => {}
+        }
+
         let playback_service = self
             .playback_service
             .as_deref()
@@ -164,17 +241,21 @@ impl ApplicationRuntime {
 
         match command {
             PlaybackCommand::PlayTrack(track_id) => {
-                let track = self
-                    .library_tracks
-                    .iter()
-                    .find(|track| track.id == track_id)
-                    .ok_or(ApplicationRuntimeError::TrackUnavailable)?;
-                playback_service
-                    .play_track(TrackPlaybackSource::new(
-                        track_id,
-                        track.location.path.clone(),
-                    ))
-                    .map_err(|_| ApplicationRuntimeError::PlaybackFailed)?;
+                self.play_track(playback_service, track_id)?;
+            }
+            PlaybackCommand::PlayPreviousTrack => {
+                if let Some(track_id) =
+                    self.adjacent_track_id(playback_service.state(), TrackStep::Previous)
+                {
+                    self.play_track(playback_service, track_id)?;
+                }
+            }
+            PlaybackCommand::PlayNextTrack => {
+                if let Some(track_id) =
+                    self.adjacent_track_id(playback_service.state(), TrackStep::Next)
+                {
+                    self.play_track(playback_service, track_id)?;
+                }
             }
             PlaybackCommand::Pause => {
                 playback_service
@@ -209,51 +290,249 @@ impl ApplicationRuntime {
                     .seek(position)
                     .map_err(|_| ApplicationRuntimeError::PlaybackFailed)?;
             }
+            PlaybackCommand::SetVolume(volume) => {
+                playback_service
+                    .set_volume(volume)
+                    .map_err(|_| ApplicationRuntimeError::PlaybackFailed)?;
+            }
+            PlaybackCommand::ToggleShuffle | PlaybackCommand::ToggleRepeat => {
+                unreachable!("playback option commands return before requiring a playback service")
+            }
         }
 
         Ok(())
     }
 
+    fn play_track(
+        &self,
+        playback_service: &dyn PlaybackService,
+        track_id: TrackId,
+    ) -> ApplicationRuntimeResult<()> {
+        let track = self
+            .library_tracks
+            .iter()
+            .find(|track| track.id == track_id && !track.location.is_missing())
+            .ok_or(ApplicationRuntimeError::TrackUnavailable)?;
+        playback_service
+            .play_track(TrackPlaybackSource::new(
+                track_id,
+                track.location.path.clone(),
+            ))
+            .map_err(|_| ApplicationRuntimeError::PlaybackFailed)
+    }
+
+    fn adjacent_track_id(&self, state: PlaybackState, step: TrackStep) -> Option<TrackId> {
+        let current_track_id = playback_track_id(&state)?;
+        let playable_tracks = self
+            .library_tracks
+            .iter()
+            .filter(|track| !track.location.is_missing())
+            .collect::<Vec<_>>();
+        let current_index = playable_tracks
+            .iter()
+            .position(|track| track.id == current_track_id)?;
+        let next_index = match step {
+            TrackStep::Previous => current_index.checked_sub(1)?,
+            TrackStep::Next => current_index.checked_add(1)?,
+        };
+
+        playable_tracks.get(next_index).map(|track| track.id)
+    }
+
     fn scan_library(&mut self, library_path: PathBuf) -> ApplicationRuntimeResult<()> {
-        self.last_scan_library_path = Some(library_path.clone());
+        let task = self.prepare_library_scan(library_path)?;
+        match run_library_scan_task(task) {
+            Ok(result) => {
+                self.apply_library_scan_result(result);
+                Ok(())
+            }
+            Err(error) => {
+                self.fail_library_scan(error.clone());
+                Err(error)
+            }
+        }
+    }
 
-        let metadata_service = self
-            .metadata_service
-            .as_deref()
-            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
-        let library_store = self
-            .library_store
-            .as_deref()
-            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
-        let scan = LibraryScanner::new(metadata_service)
-            .scan(&library_path)
-            .map_err(|_| ApplicationRuntimeError::LibraryScanFailed)?;
-
-        let mut tracks = Vec::with_capacity(scan.tracks.len());
-        for (index, scanned_track) in scan.tracks.into_iter().enumerate() {
-            let Some(track_id) = TrackId::new(index as i64 + 1) else {
-                return Err(ApplicationRuntimeError::LibraryStoreFailed);
-            };
-            let track = Track {
-                id: track_id,
-                location: TrackLocation::new(scanned_track.path),
-                metadata: scanned_track.metadata,
-                rating: scanned_track.rating,
-                statistics: PlayStatistics::default(),
-            };
-            library_store
-                .save_track(track.clone())
-                .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
-            tracks.push(track);
+    pub fn prepare_library_scan(
+        &mut self,
+        library_path: PathBuf,
+    ) -> ApplicationRuntimeResult<LibraryScanTask> {
+        if self.background_task_status.is_running() {
+            return Err(ApplicationRuntimeError::BackgroundTaskRunning);
         }
 
-        self.last_scan_summary = Some(LibraryScanSummary {
-            scanned_tracks: tracks.len(),
-            skipped_unsupported_files: scan.skipped_unsupported_files,
-            failed_files: scan.failures.len(),
-        });
-        self.library_tracks = tracks;
-        Ok(())
+        self.last_scan_library_path = Some(library_path.clone());
+        let library_store = self
+            .library_store
+            .clone()
+            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
+        let metadata_service = self
+            .metadata_service
+            .clone()
+            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
+
+        self.background_task_status = BackgroundTaskStatus::LibraryScanRunning;
+
+        Ok(LibraryScanTask {
+            library_path,
+            existing_tracks: self.library_tracks.clone(),
+            library_store,
+            metadata_service,
+        })
+    }
+
+    pub fn apply_library_scan_result(&mut self, result: LibraryScanResult) {
+        let summary = result.summary;
+        self.last_scan_summary = Some(summary.clone());
+        self.library_tracks = result.tracks;
+        self.background_task_status = BackgroundTaskStatus::LibraryScanCompleted(summary);
+    }
+
+    pub fn fail_library_scan(&mut self, error: ApplicationRuntimeError) {
+        self.background_task_status = BackgroundTaskStatus::LibraryScanFailed(error);
+    }
+}
+
+pub fn run_library_scan_task(task: LibraryScanTask) -> ApplicationRuntimeResult<LibraryScanResult> {
+    let scan = LibraryScanner::new(task.metadata_service.as_ref())
+        .scan(&task.library_path)
+        .map_err(|_| ApplicationRuntimeError::LibraryScanFailed)?;
+    let result = reconcile_library_scan(task.existing_tracks, scan)?;
+
+    for track in &result.tracks {
+        task.library_store
+            .save_track(track.clone())
+            .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
+    }
+
+    Ok(result)
+}
+
+fn reconcile_library_scan(
+    existing_tracks: Vec<Track>,
+    scan: LibraryScan,
+) -> ApplicationRuntimeResult<LibraryScanResult> {
+    let skipped_unsupported_files = scan.skipped_unsupported_files;
+    let failed_files = scan.failures.len();
+    let scanned_tracks = scan.tracks;
+    let mut tracks_by_path = tracks_by_path(existing_tracks.clone());
+    let mut scanned_paths = BTreeSet::new();
+    let mut tracks = Vec::new();
+    let mut next_track_id = next_track_id(&existing_tracks)?;
+    let mut added_tracks = 0;
+    let mut updated_tracks = 0;
+
+    let scanned_track_count = scanned_tracks.len();
+    for scanned_track in scanned_tracks {
+        scanned_paths.insert(scanned_track.path.clone());
+        let existing_track = tracks_by_path.remove(&scanned_track.path);
+        if existing_track.is_some() {
+            updated_tracks += 1;
+        } else {
+            added_tracks += 1;
+        }
+        let track = track_from_scanned_track(scanned_track, existing_track, &mut next_track_id)?;
+        tracks.push(track);
+    }
+
+    let mut missing_tracks = 0;
+    for track in existing_tracks
+        .into_iter()
+        .filter(|track| !scanned_paths.contains(&track.location.path))
+    {
+        let track = track_with_current_availability(track);
+        if track.location.is_missing() {
+            missing_tracks += 1;
+        }
+        tracks.push(track);
+    }
+
+    tracks.sort_by_key(|track| track.id);
+
+    Ok(LibraryScanResult {
+        summary: LibraryScanSummary {
+            scanned_tracks: scanned_track_count,
+            added_tracks,
+            updated_tracks,
+            missing_tracks,
+            skipped_unsupported_files,
+            failed_files,
+        },
+        tracks,
+    })
+}
+
+fn tracks_by_path(tracks: Vec<Track>) -> BTreeMap<PathBuf, Track> {
+    tracks
+        .into_iter()
+        .map(|track| (track.location.path.clone(), track))
+        .collect()
+}
+
+fn track_from_scanned_track(
+    scanned_track: ScannedTrack,
+    existing_track: Option<Track>,
+    next_track_id: &mut i64,
+) -> ApplicationRuntimeResult<Track> {
+    let (id, statistics) = match existing_track {
+        Some(track) => (track.id, track.statistics),
+        None => {
+            let Some(track_id) = TrackId::new(*next_track_id) else {
+                return Err(ApplicationRuntimeError::LibraryStoreFailed);
+            };
+            *next_track_id += 1;
+            (track_id, PlayStatistics::default())
+        }
+    };
+
+    Ok(Track {
+        id,
+        location: TrackLocation::new(scanned_track.path),
+        metadata: scanned_track.metadata,
+        rating: scanned_track.rating,
+        statistics,
+    })
+}
+
+fn track_with_current_availability(track: Track) -> Track {
+    let Track {
+        id,
+        location,
+        metadata,
+        rating,
+        statistics,
+    } = track;
+    let availability = if location.path.exists() {
+        TrackAvailability::Available
+    } else {
+        TrackAvailability::Missing
+    };
+
+    Track {
+        id,
+        location: match availability {
+            TrackAvailability::Available => TrackLocation::new(location.path),
+            TrackAvailability::Missing => TrackLocation::missing(location.path),
+        },
+        metadata,
+        rating,
+        statistics,
+    }
+}
+
+fn next_track_id(existing_tracks: &[Track]) -> ApplicationRuntimeResult<i64> {
+    let next_id = existing_tracks
+        .iter()
+        .map(|track| track.id.get())
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(ApplicationRuntimeError::LibraryStoreFailed)?;
+
+    if TrackId::new(next_id).is_some() {
+        Ok(next_id)
+    } else {
+        Err(ApplicationRuntimeError::LibraryStoreFailed)
     }
 }
 
@@ -276,19 +555,19 @@ impl Default for ApplicationRuntime {
 mod tests {
     use std::{
         path::{Path, PathBuf},
-        sync::{Mutex, MutexGuard},
+        sync::{Arc, Mutex, MutexGuard},
     };
 
     use xtunes_domain::{
-        ApplicationCommand, PlayStatistics, PlaybackCommand, PlaybackState, Playlist, PlaylistId,
-        Rating, Track, TrackId, TrackLocation, TrackMetadata, UserSettings,
+        ApplicationCommand, PlayStatistics, PlaybackCommand, PlaybackOptions, PlaybackState,
+        Playlist, PlaylistId, Rating, Track, TrackId, TrackLocation, TrackMetadata, UserSettings,
     };
     use xtunes_library_store::{InMemoryLibraryStore, LibraryStore, StoreResult};
     use xtunes_metadata::{MetadataChange, MetadataError, MetadataResult};
     use xtunes_playback::NullPlaybackService;
     use xtunes_settings::{SettingsError, SettingsResult, SettingsStore};
 
-    use super::{ApplicationRuntime, ApplicationRuntimeError, MetadataService};
+    use super::{ApplicationRuntime, ApplicationRuntimeError, LibraryScanSummary, MetadataService};
 
     #[test]
     fn runtime_starts_with_default_settings() {
@@ -338,8 +617,8 @@ mod tests {
         let track_path = root.join("track.mp3");
         std::fs::write(&track_path, b"not real audio").expect("write fake track");
 
-        let store = Box::new(InMemoryLibraryStore::new());
-        let metadata_service = Box::new(TestMetadataService);
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let metadata_service = Arc::new(TestMetadataService);
         let mut runtime = ApplicationRuntime::new().with_library_services(store, metadata_service);
 
         assert_eq!(
@@ -354,6 +633,82 @@ mod tests {
             runtime
                 .last_scan_summary()
                 .map(|summary| summary.scanned_tracks),
+            Some(1)
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
+    #[test]
+    fn runtime_scan_preserves_existing_track_identity_for_known_location() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+        let track_path = root.join("track.mp3");
+        std::fs::write(&track_path, b"not real audio").expect("write fake track");
+
+        let track_id = track_id(7);
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut existing_track = test_track(track_id, track_path.clone());
+        existing_track.statistics.play_count = 12;
+        assert_eq!(store.save_track(existing_track), Ok(()));
+
+        let metadata_service = Arc::new(TestMetadataService);
+        let mut runtime = ApplicationRuntime::new().with_library_services(store, metadata_service);
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::ScanLibrary {
+                library_path: root.clone()
+            }),
+            Ok(())
+        );
+
+        let tracks = runtime.library_tracks();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, track_id);
+        assert_eq!(tracks[0].statistics.play_count, 12);
+        assert_eq!(
+            runtime.last_scan_summary(),
+            Some(&LibraryScanSummary {
+                scanned_tracks: 1,
+                added_tracks: 0,
+                updated_tracks: 1,
+                missing_tracks: 0,
+                skipped_unsupported_files: 0,
+                failed_files: 0,
+            })
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
+    #[test]
+    fn runtime_scan_keeps_missing_tracks_visible() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+        let missing_path = root.join("missing.mp3");
+
+        let track_id = track_id(9);
+        let store = Arc::new(InMemoryLibraryStore::new());
+        assert_eq!(store.save_track(test_track(track_id, missing_path)), Ok(()));
+
+        let metadata_service = Arc::new(TestMetadataService);
+        let mut runtime = ApplicationRuntime::new().with_library_services(store, metadata_service);
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::ScanLibrary {
+                library_path: root.clone()
+            }),
+            Ok(())
+        );
+
+        let tracks = runtime.library_tracks();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, track_id);
+        assert!(tracks[0].location.is_missing());
+        assert_eq!(
+            runtime
+                .last_scan_summary()
+                .map(|summary| summary.missing_tracks),
             Some(1)
         );
 
@@ -387,7 +742,7 @@ mod tests {
     #[test]
     fn runtime_plays_tracks_through_playback_service() {
         let track_id = positive_track_id();
-        let store = InMemoryLibraryStore::new();
+        let store = Arc::new(InMemoryLibraryStore::new());
         let track = Track {
             id: track_id,
             location: TrackLocation::new("/music/track.flac"),
@@ -398,7 +753,7 @@ mod tests {
         assert_eq!(store.save_track(track), Ok(()));
 
         let mut runtime = ApplicationRuntime::new()
-            .with_library_services(Box::new(store), Box::new(TestMetadataService))
+            .with_library_services(store, Arc::new(TestMetadataService))
             .with_playback_service(Box::new(NullPlaybackService::new()));
 
         assert_eq!(
@@ -417,6 +772,133 @@ mod tests {
         assert_eq!(
             runtime.now_playing().track.map(|track| track.id),
             Some(track_id)
+        );
+    }
+
+    #[test]
+    fn runtime_toggles_shuffle_without_playback_service() {
+        let mut runtime = ApplicationRuntime::new();
+
+        assert_eq!(runtime.playback_options(), PlaybackOptions::default());
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle)),
+            Ok(())
+        );
+
+        assert_eq!(
+            runtime.playback_options(),
+            PlaybackOptions {
+                shuffle_enabled: true,
+                repeat_enabled: false,
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_toggles_repeat_without_playback_service() {
+        let mut runtime = ApplicationRuntime::new();
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::ToggleRepeat)),
+            Ok(())
+        );
+
+        assert_eq!(
+            runtime.playback_options(),
+            PlaybackOptions {
+                shuffle_enabled: false,
+                repeat_enabled: true,
+            }
+        );
+    }
+
+    #[test]
+    fn now_playing_reports_playback_options() {
+        let mut runtime = ApplicationRuntime::new();
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle)),
+            Ok(())
+        );
+
+        assert_eq!(
+            runtime.now_playing().options,
+            PlaybackOptions {
+                shuffle_enabled: true,
+                repeat_enabled: false,
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_play_next_track_skips_missing_tracks() {
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let first_track = test_track(track_id(1), PathBuf::from("/music/first.flac"));
+        let mut missing_track = test_track(track_id(2), PathBuf::from("/music/missing.flac"));
+        missing_track.location = TrackLocation::missing("/music/missing.flac");
+        let third_track = test_track(track_id(3), PathBuf::from("/music/third.flac"));
+        assert_eq!(store.save_track(first_track), Ok(()));
+        assert_eq!(store.save_track(missing_track), Ok(()));
+        assert_eq!(store.save_track(third_track), Ok(()));
+
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .with_playback_service(Box::new(NullPlaybackService::new()));
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
+                track_id(1)
+            ))),
+            Ok(())
+        );
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayNextTrack)),
+            Ok(())
+        );
+
+        assert_eq!(
+            runtime.playback_state(),
+            PlaybackState::Playing {
+                track_id: track_id(3),
+                position: std::time::Duration::ZERO,
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_play_previous_track_skips_missing_tracks() {
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let first_track = test_track(track_id(1), PathBuf::from("/music/first.flac"));
+        let mut missing_track = test_track(track_id(2), PathBuf::from("/music/missing.flac"));
+        missing_track.location = TrackLocation::missing("/music/missing.flac");
+        let third_track = test_track(track_id(3), PathBuf::from("/music/third.flac"));
+        assert_eq!(store.save_track(first_track), Ok(()));
+        assert_eq!(store.save_track(missing_track), Ok(()));
+        assert_eq!(store.save_track(third_track), Ok(()));
+
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .with_playback_service(Box::new(NullPlaybackService::new()));
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
+                track_id(3)
+            ))),
+            Ok(())
+        );
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(
+                PlaybackCommand::PlayPreviousTrack
+            )),
+            Ok(())
+        );
+
+        assert_eq!(
+            runtime.playback_state(),
+            PlaybackState::Playing {
+                track_id: track_id(1),
+                position: std::time::Duration::ZERO,
+            }
         );
     }
 
@@ -483,9 +965,23 @@ mod tests {
     }
 
     fn positive_track_id() -> TrackId {
-        match TrackId::new(1) {
+        track_id(1)
+    }
+
+    fn track_id(value: i64) -> TrackId {
+        match TrackId::new(value) {
             Some(track_id) => track_id,
             None => unreachable!("hard-coded positive track id should be valid"),
+        }
+    }
+
+    fn test_track(track_id: TrackId, path: PathBuf) -> Track {
+        Track {
+            id: track_id,
+            location: TrackLocation::new(path),
+            metadata: TrackMetadata::default(),
+            rating: Rating::unrated(),
+            statistics: PlayStatistics::default(),
         }
     }
 

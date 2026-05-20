@@ -1,6 +1,9 @@
 /target/
 /.cache/
 /screenshots/
-
+/test-library/
+.agents/
+.claude/
+.codex/
 *.swp
 *~

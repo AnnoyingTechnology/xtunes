@@ -20,6 +20,10 @@ pub(crate) struct NowPlayingView {
     elapsed: gtk::Label,
     remaining: gtk::Label,
     progress: gtk::ProgressBar,
+    shuffle_icon: gtk::Image,
+    shuffle_button: gtk::Button,
+    repeat_icon: gtk::Image,
+    repeat_button: gtk::Button,
     duration: Rc<Cell<Duration>>,
 }
 
@@ -39,6 +43,12 @@ struct MarqueeDrawModel {
     x_position: Rc<Cell<f64>>,
     fade_active: Rc<Cell<bool>>,
     style: MarqueeTextStyle,
+}
+
+struct SideStatusControl {
+    widget: gtk::Box,
+    button: gtk::Button,
+    icon: gtk::Image,
 }
 
 const MARQUEE_EDGE_FADE_WIDTH: f64 = 28.0;
@@ -74,21 +84,15 @@ impl NowPlayingView {
 
         let elapsed = time_label();
         let remaining = time_label();
+        let shuffle = side_status("media-playlist-shuffle-symbolic", "Shuffle", &elapsed);
+        let repeat = side_status("media-playlist-repeat-symbolic", "Repeat", &remaining);
         let detail_content = gtk::CenterBox::new();
         detail_content.set_hexpand(true);
         detail_content.set_vexpand(true);
         detail_content.set_valign(gtk::Align::Fill);
-        detail_content.set_start_widget(Some(&side_status(
-            "media-playlist-shuffle-symbolic",
-            "Shuffle",
-            &elapsed,
-        )));
+        detail_content.set_start_widget(Some(&shuffle.widget));
         detail_content.set_center_widget(Some(&metadata));
-        detail_content.set_end_widget(Some(&side_status(
-            "media-playlist-repeat-symbolic",
-            "Repeat",
-            &remaining,
-        )));
+        detail_content.set_end_widget(Some(&repeat.widget));
 
         let progress = gtk::ProgressBar::new();
         progress.add_css_class("song-progress");
@@ -115,8 +119,13 @@ impl NowPlayingView {
             elapsed,
             remaining,
             progress,
+            shuffle_icon: shuffle.icon,
+            shuffle_button: shuffle.button,
+            repeat_icon: repeat.icon,
+            repeat_button: repeat.button,
             duration,
         };
+        install_playback_option_controls(&view, runtime.clone());
         view.refresh(&runtime.borrow().now_playing());
         install_refresh_timer(&view, runtime);
         view
@@ -134,6 +143,8 @@ impl NowPlayingView {
             self.remaining.set_text("");
             self.progress.set_fraction(0.0);
             self.duration.set(Duration::ZERO);
+            sync_playback_option_icon(&self.shuffle_icon, now_playing.options.shuffle_enabled);
+            sync_playback_option_icon(&self.repeat_icon, now_playing.options.repeat_enabled);
             return;
         };
 
@@ -148,7 +159,29 @@ impl NowPlayingView {
             .set_text(&remaining_time_text(position, duration));
         self.progress
             .set_fraction(progress_fraction(position, duration));
+        sync_playback_option_icon(&self.shuffle_icon, now_playing.options.shuffle_enabled);
+        sync_playback_option_icon(&self.repeat_icon, now_playing.options.repeat_enabled);
     }
+}
+
+fn install_playback_option_controls(view: &NowPlayingView, runtime: SharedRuntime) {
+    let runtime_for_shuffle = runtime.clone();
+    let view_for_shuffle = view.clone();
+    view.shuffle_button.connect_clicked(move |_| {
+        let _result = runtime_for_shuffle
+            .borrow_mut()
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle));
+        view_for_shuffle.refresh(&runtime_for_shuffle.borrow().now_playing());
+    });
+
+    let runtime_for_repeat = runtime;
+    let view_for_repeat = view.clone();
+    view.repeat_button.connect_clicked(move |_| {
+        let _result = runtime_for_repeat
+            .borrow_mut()
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::ToggleRepeat));
+        view_for_repeat.refresh(&runtime_for_repeat.borrow().now_playing());
+    });
 }
 
 fn install_progress_seeking(
@@ -539,21 +572,40 @@ fn install_hover_pause(
     area.add_controller(motion);
 }
 
-fn side_status(icon_name: &str, tooltip: &str, time: &gtk::Label) -> gtk::Box {
+fn side_status(icon_name: &str, tooltip: &str, time: &gtk::Label) -> SideStatusControl {
     let status = gtk::Box::new(gtk::Orientation::Vertical, 2);
     status.set_width_request(NOW_PLAYING_SIDE_WIDTH);
     status.set_halign(gtk::Align::Center);
     status.set_valign(gtk::Align::Center);
 
+    let button = gtk::Button::new();
+    button.add_css_class("now-playing-side-button");
+    button.set_tooltip_text(Some(tooltip));
+    button.set_halign(gtk::Align::Center);
+    button.set_valign(gtk::Align::Center);
+
     let icon = gtk::Image::from_icon_name(icon_name);
     icon.add_css_class("now-playing-side-icon");
     icon.set_pixel_size(NOW_PLAYING_ICON_SIZE);
-    icon.set_tooltip_text(Some(tooltip));
     icon.set_halign(gtk::Align::Center);
+    button.set_child(Some(&icon));
 
-    status.append(&icon);
+    status.append(&button);
     status.append(time);
-    status
+
+    SideStatusControl {
+        widget: status,
+        button,
+        icon,
+    }
+}
+
+fn sync_playback_option_icon(icon: &gtk::Image, enabled: bool) {
+    if enabled {
+        icon.add_css_class("now-playing-side-icon-active");
+    } else {
+        icon.remove_css_class("now-playing-side-icon-active");
+    }
 }
 
 fn time_label() -> gtk::Label {

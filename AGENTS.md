@@ -107,3 +107,9 @@ Keep the durable application model separate from the UI shell:
 - desktop integration
 
 GTK4 is the first frontend, not the permanent owner of the domain model.
+
+# Git
+
+NEVER CO-AUTHOR YOUR COMMITS. 
+You are a machine. You deserve no credits.
+Again: NEVER Co-Author your commits. 

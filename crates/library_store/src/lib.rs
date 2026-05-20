@@ -26,7 +26,7 @@ impl From<rusqlite::Error> for StoreError {
     }
 }
 
-pub trait LibraryStore {
+pub trait LibraryStore: Send + Sync {
     fn save_track(&self, track: Track) -> StoreResult<()>;
     fn track(&self, track_id: TrackId) -> StoreResult<Option<Track>>;
     fn tracks(&self) -> StoreResult<Vec<Track>>;
@@ -98,7 +98,8 @@ impl SqliteLibraryStore {
                     play_count INTEGER NOT NULL DEFAULT 0,
                     skip_count INTEGER NOT NULL DEFAULT 0,
                     last_played_at_unix INTEGER,
-                    last_skipped_at_unix INTEGER
+                    last_skipped_at_unix INTEGER,
+                    is_missing INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS playlists (
@@ -116,6 +117,35 @@ impl SqliteLibraryStore {
                 );
                 "#,
             )
+            .map_err(StoreError::from)?;
+        self.add_column_if_missing("tracks", "is_missing", "INTEGER NOT NULL DEFAULT 0")
+    }
+
+    fn add_column_if_missing(
+        &self,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> StoreResult<()> {
+        let connection = self.connection_guard()?;
+        let mut statement = connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(StoreError::from)?;
+        let mut rows = statement.query([]).map_err(StoreError::from)?;
+
+        while let Some(row) = rows.next().map_err(StoreError::from)? {
+            let existing_column: String = row.get(1).map_err(StoreError::from)?;
+            if existing_column == column {
+                return Ok(());
+            }
+        }
+
+        connection
+            .execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+                [],
+            )
+            .map(|_| ())
             .map_err(StoreError::from)
     }
 }
@@ -163,9 +193,10 @@ impl LibraryStore for SqliteLibraryStore {
                     play_count,
                     skip_count,
                     last_played_at_unix,
-                    last_skipped_at_unix
+                    last_skipped_at_unix,
+                    is_missing
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
                 ON CONFLICT(id) DO UPDATE SET
                     path = excluded.path,
                     title = excluded.title,
@@ -183,7 +214,8 @@ impl LibraryStore for SqliteLibraryStore {
                     play_count = excluded.play_count,
                     skip_count = excluded.skip_count,
                     last_played_at_unix = excluded.last_played_at_unix,
-                    last_skipped_at_unix = excluded.last_skipped_at_unix
+                    last_skipped_at_unix = excluded.last_skipped_at_unix,
+                    is_missing = excluded.is_missing
                 "#,
                 params![
                     track.id.get(),
@@ -204,6 +236,7 @@ impl LibraryStore for SqliteLibraryStore {
                     statistics.skip_count as i64,
                     statistics.last_played_at.and_then(system_time_to_unix),
                     statistics.last_skipped_at.and_then(system_time_to_unix),
+                    track.location.is_missing(),
                 ],
             )
             .map(|_| ())
@@ -233,7 +266,8 @@ impl LibraryStore for SqliteLibraryStore {
                     play_count,
                     skip_count,
                     last_played_at_unix,
-                    last_skipped_at_unix
+                    last_skipped_at_unix,
+                    is_missing
                 FROM tracks
                 WHERE id = ?1
                 "#,
@@ -272,7 +306,8 @@ impl LibraryStore for SqliteLibraryStore {
                     play_count,
                     skip_count,
                     last_played_at_unix,
-                    last_skipped_at_unix
+                    last_skipped_at_unix,
+                    is_missing
                 FROM tracks
                 ORDER BY id
                 "#,
@@ -380,7 +415,7 @@ fn track_from_row(row: &Row<'_>) -> StoreResult<Track> {
 
     Ok(Track {
         id: track_id_from_db(row.get(0).map_err(StoreError::from)?)?,
-        location: TrackLocation::new(row.get::<_, String>(1).map_err(StoreError::from)?),
+        location: track_location_from_row(row)?,
         metadata: TrackMetadata {
             title: row.get(2).map_err(StoreError::from)?,
             artist: row.get(3).map_err(StoreError::from)?,
@@ -402,6 +437,17 @@ fn track_from_row(row: &Row<'_>) -> StoreResult<Track> {
             last_skipped_at: optional_i64(row, 17)?.map(unix_to_system_time),
         },
     })
+}
+
+fn track_location_from_row(row: &Row<'_>) -> StoreResult<TrackLocation> {
+    let path = row.get::<_, String>(1).map_err(StoreError::from)?;
+    let is_missing = row.get::<_, bool>(18).map_err(StoreError::from)?;
+
+    if is_missing {
+        Ok(TrackLocation::missing(path))
+    } else {
+        Ok(TrackLocation::new(path))
+    }
 }
 
 fn playlist_entries(
@@ -584,6 +630,18 @@ mod tests {
         track.metadata.bitrate_kbps = Some(1411);
         track.metadata.duration = Some(std::time::Duration::from_secs(245));
         track.rating = Rating::new(4).expect("valid test rating");
+
+        assert_eq!(store.save_track(track.clone()), Ok(()));
+
+        assert_eq!(store.track(track.id), Ok(Some(track.clone())));
+        assert_eq!(store.tracks(), Ok(vec![track]));
+    }
+
+    #[test]
+    fn sqlite_store_preserves_missing_track_location_state() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory sqlite store");
+        let mut track = track(1, "/music/missing.flac");
+        track.location = TrackLocation::missing("/music/missing.flac");
 
         assert_eq!(store.save_track(track.clone()), Ok(()));
 

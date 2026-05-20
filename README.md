@@ -1,6 +1,8 @@
 # xTunes
 
-![xTunes interface screenshot](screenshot.png)
+![xTunes interface screenshot dark](screenshot-dark.png)
+
+![xTunes interface screenshot dark](screenshot-light.png)
 
 Open xTunes is a Linux music player for local music libraries.
 

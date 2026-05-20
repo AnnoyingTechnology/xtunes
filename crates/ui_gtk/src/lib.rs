@@ -1,12 +1,18 @@
 #![forbid(unsafe_code)]
 
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
+use accent::install_accent_css;
 use gtk::gdk::prelude::ToplevelExt;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
+use library_scan::{LibraryScanRequestedCallback, library_scan_requested_callback};
 use now_playing::NowPlayingView;
 use preferences::{install_preferences_action, settings_button};
+use status_bar::StatusBar;
 use track_table::{
     TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table, mock_library_tracks,
     mock_playlist_tracks,
@@ -14,12 +20,16 @@ use track_table::{
 
 pub use xtunes_app_runtime::{
     ApplicationCommand, ApplicationQuery, ApplicationRuntime, ApplicationRuntimeError,
-    LibraryScanSummary, UserSettings,
+    BackgroundTaskStatus, LibraryScanResult, LibraryScanSummary, UserSettings,
+    run_library_scan_task,
 };
-use xtunes_app_runtime::{PlaybackCommand, TrackId};
+use xtunes_app_runtime::{PlaybackCommand, TrackId, VolumePercent};
 
+mod accent;
+mod library_scan;
 mod now_playing;
 mod preferences;
+mod status_bar;
 mod track_table;
 
 const TITLEBAR_HEIGHT: i32 = 72;
@@ -42,7 +52,10 @@ const SIDEBAR_MIN_WIDTH: i32 = 150;
 const SIDEBAR_MAX_WIDTH: i32 = 300;
 const STATUS_BAR_HEIGHT: i32 = 28;
 const VOLUME_WIDTH: i32 = 192;
+const DEFAULT_VOLUME_PERCENT: u8 = 80;
+const VOLUME_MAGNET_THRESHOLD: f64 = 0.90;
 const WINDOW_SHADOW_MARGIN: i32 = 14;
+const APP_ID: &str = "io.github.open_xtunes.xtunes";
 const SONGS_VIEW: &str = "songs";
 const ALBUMS_VIEW: &str = "albums";
 const PLAYLISTS_VIEW: &str = "playlists";
@@ -58,9 +71,18 @@ enum MainViewMode {
     Playlists,
 }
 
+struct Titlebar {
+    widget: gtk::WindowHandle,
+    previous: gtk::Button,
+    play_pause: gtk::Button,
+    play_pause_icon: gtk::Image,
+    next: gtk::Button,
+    volume: gtk::Scale,
+}
+
 pub fn run(runtime: ApplicationRuntime) {
     let app = gtk::Application::builder()
-        .application_id("io.github.AnnoyingTechnology.xtunes")
+        .application_id(APP_ID)
         .build();
     let runtime = Rc::new(RefCell::new(runtime));
 
@@ -82,10 +104,22 @@ fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::App
         .build();
     window.add_css_class("app-window");
     window.set_resizable(true);
+    install_app_icon();
+    window.set_icon_name(Some(APP_ID));
     install_app_css();
+    install_accent_css();
+
+    let songs_table_holder: Rc<RefCell<Option<TrackTable>>> = Rc::new(RefCell::new(None));
 
     let now_playing = NowPlayingView::new(runtime.clone());
-    let playback_changed = playback_changed_callback(&runtime, &now_playing);
+    let titlebar = build_titlebar(now_playing.widget());
+    let playback_changed = playback_changed_callback(
+        &runtime,
+        &now_playing,
+        &titlebar,
+        songs_table_holder.clone(),
+    );
+    connect_titlebar_playback_controls(&titlebar, runtime.clone(), playback_changed.clone());
     install_keyboard_shortcuts(&window, runtime.clone(), playback_changed.clone());
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -98,12 +132,16 @@ fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::App
     sidebar.set_visible(false);
 
     let library_tracks = initial_library_table_rows(&runtime.borrow());
-    let track_activated = track_activated_callback(&runtime, playback_changed);
+    let track_activated = track_activated_callback(&runtime, playback_changed.clone());
     let songs_table = build_track_table(library_tracks.clone(), Some(track_activated.clone()));
+    songs_table_holder.replace(Some(songs_table.clone()));
+    playback_changed();
     let content_stack = build_content_stack(songs_table.widget(), &library_tracks, track_activated);
-    let (status_bar, status_summary) = build_status_bar(&library_tracks);
-    let library_changed = library_changed_callback(&runtime, &songs_table, &status_summary);
-    install_preferences_action(app, &window, runtime.clone(), library_changed.clone());
+    let status_bar = StatusBar::new(&library_tracks);
+    let library_changed = library_changed_callback(&runtime, &songs_table, &status_bar);
+    let scan_requested =
+        library_scan_requested_callback(&runtime, library_changed.clone(), &status_bar);
+    install_preferences_action(app, &window, runtime.clone(), scan_requested.clone());
 
     let main_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     main_content.set_hexpand(true);
@@ -113,15 +151,15 @@ fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::App
         &sidebar,
         &content_stack,
         runtime.clone(),
-        library_changed,
+        scan_requested,
     ));
     main_content.append(&content_stack);
 
     let content_area = build_content_area(&sidebar, &main_content);
 
-    root.append(&build_titlebar(now_playing.widget()));
+    root.append(&titlebar.widget);
     root.append(&content_area);
-    root.append(&status_bar);
+    root.append(&status_bar.widget());
 
     let window_frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
     window_frame.add_css_class("csd");
@@ -141,16 +179,16 @@ fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::App
 fn library_changed_callback(
     runtime: &SharedRuntime,
     songs_table: &TrackTable,
-    status_summary: &gtk::Label,
+    status_bar: &StatusBar,
 ) -> LibraryChangedCallback {
     let runtime = runtime.clone();
     let songs_table = songs_table.clone();
-    let status_summary = status_summary.clone();
+    let status_bar = status_bar.clone();
 
     Rc::new(move || {
         let rows = runtime_library_table_rows(&runtime.borrow());
         songs_table.replace_rows(rows.clone());
-        update_status_summary(&status_summary, &rows);
+        status_bar.update_summary(&rows);
     })
 }
 
@@ -174,12 +212,21 @@ fn runtime_library_table_rows(runtime: &ApplicationRuntime) -> Vec<TrackTableRow
 fn playback_changed_callback(
     runtime: &SharedRuntime,
     now_playing: &NowPlayingView,
+    titlebar: &Titlebar,
+    songs_table_holder: Rc<RefCell<Option<TrackTable>>>,
 ) -> PlaybackChangedCallback {
     let runtime = runtime.clone();
     let now_playing = now_playing.clone();
+    let play_pause_icon = titlebar.play_pause_icon.clone();
 
     Rc::new(move || {
-        now_playing.refresh(&runtime.borrow().now_playing());
+        let now_playing_state = runtime.borrow().now_playing();
+        sync_play_pause_icon(&play_pause_icon, &now_playing_state.state);
+        let playing_track_id = now_playing_state.track.as_ref().map(|track| track.id);
+        if let Some(songs_table) = songs_table_holder.borrow().as_ref() {
+            songs_table.set_playing_track_id(playing_track_id);
+        }
+        now_playing.refresh(&now_playing_state);
     })
 }
 
@@ -296,6 +343,20 @@ fn clamp_sidebar_width(content_area: &gtk::Paned) {
     }
 }
 
+fn install_app_icon() {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    let theme = gtk::IconTheme::for_display(&display);
+
+    // During development (cargo run), icons live under data/icons in the project tree.
+    // At compile time, CARGO_MANIFEST_DIR points to crates/ui_gtk/.
+    let dev_icons = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/icons");
+    if dev_icons.exists() {
+        theme.add_search_path(dev_icons);
+    }
+}
+
 fn install_app_css() {
     let provider = gtk::CssProvider::new();
     provider.load_from_data(
@@ -368,6 +429,29 @@ fn install_app_css() {
             opacity: 0.64;
         }
 
+        button.now-playing-side-button {
+            background: transparent;
+            border: none;
+            border-radius: 999px;
+            box-shadow: none;
+            color: alpha(@theme_fg_color, 0.64);
+            min-height: 20px;
+            min-width: 20px;
+            padding: 0;
+        }
+
+        button.now-playing-side-button:hover,
+        button.now-playing-side-button:active,
+        button.now-playing-side-button:focus {
+            background: transparent;
+            border: none;
+            box-shadow: none;
+        }
+
+        .now-playing-side-icon-active {
+            opacity: 1;
+        }
+
         .song-progress trough {
             background-color: alpha(@theme_fg_color, 0.18);
             border: none;
@@ -401,6 +485,10 @@ fn install_app_css() {
             background-color: @theme_bg_color;
             border: none;
             box-shadow: none;
+        }
+
+        .volume-icon {
+            opacity: 0.62;
         }
 
         .settings-button {
@@ -476,6 +564,17 @@ fn install_app_css() {
 
         .status-bar {
             border-top: 1px solid alpha(@theme_fg_color, 0.08);
+        }
+
+        .task-status {
+            color: alpha(@theme_fg_color, 0.58);
+            font-size: 0.9em;
+            margin-right: 10px;
+        }
+
+        .task-status-spinner {
+            min-height: 14px;
+            min-width: 14px;
         }
 
         .playlist-sidebar {
@@ -558,6 +657,11 @@ fn install_app_css() {
             color: @theme_selected_fg_color;
         }
 
+        .track-table-cell.track-table-row-selected {
+            background-color: @theme_selected_bg_color;
+            color: @theme_selected_fg_color;
+        }
+
         .rating-stars {
             min-height: 28px;
         }
@@ -593,6 +697,19 @@ fn install_app_css() {
 
         button.rating-star-empty {
             color: alpha(@theme_fg_color, 0.35);
+        }
+
+        .track-table-status-icon {
+            opacity: 1;
+        }
+
+        .track-table-status-missing {
+            color: #e66100;
+        }
+
+        columnview.track-table listview row:selected .track-table-status-missing,
+        .track-table-cell.track-table-row-selected .track-table-status-missing {
+            color: @theme_selected_fg_color;
         }
         "#,
     );
@@ -722,14 +839,16 @@ fn resize_handle(
     handle
 }
 
-fn build_titlebar(now_playing: gtk::Box) -> gtk::WindowHandle {
+fn build_titlebar(now_playing: gtk::Box) -> Titlebar {
     let topbar = gtk::CenterBox::new();
     topbar.add_css_class("titlebar");
     topbar.set_hexpand(true);
     topbar.set_height_request(TITLEBAR_HEIGHT);
 
     let previous = media_icon_button("media-skip-backward-symbolic", "Previous");
-    let play_pause = media_icon_button("media-playback-start-symbolic", "Play");
+    let play_pause_icon = gtk::Image::from_icon_name("media-playback-start-symbolic");
+    play_pause_icon.set_pixel_size(MEDIA_ICON_SIZE);
+    let play_pause = media_icon_button_from_image(&play_pause_icon, "Play/Pause");
     let next = media_icon_button("media-skip-forward-symbolic", "Next");
     set_titlebar_control_height(&previous);
     set_titlebar_control_height(&play_pause);
@@ -737,11 +856,20 @@ fn build_titlebar(now_playing: gtk::Box) -> gtk::WindowHandle {
 
     let volume = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.01);
     volume.add_css_class("volume-slider");
-    volume.set_value(0.8);
+    volume.set_value(VolumePercent::from_clamped(DEFAULT_VOLUME_PERCENT).as_scalar());
     volume.set_width_request(VOLUME_WIDTH);
     volume.set_height_request(TITLEBAR_CONTROL_HEIGHT);
     volume.set_draw_value(false);
     volume.set_tooltip_text(Some("Volume"));
+
+    let low_volume_icon = volume_icon("audio-volume-low-symbolic", "Low volume");
+    let high_volume_icon = volume_icon("audio-volume-high-symbolic", "High volume");
+
+    let volume_controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    volume_controls.set_valign(gtk::Align::Center);
+    volume_controls.append(&low_volume_icon);
+    volume_controls.append(&volume);
+    volume_controls.append(&high_volume_icon);
 
     let search = gtk::SearchEntry::new();
     search.add_css_class("topbar-search");
@@ -758,7 +886,8 @@ fn build_titlebar(now_playing: gtk::Box) -> gtk::WindowHandle {
     left_controls.append(&previous);
     left_controls.append(&play_pause);
     left_controls.append(&next);
-    left_controls.append(&volume);
+    left_controls.append(&horizontal_spacer(TITLEBAR_LEFT_PADDING / 2));
+    left_controls.append(&volume_controls);
 
     let right_controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     right_controls.set_valign(gtk::Align::Center);
@@ -772,7 +901,81 @@ fn build_titlebar(now_playing: gtk::Box) -> gtk::WindowHandle {
 
     let handle = gtk::WindowHandle::new();
     handle.set_child(Some(&topbar));
-    handle
+    Titlebar {
+        widget: handle,
+        previous,
+        play_pause,
+        play_pause_icon,
+        next,
+        volume,
+    }
+}
+
+fn connect_titlebar_playback_controls(
+    titlebar: &Titlebar,
+    runtime: SharedRuntime,
+    playback_changed: PlaybackChangedCallback,
+) {
+    let runtime_for_previous = runtime.clone();
+    let playback_changed_for_previous = playback_changed.clone();
+    titlebar.previous.connect_clicked(move |_| {
+        let _result =
+            runtime_for_previous
+                .borrow_mut()
+                .handle_command(ApplicationCommand::Playback(
+                    PlaybackCommand::PlayPreviousTrack,
+                ));
+        playback_changed_for_previous();
+    });
+
+    let runtime_for_play_pause = runtime.clone();
+    let playback_changed_for_play_pause = playback_changed.clone();
+    titlebar.play_pause.connect_clicked(move |_| {
+        let _result =
+            runtime_for_play_pause
+                .borrow_mut()
+                .handle_command(ApplicationCommand::Playback(
+                    PlaybackCommand::TogglePlayPause,
+                ));
+        playback_changed_for_play_pause();
+    });
+
+    let runtime_for_next = runtime.clone();
+    let playback_changed_for_next = playback_changed.clone();
+    titlebar.next.connect_clicked(move |_| {
+        let _result = runtime_for_next
+            .borrow_mut()
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayNextTrack));
+        playback_changed_for_next();
+    });
+
+    let volume_syncing = Rc::new(Cell::new(false));
+    let runtime_for_volume = runtime.clone();
+    let volume_syncing_for_change = volume_syncing.clone();
+    titlebar.volume.connect_value_changed(move |volume| {
+        if volume_syncing_for_change.get() {
+            return;
+        }
+
+        let value = magnetized_volume_value(volume.value());
+        if (volume.value() - value).abs() > f64::EPSILON {
+            volume_syncing_for_change.set(true);
+            volume.set_value(value);
+            volume_syncing_for_change.set(false);
+        }
+
+        let _result = runtime_for_volume
+            .borrow_mut()
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::SetVolume(
+                VolumePercent::from_scalar(value),
+            )));
+    });
+
+    let _result = runtime
+        .borrow_mut()
+        .handle_command(ApplicationCommand::Playback(PlaybackCommand::SetVolume(
+            VolumePercent::from_clamped(DEFAULT_VOLUME_PERCENT),
+        )));
 }
 
 fn build_mode_bar(
@@ -780,7 +983,7 @@ fn build_mode_bar(
     sidebar: &gtk::Box,
     content_stack: &gtk::Stack,
     runtime: SharedRuntime,
-    library_changed: LibraryChangedCallback,
+    scan_requested: LibraryScanRequestedCallback,
 ) -> gtk::CenterBox {
     let mode_bar = gtk::CenterBox::new();
     mode_bar.add_css_class("mode-bar");
@@ -808,7 +1011,7 @@ fn build_mode_bar(
     mode_buttons.append(&playlists);
     mode_bar.set_center_widget(Some(&mode_buttons));
 
-    let settings = settings_button(window, runtime, library_changed);
+    let settings = settings_button(window, runtime, scan_requested);
     mode_bar.set_end_widget(Some(&settings));
     mode_bar
 }
@@ -855,13 +1058,51 @@ fn media_icon_button(icon_name: &str, tooltip: &str) -> gtk::Button {
     let icon = gtk::Image::from_icon_name(icon_name);
     icon.set_pixel_size(MEDIA_ICON_SIZE);
 
+    media_icon_button_from_image(&icon, tooltip)
+}
+
+fn media_icon_button_from_image(icon: &gtk::Image, tooltip: &str) -> gtk::Button {
     let button = gtk::Button::new();
-    button.set_child(Some(&icon));
+    button.set_child(Some(icon));
     button.set_tooltip_text(Some(tooltip));
     button.add_css_class("flat");
     button.add_css_class("media-control");
     set_titlebar_control_height(&button);
     button
+}
+
+fn volume_icon(icon_name: &str, tooltip: &str) -> gtk::Image {
+    let icon = gtk::Image::from_icon_name(icon_name);
+    icon.add_css_class("volume-icon");
+    icon.set_pixel_size(16);
+    icon.set_tooltip_text(Some(tooltip));
+    icon
+}
+
+fn sync_play_pause_icon(icon: &gtk::Image, state: &xtunes_app_runtime::PlaybackState) {
+    match state {
+        xtunes_app_runtime::PlaybackState::Playing { .. } => {
+            icon.set_icon_name(Some("media-playback-pause-symbolic"));
+        }
+        xtunes_app_runtime::PlaybackState::Paused { .. }
+        | xtunes_app_runtime::PlaybackState::Stopped
+        | xtunes_app_runtime::PlaybackState::Loading { .. } => {
+            icon.set_icon_name(Some("media-playback-start-symbolic"));
+        }
+    }
+}
+
+fn magnetized_volume_value(value: f64) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+
+    let value = value.clamp(0.0, 1.0);
+    if (VOLUME_MAGNET_THRESHOLD..1.0).contains(&value) {
+        1.0
+    } else {
+        value
+    }
 }
 
 fn set_titlebar_control_height(control: &gtk::Button) {
@@ -962,89 +1203,26 @@ fn build_album_area() -> gtk::ScrolledWindow {
     scroller
 }
 
-fn build_status_bar(library_tracks: &[TrackTableRow]) -> (gtk::CenterBox, gtk::Label) {
-    let status = gtk::CenterBox::new();
-    status.add_css_class("status-bar");
-    status.set_height_request(STATUS_BAR_HEIGHT);
-    status.set_hexpand(true);
-
-    let summary = gtk::Label::new(None);
-    summary.set_xalign(0.5);
-    update_status_summary(&summary, library_tracks);
-    status.set_center_widget(Some(&summary));
-
-    (status, summary)
-}
-
-fn update_status_summary(summary: &gtk::Label, library_tracks: &[TrackTableRow]) {
-    let duration_seconds = library_tracks
-        .iter()
-        .map(|track| track.duration_seconds)
-        .sum();
-    let size_bytes = library_tracks
-        .iter()
-        .map(|track| track.file_size_bytes)
-        .sum();
-
-    summary.set_text(&library_status_text(
-        library_tracks.len(),
-        duration_seconds,
-        size_bytes,
-    ));
-}
-
-fn library_status_text(track_count: usize, duration_seconds: u64, size_bytes: u64) -> String {
-    format!(
-        "{} {}, {}, {}",
-        track_count,
-        pluralize(track_count, "song", "songs"),
-        duration_text(duration_seconds),
-        file_size_text(size_bytes),
-    )
-}
-
-fn duration_text(duration_seconds: u64) -> String {
-    let hours = duration_seconds / 3_600;
-    if hours >= 24 {
-        let days = hours / 24;
-        format!("{} {}", days, pluralize(days as usize, "day", "days"))
-    } else {
-        format!("{} {}", hours, pluralize(hours as usize, "hour", "hours"))
-    }
-}
-
-fn file_size_text(size_bytes: u64) -> String {
-    const MB: u64 = 1_000_000;
-    const GB: u64 = 1_000_000_000;
-
-    if size_bytes >= GB {
-        format!("{} GB", size_bytes / GB)
-    } else {
-        format!("{} MB", size_bytes / MB)
-    }
-}
-
-fn pluralize(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
-    if count == 1 { singular } else { plural }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::magnetized_volume_value;
 
     #[test]
-    fn library_status_uses_hours_and_megabytes_for_small_libraries() {
-        assert_eq!(
-            library_status_text(2, 7_200, 250_000_000),
-            "2 songs, 2 hours, 250 MB"
-        );
+    fn volume_values_in_top_guard_range_snap_to_unity() {
+        assert_eq!(magnetized_volume_value(0.90), 1.0);
+        assert_eq!(magnetized_volume_value(0.95), 1.0);
+        assert_eq!(magnetized_volume_value(0.999), 1.0);
     }
 
     #[test]
-    fn library_status_uses_days_and_gigabytes_for_large_libraries() {
-        assert_eq!(
-            library_status_text(1, 172_800, 3_000_000_000),
-            "1 song, 2 days, 3 GB"
-        );
+    fn volume_values_below_guard_range_are_preserved() {
+        assert_eq!(magnetized_volume_value(0.899), 0.899);
+    }
+
+    #[test]
+    fn volume_values_are_clamped_to_slider_range() {
+        assert_eq!(magnetized_volume_value(-1.0), 0.0);
+        assert_eq!(magnetized_volume_value(2.0), 1.0);
+        assert_eq!(magnetized_volume_value(f64::NAN), 0.0);
     }
 }

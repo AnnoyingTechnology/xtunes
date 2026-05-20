@@ -33,7 +33,7 @@ pub enum MetadataError {
     ReadFailed,
 }
 
-pub trait MetadataService {
+pub trait MetadataService: Send + Sync {
     fn read_metadata(&self, path: &Path) -> MetadataResult<TrackMetadata>;
     fn write_metadata(&self, path: &Path, change: MetadataChange) -> MetadataResult<()>;
     fn read_rating(&self, path: &Path) -> MetadataResult<Option<Rating>>;
