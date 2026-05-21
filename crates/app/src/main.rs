@@ -12,10 +12,12 @@ fn main() {
         .unwrap_or_default();
 
     if let Ok(library_store) = xtunes_library_store::SqliteLibraryStore::open_default() {
-        runtime = runtime.with_library_services(
+        if let Err(error) = runtime.set_library_services(
             Arc::new(library_store),
             Arc::new(xtunes_metadata::LoftyMetadataService),
-        );
+        ) {
+            eprintln!("Failed to initialize xTunes library services: {error:?}");
+        }
     }
 
     if let Ok(playback_service) = xtunes_playback::GStreamerPlaybackService::new() {

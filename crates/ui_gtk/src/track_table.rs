@@ -135,14 +135,18 @@ const STATUS_ICON_PLAYING: &str = "audio-volume-high-symbolic";
 const STATUS_ICON_MISSING: &str = "dialog-warning-symbolic";
 
 impl TrackTableRow {
-    pub(crate) fn from_track(track: &Track) -> Self {
-        let file_metadata = std::fs::metadata(&track.location.path).ok();
+    pub(crate) fn from_track(track: &Track, library_root: Option<&Path>) -> Self {
+        let absolute_path =
+            library_root.map(|library_root| track.location.absolute_path(library_root));
+        let file_metadata = absolute_path
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok());
         let is_missing = track.location.is_missing() || file_metadata.is_none();
 
         Self {
             track_id: Some(track.id),
             track_name: non_empty_text(&track.metadata.title)
-                .or_else(|| file_stem_text(&track.location.path))
+                .or_else(|| file_stem_text(track.location.relative_path.as_path()))
                 .unwrap_or_default(),
             artist: non_empty_text(&track.metadata.artist).unwrap_or_default(),
             album: non_empty_text(&track.metadata.album).unwrap_or_default(),
@@ -150,7 +154,7 @@ impl TrackTableRow {
             year: track.metadata.year,
             bpm: None,
             bitrate_kbps: track.metadata.bitrate_kbps,
-            file_type: AudioFileType::from_path(&track.location.path),
+            file_type: AudioFileType::from_path(track.location.relative_path.as_path()),
             duration_seconds: track
                 .metadata
                 .duration
@@ -398,190 +402,6 @@ pub(crate) fn build_track_table(
         store,
         playing_track_id,
         status_bindings,
-    }
-}
-
-pub(crate) fn mock_library_tracks() -> Vec<TrackTableRow> {
-    vec![
-        mock_track(
-            "Midnight City",
-            "M83",
-            "Hurry Up, We're Dreaming",
-            "Electronic",
-            2011,
-            105,
-            911,
-            AudioFileType::Flac,
-            244,
-            5,
-            42,
-            "2026-05-14",
-            "2024-08-12",
-            2,
-            32_800_000,
-        ),
-        mock_track(
-            "Lisztomania",
-            "Phoenix",
-            "Wolfgang Amadeus Phoenix",
-            "Indie Rock",
-            2009,
-            150,
-            320,
-            AudioFileType::Mp3,
-            241,
-            5,
-            77,
-            "2026-05-11",
-            "2023-11-03",
-            1,
-            9_700_000,
-        ),
-        mock_track(
-            "Heartbeats",
-            "The Knife",
-            "Deep Cuts",
-            "Synthpop",
-            2003,
-            88,
-            256,
-            AudioFileType::M4a,
-            231,
-            4,
-            31,
-            "2026-04-29",
-            "2022-02-18",
-            4,
-            7_600_000,
-        ),
-        mock_track(
-            "Reckoner",
-            "Radiohead",
-            "In Rainbows",
-            "Alternative",
-            2007,
-            105,
-            833,
-            AudioFileType::Flac,
-            290,
-            5,
-            58,
-            "2026-05-08",
-            "2021-09-07",
-            7,
-            38_400_000,
-        ),
-        mock_track(
-            "Paper Planes",
-            "M.I.A.",
-            "Kala",
-            "Hip-Hop",
-            2007,
-            86,
-            320,
-            AudioFileType::Mp3,
-            204,
-            4,
-            49,
-            "2026-03-19",
-            "2020-12-21",
-            11,
-            8_300_000,
-        ),
-        mock_track(
-            "Intro",
-            "The xx",
-            "xx",
-            "Indie Pop",
-            2009,
-            100,
-            763,
-            AudioFileType::Ogg,
-            127,
-            4,
-            64,
-            "2026-05-01",
-            "2023-01-15",
-            1,
-            11_400_000,
-        ),
-        mock_track(
-            "Get Lucky",
-            "Daft Punk",
-            "Random Access Memories",
-            "Disco",
-            2013,
-            116,
-            921,
-            AudioFileType::Flac,
-            369,
-            5,
-            86,
-            "2026-05-15",
-            "2024-04-09",
-            8,
-            48_900_000,
-        ),
-        mock_track(
-            "Electric Feel",
-            "MGMT",
-            "Oracular Spectacular",
-            "Psychedelic Pop",
-            2007,
-            103,
-            320,
-            AudioFileType::Mp3,
-            229,
-            4,
-            35,
-            "2026-02-26",
-            "2022-10-30",
-            4,
-            9_200_000,
-        ),
-    ]
-}
-
-pub(crate) fn mock_playlist_tracks(library_tracks: &[TrackTableRow]) -> Vec<TrackTableRow> {
-    library_tracks.iter().take(5).cloned().collect()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn mock_track(
-    track_name: &str,
-    artist: &str,
-    album: &str,
-    genre: &str,
-    year: i32,
-    bpm: u16,
-    bitrate_kbps: u32,
-    file_type: AudioFileType,
-    duration_seconds: u64,
-    rating: u8,
-    plays: u64,
-    last_played: &str,
-    date_added: &str,
-    track_number: u32,
-    file_size_bytes: u64,
-) -> TrackTableRow {
-    TrackTableRow {
-        track_id: None,
-        track_name: track_name.to_owned(),
-        artist: artist.to_owned(),
-        album: album.to_owned(),
-        genre: genre.to_owned(),
-        year: Some(year),
-        bpm: Some(bpm),
-        bitrate_kbps: Some(bitrate_kbps),
-        file_type,
-        duration_seconds,
-        rating,
-        plays,
-        last_played: Some(last_played.to_owned()),
-        date_added: date_added.to_owned(),
-        track_number: Some(track_number),
-        file_size_bytes,
-        is_missing: false,
     }
 }
 

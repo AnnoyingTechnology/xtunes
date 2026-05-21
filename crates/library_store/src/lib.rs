@@ -9,7 +9,9 @@ use std::{
 
 use rusqlite::{Connection, Row, params};
 pub use xtunes_domain::{LibraryQuery, Playlist, PlaylistId, Rating, Track, TrackId};
-use xtunes_domain::{PlayStatistics, PlaylistEntry, TrackLocation, TrackMetadata};
+use xtunes_domain::{
+    PlayStatistics, PlaylistEntry, TrackLocation, TrackMetadata, TrackRelativePath,
+};
 
 pub type StoreResult<T> = Result<T, StoreError>;
 
@@ -17,6 +19,7 @@ pub type StoreResult<T> = Result<T, StoreError>;
 pub enum StoreError {
     Database(String),
     InvalidStoredId(i64),
+    InvalidStoredPath(String),
     StoreUnavailable,
 }
 
@@ -74,6 +77,10 @@ impl SqliteLibraryStore {
             .map_err(|_| StoreError::StoreUnavailable)
     }
 
+    // xTunes is in pre-release development: the SQLite schema is not yet stable.
+    // Schema changes are made by editing the CREATE TABLE statements below; any
+    // existing local database is expected to be wiped and rebuilt from a library
+    // re-scan, not migrated. Do not add migration code for in-development schemas.
     fn migrate(&self) -> StoreResult<()> {
         self.connection_guard()?
             .execute_batch(
@@ -82,7 +89,7 @@ impl SqliteLibraryStore {
 
                 CREATE TABLE IF NOT EXISTS tracks (
                     id INTEGER PRIMARY KEY,
-                    path TEXT NOT NULL UNIQUE,
+                    relative_path TEXT NOT NULL UNIQUE,
                     title TEXT,
                     artist TEXT,
                     album TEXT,
@@ -117,35 +124,6 @@ impl SqliteLibraryStore {
                 );
                 "#,
             )
-            .map_err(StoreError::from)?;
-        self.add_column_if_missing("tracks", "is_missing", "INTEGER NOT NULL DEFAULT 0")
-    }
-
-    fn add_column_if_missing(
-        &self,
-        table: &str,
-        column: &str,
-        definition: &str,
-    ) -> StoreResult<()> {
-        let connection = self.connection_guard()?;
-        let mut statement = connection
-            .prepare(&format!("PRAGMA table_info({table})"))
-            .map_err(StoreError::from)?;
-        let mut rows = statement.query([]).map_err(StoreError::from)?;
-
-        while let Some(row) = rows.next().map_err(StoreError::from)? {
-            let existing_column: String = row.get(1).map_err(StoreError::from)?;
-            if existing_column == column {
-                return Ok(());
-            }
-        }
-
-        connection
-            .execute(
-                &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
-                [],
-            )
-            .map(|_| ())
             .map_err(StoreError::from)
     }
 }
@@ -177,7 +155,7 @@ impl LibraryStore for SqliteLibraryStore {
                 r#"
                 INSERT INTO tracks (
                     id,
-                    path,
+                    relative_path,
                     title,
                     artist,
                     album,
@@ -198,7 +176,7 @@ impl LibraryStore for SqliteLibraryStore {
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
                 ON CONFLICT(id) DO UPDATE SET
-                    path = excluded.path,
+                    relative_path = excluded.relative_path,
                     title = excluded.title,
                     artist = excluded.artist,
                     album = excluded.album,
@@ -219,7 +197,7 @@ impl LibraryStore for SqliteLibraryStore {
                 "#,
                 params![
                     track.id.get(),
-                    track.location.path.to_string_lossy(),
+                    track.location.relative_path.as_path().to_string_lossy(),
                     metadata.title,
                     metadata.artist,
                     metadata.album,
@@ -250,7 +228,7 @@ impl LibraryStore for SqliteLibraryStore {
                 r#"
                 SELECT
                     id,
-                    path,
+                    relative_path,
                     title,
                     artist,
                     album,
@@ -290,7 +268,7 @@ impl LibraryStore for SqliteLibraryStore {
                 r#"
                 SELECT
                     id,
-                    path,
+                    relative_path,
                     title,
                     artist,
                     album,
@@ -442,11 +420,13 @@ fn track_from_row(row: &Row<'_>) -> StoreResult<Track> {
 fn track_location_from_row(row: &Row<'_>) -> StoreResult<TrackLocation> {
     let path = row.get::<_, String>(1).map_err(StoreError::from)?;
     let is_missing = row.get::<_, bool>(18).map_err(StoreError::from)?;
+    let relative_path =
+        TrackRelativePath::new(path.clone()).ok_or(StoreError::InvalidStoredPath(path))?;
 
     if is_missing {
-        Ok(TrackLocation::missing(path))
+        Ok(TrackLocation::missing(relative_path))
     } else {
-        Ok(TrackLocation::new(path))
+        Ok(TrackLocation::available(relative_path))
     }
 }
 
@@ -564,7 +544,8 @@ mod tests {
     use std::path::PathBuf;
 
     use xtunes_domain::{
-        PlayStatistics, PlaylistEntry, Rating, TrackLocation, TrackMetadata, TrackSort,
+        PlayStatistics, PlaylistEntry, Rating, TrackLocation, TrackMetadata, TrackRelativePath,
+        TrackSort,
     };
 
     use super::{
@@ -583,7 +564,7 @@ mod tests {
     #[test]
     fn in_memory_store_saves_and_loads_tracks() {
         let store = InMemoryLibraryStore::new();
-        let track = track(1, "/music/a.flac");
+        let track = track(1, "a.flac");
 
         assert_eq!(store.save_track(track.clone()), Ok(()));
 
@@ -594,8 +575,8 @@ mod tests {
     #[test]
     fn in_memory_store_replaces_tracks_by_id() {
         let store = InMemoryLibraryStore::new();
-        let first = track(1, "/music/old.flac");
-        let replacement = track(1, "/music/new.flac");
+        let first = track(1, "old.flac");
+        let replacement = track(1, "new.flac");
 
         assert_eq!(store.save_track(first), Ok(()));
         assert_eq!(store.save_track(replacement.clone()), Ok(()));
@@ -624,7 +605,7 @@ mod tests {
     #[test]
     fn sqlite_store_saves_and_loads_tracks() {
         let store = SqliteLibraryStore::open_in_memory().expect("open in-memory sqlite store");
-        let mut track = track(1, "/music/a.flac");
+        let mut track = track(1, "a.flac");
         track.metadata.title = Some("Track".to_owned());
         track.metadata.artist = Some("Artist".to_owned());
         track.metadata.bitrate_kbps = Some(1411);
@@ -640,8 +621,8 @@ mod tests {
     #[test]
     fn sqlite_store_preserves_missing_track_location_state() {
         let store = SqliteLibraryStore::open_in_memory().expect("open in-memory sqlite store");
-        let mut track = track(1, "/music/missing.flac");
-        track.location = TrackLocation::missing("/music/missing.flac");
+        let mut track = track(1, "missing.flac");
+        track.location = TrackLocation::missing(relative_path("missing.flac"));
 
         assert_eq!(store.save_track(track.clone()), Ok(()));
 
@@ -652,7 +633,7 @@ mod tests {
     #[test]
     fn sqlite_store_saves_and_loads_playlists() {
         let store = SqliteLibraryStore::open_in_memory().expect("open in-memory sqlite store");
-        let track = track(2, "/music/a.flac");
+        let track = track(2, "a.flac");
         let playlist = playlist(1, "Favorites", vec![entry(1, 2, 0)]);
 
         assert_eq!(store.save_track(track), Ok(()));
@@ -665,11 +646,15 @@ mod tests {
     fn track(id: i64, path: &str) -> Track {
         Track {
             id: track_id(id),
-            location: TrackLocation::new(PathBuf::from(path)),
+            location: TrackLocation::available(relative_path(path)),
             metadata: TrackMetadata::default(),
             rating: Rating::unrated(),
             statistics: PlayStatistics::default(),
         }
+    }
+
+    fn relative_path(path: &str) -> TrackRelativePath {
+        TrackRelativePath::new(PathBuf::from(path)).expect("test path is relative")
     }
 
     fn playlist(id: i64, name: &str, entries: Vec<PlaylistEntry>) -> Playlist {

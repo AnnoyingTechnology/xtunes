@@ -93,7 +93,14 @@ fn searchable_fields(track: &Track) -> Vec<String> {
     push_optional(&mut fields, &metadata.album_artist);
     push_optional(&mut fields, &metadata.composer);
     push_optional(&mut fields, &metadata.genre);
-    fields.push(track.location.path.to_string_lossy().into_owned());
+    fields.push(
+        track
+            .location
+            .relative_path
+            .as_path()
+            .to_string_lossy()
+            .into_owned(),
+    );
 
     fields
 }
@@ -112,7 +119,9 @@ fn normalize(value: &str) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use xtunes_domain::{PlayStatistics, Rating, TrackId, TrackLocation, TrackMetadata};
+    use xtunes_domain::{
+        PlayStatistics, Rating, TrackId, TrackLocation, TrackMetadata, TrackRelativePath,
+    };
 
     use super::{
         SearchError, filter_tracks_by_search_text, sort_tracks, track_matches_search_text,
@@ -140,7 +149,7 @@ mod tests {
         let mut track = track(1, "Untitled", "Unknown");
         track.metadata.album = Some("Mezzanine".to_owned());
         track.metadata.genre = Some("Trip Hop".to_owned());
-        track.location = TrackLocation::new(PathBuf::from("/music/Massive Attack/track.flac"));
+        track.location = track_location("Massive Attack/track.flac");
 
         assert!(track_matches_search_text(&track, "mezzanine"));
         assert!(track_matches_search_text(&track, "trip hop"));
@@ -222,7 +231,7 @@ mod tests {
     fn track(id: i64, title: &str, artist: &str) -> Track {
         Track {
             id: track_id(id),
-            location: TrackLocation::new(PathBuf::from(format!("/music/{title}.flac"))),
+            location: track_location(&format!("{title}.flac")),
             metadata: TrackMetadata {
                 title: Some(title.to_owned()),
                 artist: Some(artist.to_owned()),
@@ -245,5 +254,13 @@ mod tests {
             Some(rating) => rating,
             None => unreachable!("test helper only constructs valid ratings"),
         }
+    }
+
+    fn track_location(path: &str) -> TrackLocation {
+        TrackLocation::available(relative_path(path))
+    }
+
+    fn relative_path(path: &str) -> TrackRelativePath {
+        TrackRelativePath::new(PathBuf::from(path)).expect("test path is relative")
     }
 }

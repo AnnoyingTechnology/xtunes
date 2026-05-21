@@ -11,9 +11,9 @@ Open xTunes is a Linux music player for local music libraries.
 > Advent of solid LLM agents in late 2025 allowed me to get a substitute rolling.
 
 This player is not a true iTunes clone for three reasons :
-a) with each versions good aspects came and went, I'm cherry picking what I believe to be tasteful,
-b) lots of features that were added over time were pure bloat,
-c) not to infringe on intellectual property.
+- with each versions good aspects came and went, I'm cherry picking what I believe to be tasteful,
+- lots of features that were added over time were pure bloat,
+- not to infringe on intellectual property.
 
 This player is not designed by commity nor is it it's purpose. It's opinionated and autoritarian, as most of Apple's good products were.
 
@@ -26,7 +26,14 @@ SQLite. I'm striving for fast, safe and robust code.
 Features that will _probably_ come later :
 - Import from iTunes/Apple Music (.xml)
 - Import from Rhythmbox
+- Encode a CD
+- Convert a file to MP3 320 or Flac
 - Sync to Android
+
+## Key locations
+
+- Config: `~/.config/xtunes/settings.toml`
+- Database: `~/.local/share/xtunes/library.sqlite`
 
 ## Development
 
@@ -37,3 +44,8 @@ cargo run -p xtunes-app
 cargo test --workspace
 cargo clippy --workspace --all-targets
 ```
+
+### Sidenote
+
+A longtime friend who stayed on macOS told me iTunes (now Apple Music) had "lost the plot" and that he'd love a version without all the junk. He also mentioned the latest Apple Music puts the player at the bottom of the window. I didn't believe him, turns out it's true.
+Apple has lost its way, but 2010-era Apple nailed music playback. So there's probably room for a deshitified iTunes on macOS too. That could come at a later stage.

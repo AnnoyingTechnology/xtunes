@@ -8,7 +8,9 @@ use std::{
 use gtk::prelude::*;
 use gtk::{cairo, gdk, glib};
 
-use super::{NOW_PLAYING_ICON_SIZE, NOW_PLAYING_SIDE_WIDTH, SharedRuntime, TITLEBAR_HEIGHT};
+use super::{
+    APP_ID, NOW_PLAYING_ICON_SIZE, NOW_PLAYING_SIDE_WIDTH, SharedRuntime, TITLEBAR_HEIGHT,
+};
 use xtunes_app_runtime::{
     ApplicationCommand, NowPlaying, PlaybackCommand, PlaybackState, Track, TrackMetadata,
 };
@@ -17,6 +19,7 @@ use xtunes_app_runtime::{
 pub(crate) struct NowPlayingView {
     runtime: SharedRuntime,
     area: gtk::Box,
+    stack: gtk::Stack,
     title: MarqueeLabel,
     artist_album: MarqueeLabel,
     elapsed: gtk::Label,
@@ -55,6 +58,9 @@ struct SideStatusControl {
     icon: gtk::Image,
 }
 
+const EMPTY_STACK_NAME: &str = "no-track";
+const LOADED_STACK_NAME: &str = "loaded";
+const EMPTY_STATE_ICON_SIZE: i32 = 48;
 const MARQUEE_EDGE_FADE_WIDTH: f64 = 28.0;
 const MARQUEE_FRAME_MS: u64 = 33;
 const MARQUEE_HEIGHT: i32 = 19;
@@ -120,14 +126,31 @@ impl NowPlayingView {
 
         details.append(&detail_content);
         details.append(&progress);
-        area.append(&artwork);
-        area.append(&details);
+
+        let loaded_view = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        loaded_view.set_hexpand(true);
+        loaded_view.set_vexpand(true);
+        loaded_view.append(&artwork);
+        loaded_view.append(&details);
+
+        let empty_view = empty_state_view();
+
+        let stack = gtk::Stack::new();
+        stack.set_hexpand(true);
+        stack.set_vexpand(true);
+        stack.set_hhomogeneous(true);
+        stack.set_vhomogeneous(true);
+        stack.add_named(&empty_view, Some(EMPTY_STACK_NAME));
+        stack.add_named(&loaded_view, Some(LOADED_STACK_NAME));
+        stack.set_visible_child_name(EMPTY_STACK_NAME);
+        area.append(&stack);
 
         install_hover_pause(&area, &title, &artist_album, marquee_paused);
 
         let view = Self {
             runtime: runtime.clone(),
             area,
+            stack,
             title,
             artist_album,
             elapsed,
@@ -152,7 +175,7 @@ impl NowPlayingView {
     }
 
     fn sync_artwork(&self, track: Option<&Track>) {
-        let new_path = track.map(|track| track.location.path.clone());
+        let new_path = track.and_then(|track| self.runtime.borrow().absolute_track_path(track));
         {
             let current = self.artwork_path.borrow();
             if *current == new_path {
@@ -172,8 +195,7 @@ impl NowPlayingView {
                 self.artwork_image.set_visible(true);
             }
             None => {
-                self.artwork_image
-                    .set_paintable(None::<&gdk::Paintable>);
+                self.artwork_image.set_paintable(None::<&gdk::Paintable>);
                 self.artwork_image.set_visible(false);
             }
         }
@@ -183,6 +205,7 @@ impl NowPlayingView {
         self.sync_artwork(now_playing.track.as_ref());
 
         let Some(track) = &now_playing.track else {
+            self.stack.set_visible_child_name(EMPTY_STACK_NAME);
             self.title.set_text("");
             self.artist_album.set_text("");
             self.elapsed.set_text("");
@@ -193,6 +216,8 @@ impl NowPlayingView {
             sync_playback_option_icon(&self.repeat_icon, now_playing.options.repeat_enabled);
             return;
         };
+
+        self.stack.set_visible_child_name(LOADED_STACK_NAME);
 
         let duration = track.metadata.duration.unwrap_or_default();
         self.duration.set(duration);
@@ -360,13 +385,29 @@ fn install_refresh_timer(view: &NowPlayingView, runtime: SharedRuntime) {
 }
 
 fn metadata_box(title: &MarqueeLabel, artist_album: &MarqueeLabel) -> gtk::Box {
-    let metadata = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let metadata = gtk::Box::new(gtk::Orientation::Vertical, 0);
     metadata.set_halign(gtk::Align::Center);
     metadata.set_valign(gtk::Align::Center);
     metadata.set_hexpand(true);
     metadata.append(&title.widget());
     metadata.append(&artist_album.widget());
     metadata
+}
+
+fn empty_state_view() -> gtk::Box {
+    let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    container.set_hexpand(true);
+    container.set_vexpand(true);
+
+    let icon = gtk::Image::from_icon_name(APP_ID);
+    icon.add_css_class("now-playing-empty-icon");
+    icon.set_pixel_size(EMPTY_STATE_ICON_SIZE);
+    icon.set_halign(gtk::Align::Center);
+    icon.set_valign(gtk::Align::Center);
+    icon.set_hexpand(true);
+    icon.set_vexpand(true);
+    container.append(&icon);
+    container
 }
 
 impl MarqueeLabel {
@@ -489,7 +530,7 @@ impl MarqueeTextStyle {
 
     fn font_size(self) -> f64 {
         match self {
-            Self::Title => 13.0,
+            Self::Title => 14.0,
             Self::Secondary => 12.0,
         }
     }
@@ -672,7 +713,8 @@ fn track_title(track: &Track) -> String {
         .or_else(|| {
             track
                 .location
-                .path
+                .relative_path
+                .as_path()
                 .file_stem()
                 .and_then(|file_stem| file_stem.to_str())
                 .map(str::trim)

@@ -6,6 +6,7 @@ use std::{
 };
 
 use accent::install_accent_css;
+use albums::AlbumsView;
 use gtk::gdk::prelude::ToplevelExt;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
@@ -13,10 +14,7 @@ use library_scan::{LibraryScanRequestedCallback, library_scan_requested_callback
 use now_playing::NowPlayingView;
 use preferences::{install_preferences_action, settings_button};
 use status_bar::StatusBar;
-use track_table::{
-    TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table, mock_library_tracks,
-    mock_playlist_tracks,
-};
+use track_table::{TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table};
 
 pub use xtunes_app_runtime::{
     ApplicationCommand, ApplicationQuery, ApplicationRuntime, ApplicationRuntimeError,
@@ -26,6 +24,9 @@ pub use xtunes_app_runtime::{
 use xtunes_app_runtime::{PlaybackCommand, TrackId, VolumePercent};
 
 mod accent;
+mod albums;
+mod artwork_color;
+mod height_reveal;
 mod library_scan;
 mod now_playing;
 mod preferences;
@@ -81,9 +82,7 @@ struct Titlebar {
 }
 
 pub fn run(runtime: ApplicationRuntime) {
-    let app = gtk::Application::builder()
-        .application_id(APP_ID)
-        .build();
+    let app = gtk::Application::builder().application_id(APP_ID).build();
     let runtime = Rc::new(RefCell::new(runtime));
 
     app.connect_activate(move |app| {
@@ -131,14 +130,17 @@ fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::App
     let sidebar = build_sidebar();
     sidebar.set_visible(false);
 
-    let library_tracks = initial_library_table_rows(&runtime.borrow());
+    let library_tracks = runtime_library_table_rows(&runtime.borrow());
     let track_activated = track_activated_callback(&runtime, playback_changed.clone());
     let songs_table = build_track_table(library_tracks.clone(), Some(track_activated.clone()));
     songs_table_holder.replace(Some(songs_table.clone()));
+    let albums_view = AlbumsView::new(runtime.clone(), playback_changed.clone());
     playback_changed();
-    let content_stack = build_content_stack(songs_table.widget(), &library_tracks, track_activated);
+    let content_stack =
+        build_content_stack(songs_table.widget(), albums_view.widget(), track_activated);
     let status_bar = StatusBar::new(&library_tracks);
-    let library_changed = library_changed_callback(&runtime, &songs_table, &status_bar);
+    let library_changed =
+        library_changed_callback(&runtime, &songs_table, &albums_view, &status_bar);
     let scan_requested =
         library_scan_requested_callback(&runtime, library_changed.clone(), &status_bar);
     install_preferences_action(app, &window, runtime.clone(), scan_requested.clone());
@@ -179,33 +181,28 @@ fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::App
 fn library_changed_callback(
     runtime: &SharedRuntime,
     songs_table: &TrackTable,
+    albums_view: &AlbumsView,
     status_bar: &StatusBar,
 ) -> LibraryChangedCallback {
     let runtime = runtime.clone();
     let songs_table = songs_table.clone();
+    let albums_view = albums_view.clone();
     let status_bar = status_bar.clone();
 
     Rc::new(move || {
         let rows = runtime_library_table_rows(&runtime.borrow());
         songs_table.replace_rows(rows.clone());
+        albums_view.replace_tracks(runtime.borrow().library_tracks().to_vec());
         status_bar.update_summary(&rows);
     })
 }
 
-fn initial_library_table_rows(runtime: &ApplicationRuntime) -> Vec<TrackTableRow> {
-    let rows = runtime_library_table_rows(runtime);
-    if rows.is_empty() && runtime.settings().library_path.is_none() {
-        mock_library_tracks()
-    } else {
-        rows
-    }
-}
-
 fn runtime_library_table_rows(runtime: &ApplicationRuntime) -> Vec<TrackTableRow> {
+    let library_root = runtime.settings().library_path.as_deref();
     runtime
         .library_tracks()
         .iter()
-        .map(TrackTableRow::from_track)
+        .map(|track| TrackTableRow::from_track(track, library_root))
         .collect()
 }
 
@@ -580,6 +577,104 @@ fn install_app_css() {
         .playlist-sidebar {
             background-color: mix(@theme_bg_color, black, 0.10);
             border-right: 1px solid alpha(@theme_fg_color, 0.12);
+        }
+
+        .albums-view {
+            background-color: @theme_bg_color;
+        }
+
+        .albums-grid {
+            background-color: transparent;
+        }
+
+        button.album-tile {
+            background: transparent;
+            border: none;
+            border-radius: 6px;
+            box-shadow: none;
+            margin: 0;
+            min-height: 198px;
+            padding: 8px;
+        }
+
+        button.album-tile:hover,
+        button.album-tile:active,
+        button.album-tile:focus {
+            background-color: alpha(@theme_fg_color, 0.05);
+            border: none;
+            box-shadow: none;
+        }
+
+        button.album-tile-selected {
+            background-color: alpha(@theme_selected_bg_color, 0.18);
+        }
+
+        .album-cover,
+        .album-detail-cover {
+            background-color: alpha(@theme_fg_color, 0.10);
+            border-radius: 4px;
+        }
+
+        .album-cover-placeholder-icon {
+            opacity: 0.36;
+        }
+
+        .album-tile-title {
+            font-weight: bold;
+        }
+
+        .album-tile-artist,
+        .album-detail-subtitle,
+        .album-empty-state {
+            color: alpha(@theme_fg_color, 0.58);
+        }
+
+        .album-track-number,
+        .album-track-duration {
+            color: alpha(@theme_fg_color, 0.52);
+        }
+
+        .album-tile-artist {
+            font-size: 0.88em;
+        }
+
+        .album-detail {
+            background-color: alpha(@theme_fg_color, 0.035);
+            border: none;
+            padding: 18px;
+        }
+
+        .album-detail-title {
+            font-size: 1.2em;
+            font-weight: bold;
+        }
+
+        button.album-detail-icon-button {
+            background: transparent;
+            border: none;
+            border-radius: 999px;
+            box-shadow: none;
+            min-height: 24px;
+            min-width: 24px;
+            padding: 0;
+        }
+
+        button.album-detail-icon-button:hover,
+        button.album-detail-icon-button:active,
+        button.album-detail-icon-button:focus {
+            background-color: alpha(@theme_fg_color, 0.06);
+            border: none;
+            box-shadow: none;
+        }
+
+        .album-track-title,
+        .album-track-number,
+        .album-track-duration {
+            min-height: 22px;
+        }
+
+        .album-track-missing {
+            color: #e66100;
         }
 
         .track-table header {
@@ -1150,16 +1245,14 @@ fn build_sidebar() -> gtk::Box {
 
 fn build_content_stack(
     songs_view: gtk::ScrolledWindow,
-    library_tracks: &[TrackTableRow],
+    albums_view: gtk::ScrolledWindow,
     track_activated: TrackActivatedCallback,
 ) -> gtk::Stack {
     let stack = gtk::Stack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
 
-    let albums_view = build_album_area();
-    let playlists_view =
-        build_track_table(mock_playlist_tracks(library_tracks), Some(track_activated)).widget();
+    let playlists_view = build_track_table(Vec::new(), Some(track_activated)).widget();
 
     stack.add_named(&songs_view, Some(SONGS_VIEW));
     stack.add_named(&albums_view, Some(ALBUMS_VIEW));
@@ -1168,42 +1261,6 @@ fn build_content_stack(
 
     stack
 }
-
-fn build_album_area() -> gtk::ScrolledWindow {
-    let flow = gtk::FlowBox::new();
-    flow.set_margin_top(12);
-    flow.set_margin_end(12);
-    flow.set_margin_bottom(12);
-    flow.set_margin_start(12);
-    flow.set_max_children_per_line(8);
-    flow.set_selection_mode(gtk::SelectionMode::None);
-
-    for index in 1..=12 {
-        let item = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        item.set_margin_top(6);
-        item.set_margin_end(6);
-        item.set_margin_bottom(6);
-        item.set_margin_start(6);
-
-        let cover = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        cover.add_css_class("card");
-        cover.set_size_request(120, 120);
-
-        let title = gtk::Label::new(Some(&format!("Album {index}")));
-        title.set_xalign(0.0);
-
-        item.append(&cover);
-        item.append(&title);
-        flow.insert(&item, -1);
-    }
-
-    let scroller = gtk::ScrolledWindow::new();
-    scroller.set_vexpand(true);
-    scroller.set_hexpand(true);
-    scroller.set_child(Some(&flow));
-    scroller
-}
-
 #[cfg(test)]
 mod tests {
     use super::magnetized_volume_value;

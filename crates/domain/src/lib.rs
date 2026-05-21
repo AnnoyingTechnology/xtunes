@@ -22,4 +22,4 @@ pub use query::{LibraryQuery, SortDirection, TrackSort, TrackSortColumn};
 pub use rating::Rating;
 pub use settings::UserSettings;
 pub use statistics::PlayStatistics;
-pub use track::{Track, TrackAvailability, TrackLocation};
+pub use track::{Track, TrackAvailability, TrackLocation, TrackRelativePath};

@@ -15,7 +15,7 @@ use lofty::{
     },
 };
 
-pub use xtunes_domain::{FieldChange, MetadataChange, Rating, TrackMetadata};
+pub use xtunes_domain::{FieldChange, MetadataChange, Rating, TrackMetadata, TrackRelativePath};
 
 pub type MetadataResult<T> = Result<T, MetadataError>;
 
@@ -44,7 +44,7 @@ pub trait MetadataService: Send + Sync {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScannedTrack {
-    pub path: PathBuf,
+    pub relative_path: TrackRelativePath,
     pub metadata: TrackMetadata,
     pub rating: Rating,
 }
@@ -85,13 +85,13 @@ where
         }
 
         let mut scan = LibraryScan::default();
-        self.scan_directory(library_path, &mut scan);
+        self.scan_directory(library_path, library_path, &mut scan);
         scan.tracks
-            .sort_by(|left, right| left.path.cmp(&right.path));
+            .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
         Ok(scan)
     }
 
-    fn scan_directory(&self, directory: &Path, scan: &mut LibraryScan) {
+    fn scan_directory(&self, library_path: &Path, directory: &Path, scan: &mut LibraryScan) {
         let Ok(entries) = fs::read_dir(directory) else {
             scan.failures.push(ScanFailure {
                 path: directory.to_path_buf(),
@@ -103,18 +103,33 @@ where
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                self.scan_directory(&path, scan);
+                self.scan_directory(library_path, &path, scan);
             } else {
-                self.scan_file(path, scan);
+                self.scan_file(library_path, path, scan);
             }
         }
     }
 
-    fn scan_file(&self, path: PathBuf, scan: &mut LibraryScan) {
+    fn scan_file(&self, library_path: &Path, path: PathBuf, scan: &mut LibraryScan) {
         if audio_format_from_path(&path).is_err() {
             scan.skipped_unsupported_files += 1;
             return;
         }
+
+        let relative_path = match path
+            .strip_prefix(library_path)
+            .ok()
+            .and_then(|path| TrackRelativePath::new(path.to_path_buf()))
+        {
+            Some(relative_path) => relative_path,
+            None => {
+                scan.failures.push(ScanFailure {
+                    path,
+                    error: MetadataError::ReadFailed,
+                });
+                return;
+            }
+        };
 
         let metadata = match self.metadata_service.read_metadata(&path) {
             Ok(metadata) => metadata,
@@ -133,7 +148,7 @@ where
         };
 
         scan.tracks.push(ScannedTrack {
-            path,
+            relative_path,
             metadata,
             rating,
         });
@@ -386,7 +401,15 @@ mod tests {
             .scan(&root)
             .expect("scan test directory");
 
-        assert_eq!(scan.tracks.len(), 2);
+        let scanned_paths = scan
+            .tracks
+            .iter()
+            .map(|track| track.relative_path.as_path().to_path_buf())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            scanned_paths,
+            vec![PathBuf::from("nested/two.flac"), PathBuf::from("one.mp3")]
+        );
         assert_eq!(scan.skipped_unsupported_files, 1);
         assert_eq!(scan.failures, Vec::new());
 

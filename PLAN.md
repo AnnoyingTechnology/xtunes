@@ -139,6 +139,62 @@ should offer a `Locate` workflow that lets the user choose the replacement file
 manually. Relocating should update the track location while preserving playlists,
 rating, metadata cache, and listening statistics.
 
+## Duplicate Consolidation
+
+Users must be able to merge multiple library entries that represent the same
+recording into a single canonical track. This is a manual, user-driven
+operation, not an automatic deduplicator.
+
+Selection and entry point:
+
+- the Songs table supports standard multi-selection with shift-click and
+  ctrl-click
+- the row context menu exposes a `Consolidate to single track` action when two
+  or more tracks are selected
+- the action opens a consolidation dialog; it never proceeds silently
+
+Consolidation dialog:
+
+- lists every selected track with enough columns to disambiguate them
+  (location, format, bitrate, duration, size, rating, play count, date added)
+- the user picks, independently, the reference track for:
+  - audio file
+  - metadata (title, artist, album, genre, year, track/disc number, etc.)
+  - artwork
+- the dialog previews the resulting consolidated track before the user confirms
+
+Merge rules:
+
+- the surviving track keeps the chosen reference audio file as its location
+- the surviving track's metadata is taken from the chosen metadata reference
+  and written through the normal tag-writing path so the file on disk matches
+- the surviving track's artwork is taken from the chosen artwork reference and
+  written through the normal artwork path
+- play counts across all selected tracks are summed into the surviving track
+- last played is the most recent value across the selected tracks
+- date added is the oldest value across the selected tracks
+- rating is taken from the highest-rated selected track; ties prefer the
+  metadata reference
+- playlist memberships from the removed tracks are rewritten to point at the
+  surviving track, preserving order and de-duplicating consecutive entries
+
+Atomicity and safety:
+
+- the operation runs as a single transactional unit at the domain level: tag
+  writes, artwork writes, SQLite updates, playlist rewrites, and file deletions
+  either all succeed or the library is left in its pre-consolidation state
+- non-reference audio files are removed from disk and from the database only
+  after the surviving track has been fully written and verified
+- any failure during tag write, artwork write, or persistence aborts the
+  operation and surfaces an explicit error; partially merged state is not left
+  behind
+- the operation is reported through the standard background-task status
+  channel, with progress and outcome surfaced in the status bar
+
+This feature lives in the domain/app_runtime layer and is exercised by the
+GTK shell. The domain logic must be unit-testable without GTK, GStreamer, or a
+real filesystem mount.
+
 ## Application Flow
 
 Use command/query separation.
@@ -284,6 +340,22 @@ surface. For each album, detect the two dominant artwork colors. Use the main
 dominant color for the expanded track container and choose text/accent colors
 with enough contrast, derived from or compatible with the artwork palette. This
 must work in native light and dark modes without becoming unreadable.
+
+The same dominant-color detection is reused by the integrated top bar's
+now-playing artwork. Non-square cover art currently leaves gray gutters around
+the image; those gutters should be filled with the artwork's dominant color so
+the small cover blends into the surrounding control surface. Detection happens
+once per track when artwork is loaded and is cached alongside the artwork so
+album view and now-playing share a single source of truth.
+
+Clicking the small now-playing artwork zooms it into a large modal overlay
+centered on the window, with a close affordance in the top-right corner.
+Clicking the zoomed artwork itself flips the surface to show the track's
+lyrics in the same frame; the close affordance remains visible on both faces,
+and a second click flips back to the artwork. Both faces share the dominant
+color as their background so the flip animation reads as one continuous
+surface. The lyrics provider and lyrics-storage path are a prerequisite for
+this feature and need their own design decision before this work can ship.
 
 Smart playlists are in scope after regular playlist and table behavior is
 stable. They should be rule-based saved queries over the local library, not a

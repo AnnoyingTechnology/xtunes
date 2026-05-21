@@ -75,23 +75,33 @@ Core feature set:
 
 Rating persistence:
 
-- ratings must be written to audio file metadata tags, not only stored in SQLite
+- ratings must be written to audio file metadata tags IN ADDITION TO the SQLite db
 - support MP3/ID3, Ogg, MP4/M4A, and FLAC rating metadata
 - SQLite may cache ratings for fast UI/search, but file tags are the durable source
 
-Defer or avoid unless explicitly requested:
+## Development Phase
 
-- cross-platform support
-- streaming services
-- podcast management
-- CD ripping
-- visualizers
-- sync features of any kind, including device, cloud, folder, or multi-machine sync
-- automatic filesystem reorganization
-- advanced browsing views
-- album view
-- web/Electron/Tauri frontend experiments
-- Rhythmbox plugin/theme work
+xTunes is in pre-release development. It has never been published and has no
+external users; the only databases, settings files, or on-disk artefacts that
+exist are the maintainer's local working copies.
+
+Practical consequences for anything stored on disk (SQLite schemas, settings
+files, cached artwork, exported data, etc.):
+
+- The on-disk format is **not** stable. Change the schema by editing the
+  authoritative definition (e.g. the `CREATE TABLE` statements) directly.
+- Do **not** add migration code, compatibility shims, column renames,
+  `IF EXISTS` fallbacks, or "legacy path" normalisers. There is no legacy.
+- New features may freely change the on-disk format. The expectation is that
+  the maintainer wipes the local database and re-scans the library; that
+  is cheaper and safer than carrying migration code for schemas that never
+  shipped.
+- Code that exists only to read or convert from a previous in-development
+  schema must be removed, not kept "just in case".
+
+A stable, migration-friendly schema lifecycle starts at the first public
+release, not before. Until then, prefer deleting and recreating over
+migrating.
 
 ## Architecture Preference
 
