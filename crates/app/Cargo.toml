@@ -7,7 +7,7 @@ description = "Music library and player for Linux"
 license.workspace = true
 homepage = "https://github.com/open-xtunes/xtunes"
 repository = "https://github.com/open-xtunes/xtunes"
-authors = ["xTunes contributors"]
+authors = ["AnnoyingTechnology"]
 
 [[bin]]
 name = "xtunes"
