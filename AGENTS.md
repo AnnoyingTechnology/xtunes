@@ -27,6 +27,8 @@ that depend on Rhythmbox internals, plugins, themes, or UI behavior.
 - Desktop integration: D-Bus/MPRIS via `zbus`
 - Target platform: Linux on Debian, Wayland-first
 - Packaging: Debian package as the primary distribution format
+- License: GPL-3.0-or-later (declared in `[workspace.package]`); do not relicense or add dependencies with incompatible licenses
+- Every new `.rs` file starts with `// SPDX-License-Identifier: GPL-3.0-or-later` then `// Copyright (C) 2026 AnnoyingTechnology`
 
 ## Product Direction
 
