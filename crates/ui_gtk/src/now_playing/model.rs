@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 AnnoyingTechnology
+
 use std::time::Duration;
 
 use xtunes_app_runtime::{PlaybackState, Track, TrackMetadata};

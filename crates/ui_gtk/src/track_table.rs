@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 AnnoyingTechnology
+
 use gtk::glib::variant::ToVariant;
 use gtk::prelude::*;
 use gtk::{gio, glib};

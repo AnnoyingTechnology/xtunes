@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 AnnoyingTechnology
+
 pub(crate) fn install_app_css() {
     let provider = gtk::CssProvider::new();
     provider.load_from_data(include_str!("app.css"));

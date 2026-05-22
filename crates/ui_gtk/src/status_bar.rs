@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 AnnoyingTechnology
+
 use gtk::prelude::*;
 
 use super::{ApplicationRuntimeError, BackgroundTaskStatus, LibraryScanSummary, STATUS_BAR_HEIGHT};
