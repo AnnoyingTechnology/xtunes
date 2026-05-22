@@ -35,7 +35,7 @@ pub(crate) type TrackActivatedCallback = Rc<dyn Fn(TrackId)>;
 #[derive(Clone)]
 struct TrackTableContextMenu {
     menu: TrackRowContextMenu,
-    selection: gtk::SingleSelection,
+    selection: gtk::MultiSelection,
 }
 
 struct StatusBinding {
@@ -349,9 +349,7 @@ pub(crate) fn build_track_table(
     let status_bindings: StatusBindingsList = Rc::new(RefCell::new(Vec::new()));
 
     let sorted_rows = gtk::SortListModel::new(Some(store.clone()), table.sorter());
-    let selection = gtk::SingleSelection::new(Some(sorted_rows));
-    selection.set_autoselect(false);
-    selection.set_can_unselect(true);
+    let selection = gtk::MultiSelection::new(Some(sorted_rows));
 
     let context_menu = context_menu.map(|menu| TrackTableContextMenu {
         menu,
@@ -438,14 +436,29 @@ fn install_cell_context_menu(
         if position == gtk::INVALID_LIST_POSITION {
             return;
         }
-        context.selection.set_selected(position);
+        if !context.selection.is_selected(position) {
+            context.selection.select_item(position, true);
+        }
 
-        let Some(track_id) = row_track_id(list_item.item()) else {
+        let track_ids = collect_selected_track_ids(&context.selection);
+        if track_ids.is_empty() {
             return;
-        };
-        context.menu.popup_at(track_id, &cell_for_gesture, x, y);
+        }
+        context.menu.popup_at(track_ids, &cell_for_gesture, x, y);
     });
     cell.add_controller(gesture);
+}
+
+fn collect_selected_track_ids(selection: &gtk::MultiSelection) -> Vec<TrackId> {
+    let bitset = selection.selection();
+    let Some((iter, first)) = gtk::BitsetIter::init_first(&bitset) else {
+        return Vec::new();
+    };
+
+    std::iter::once(first)
+        .chain(iter)
+        .filter_map(|position| row_track_id(selection.item(position)))
+        .collect()
 }
 
 fn row_track_id(item: Option<glib::Object>) -> Option<TrackId> {

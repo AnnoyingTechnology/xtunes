@@ -225,32 +225,34 @@ fn open_library_folder_chooser(
     runtime: &SharedRuntime,
     path_entry: &gtk::Entry,
 ) {
-    let dialog = gtk::FileChooserNative::builder()
+    let dialog = gtk::FileDialog::builder()
         .title("Choose Library Folder")
-        .action(gtk::FileChooserAction::SelectFolder)
         .accept_label("Choose")
-        .cancel_label("Cancel")
         .modal(true)
-        .transient_for(parent)
         .build();
 
     let current_path = path_entry.text().trim().to_owned();
     if !current_path.is_empty() {
         let current_folder = gio::File::for_path(current_path);
-        let _result = dialog.set_current_folder(Some(&current_folder));
+        dialog.set_initial_folder(Some(&current_folder));
     }
 
     let runtime = runtime.clone();
     let path_entry = path_entry.clone();
-    dialog.run_async(move |dialog, response| {
-        if response == gtk::ResponseType::Accept {
-            if let Some(folder_path) = dialog.file().and_then(|file| file.path()) {
-                path_entry.set_text(&folder_path.to_string_lossy());
-                let _result = save_library_path_from_entry(&runtime, &path_entry);
-            }
-        }
-        dialog.destroy();
-    });
+    dialog.select_folder(
+        Some(parent),
+        None::<&gio::Cancellable>,
+        move |result| {
+            let Ok(file) = result else {
+                return;
+            };
+            let Some(folder_path) = file.path() else {
+                return;
+            };
+            path_entry.set_text(&folder_path.to_string_lossy());
+            let _result = save_library_path_from_entry(&runtime, &path_entry);
+        },
+    );
 }
 
 fn save_library_path_from_entry(

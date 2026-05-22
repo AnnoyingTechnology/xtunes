@@ -47,7 +47,7 @@ fn install_track_row_context_menu(
     let context = context_menu.clone();
     let anchor = widget.as_ref().clone();
     gesture.connect_pressed(move |_gesture, _n_press, x, y| {
-        context.popup_at(track_id, &anchor, x, y);
+        context.popup_at(vec![track_id], &anchor, x, y);
     });
     widget.as_ref().add_controller(gesture);
 }
@@ -519,7 +519,7 @@ fn album_detail_arrow(palette: Option<ArtworkPalette>) -> gtk::DrawingArea {
                 (red, green, blue, 1.0)
             })
             .unwrap_or_else(|| {
-                let color = area.style_context().color();
+                let color = area.color();
                 (
                     f64::from(color.red()),
                     f64::from(color.green()),

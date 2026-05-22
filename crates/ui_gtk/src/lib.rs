@@ -138,7 +138,10 @@ fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::App
     let library_changed_holder: LibraryChangedHolder = Rc::new(RefCell::new(None));
     let context_callbacks =
         track_context_callbacks(&runtime, playback_changed.clone(), library_changed_holder.clone());
-    let context_menu = TrackRowContextMenu::new(context_callbacks);
+    let context_menu = TrackRowContextMenu::new(
+        context_callbacks,
+        window.clone().upcast::<gtk::Window>(),
+    );
     let songs_table = build_track_table(
         library_tracks.clone(),
         Some(track_activated.clone()),
@@ -292,11 +295,17 @@ fn track_mutation_callback(
 ) -> TrackActionCallback {
     let runtime = runtime.clone();
 
-    Rc::new(move |track_id: TrackId| {
-        let result = runtime
-            .borrow_mut()
-            .handle_command(command_builder(track_id));
-        if result.is_err() {
+    Rc::new(move |track_ids: Vec<TrackId>| {
+        let mut any_succeeded = false;
+        for track_id in track_ids {
+            let result = runtime
+                .borrow_mut()
+                .handle_command(command_builder(track_id));
+            if result.is_ok() {
+                any_succeeded = true;
+            }
+        }
+        if !any_succeeded {
             return;
         }
         playback_changed();
@@ -809,14 +818,20 @@ fn install_app_css() {
             background-color: transparent;
         }
 
-        .track-table listview row:selected,
-        .track-table listview row:selected .track-table-cell {
-            background-color: @theme_selected_bg_color;
-            color: @theme_selected_fg_color;
-        }
-
+        /* Selected-row background goes on the cell box. Selected-row
+           foreground is scoped to the text widgets inside the cell so the
+           color does not cascade into popovers parented to the cell (which
+           would inherit @theme_selected_fg_color and render white-on-white
+           menu items). */
+        .track-table listview row:selected .track-table-cell,
         .track-table-cell.track-table-row-selected {
             background-color: @theme_selected_bg_color;
+        }
+
+        .track-table listview row:selected .track-table-cell > label,
+        .track-table listview row:selected .track-table-cell > image,
+        .track-table-cell.track-table-row-selected > label,
+        .track-table-cell.track-table-row-selected > image {
             color: @theme_selected_fg_color;
         }
 

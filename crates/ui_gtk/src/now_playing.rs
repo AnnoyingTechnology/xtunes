@@ -574,7 +574,7 @@ fn draw_marquee_text(
     context.set_font_size(draw_model.style.font_size());
     set_text_source(
         context,
-        &canvas.style_context().color(),
+        &canvas.color(),
         draw_model.style.alpha(),
         f64::from(width),
         draw_model.fade_active.get(),
