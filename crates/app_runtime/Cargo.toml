@@ -9,6 +9,7 @@ name = "xtunes_app_runtime"
 path = "src/lib.rs"
 
 [dependencies]
+trash = "5"
 xtunes-settings = { path = "../settings" }
 xtunes-domain = { path = "../domain" }
 xtunes-library-store = { path = "../library_store" }

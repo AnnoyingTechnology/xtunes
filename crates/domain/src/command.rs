@@ -38,6 +38,12 @@ pub enum ApplicationCommand {
         track_id: TrackId,
         change: MetadataChange,
     },
+    RemoveTrackFromLibrary {
+        track_id: TrackId,
+    },
+    MoveTrackToTrash {
+        track_id: TrackId,
+    },
     UpdateSettings(UserSettings),
     ScanLibrary {
         library_path: PathBuf,

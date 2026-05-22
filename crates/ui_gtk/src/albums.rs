@@ -8,11 +8,11 @@ use std::{
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
-use xtunes_app_runtime::{ApplicationCommand, PlaybackCommand, Track};
+use xtunes_app_runtime::{ApplicationCommand, PlaybackCommand, Track, TrackId};
 
 use super::{
     PlaybackChangedCallback, SharedRuntime, artwork_color::ArtworkPalette,
-    height_reveal::HeightReveal,
+    height_reveal::HeightReveal, track_context::TrackRowContextMenu,
 };
 use model::{
     AlbumTrackViewModel, AlbumViewModel, album_subtitle, duration_text, group_albums,
@@ -27,11 +27,29 @@ pub(crate) struct AlbumsView {
     container: gtk::Box,
     runtime: SharedRuntime,
     playback_changed: PlaybackChangedCallback,
+    context_menu: TrackRowContextMenu,
     albums: Rc<RefCell<Vec<AlbumViewModel>>>,
     selected_album: Rc<Cell<Option<usize>>>,
     visible_columns: Rc<Cell<usize>>,
     last_width: Rc<Cell<i32>>,
     artwork_cache: Rc<RefCell<BTreeMap<PathBuf, CachedArtwork>>>,
+}
+
+fn install_track_row_context_menu(
+    widget: &impl IsA<gtk::Widget>,
+    track_id: TrackId,
+    context_menu: &TrackRowContextMenu,
+) {
+    let gesture = gtk::GestureClick::new();
+    gesture.set_button(gdk::BUTTON_SECONDARY);
+    gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+    let context = context_menu.clone();
+    let anchor = widget.as_ref().clone();
+    gesture.connect_pressed(move |_gesture, _n_press, x, y| {
+        context.popup_at(track_id, &anchor, x, y);
+    });
+    widget.as_ref().add_controller(gesture);
 }
 
 #[derive(Clone, Default)]
@@ -54,7 +72,11 @@ const ALBUM_DETAIL_ARROW_HEIGHT: i32 = 18;
 const ALBUM_COVER_PLACEHOLDER_ICON: &str = "image-missing-symbolic";
 
 impl AlbumsView {
-    pub(crate) fn new(runtime: SharedRuntime, playback_changed: PlaybackChangedCallback) -> Self {
+    pub(crate) fn new(
+        runtime: SharedRuntime,
+        playback_changed: PlaybackChangedCallback,
+        context_menu: TrackRowContextMenu,
+    ) -> Self {
         let container = gtk::Box::new(gtk::Orientation::Vertical, ALBUM_GRID_ROW_SPACING);
         container.add_css_class("albums-grid");
         container.set_margin_top(ALBUM_GRID_MARGIN);
@@ -74,6 +96,7 @@ impl AlbumsView {
             container,
             runtime,
             playback_changed,
+            context_menu,
             albums: Rc::new(RefCell::new(Vec::new())),
             selected_album: Rc::new(Cell::new(None)),
             visible_columns: Rc::new(Cell::new(1)),
@@ -312,7 +335,7 @@ impl AlbumsView {
         title_block.append(&subtitle);
         left.append(&title_block);
 
-        let track_lists = album_track_lists(album, palette_provider.as_ref());
+        let track_lists = album_track_lists(album, palette_provider.as_ref(), &self.context_menu);
         track_lists.set_margin_top(4);
         left.append(&track_lists);
 
@@ -598,14 +621,15 @@ fn detail_icon_button(
 fn album_track_lists(
     album: &AlbumViewModel,
     palette_provider: Option<&gtk::CssProvider>,
+    context_menu: &TrackRowContextMenu,
 ) -> gtk::Box {
     let lists = gtk::Box::new(gtk::Orientation::Horizontal, 24);
     lists.add_css_class("album-track-lists");
     lists.set_hexpand(true);
 
     let split_index = album.tracks.len().div_ceil(2);
-    let left = track_list_column(&album.tracks[..split_index], palette_provider);
-    let right = track_list_column(&album.tracks[split_index..], palette_provider);
+    let left = track_list_column(&album.tracks[..split_index], palette_provider, context_menu);
+    let right = track_list_column(&album.tracks[split_index..], palette_provider, context_menu);
     lists.append(&left);
     lists.append(&right);
     lists
@@ -614,6 +638,7 @@ fn album_track_lists(
 fn track_list_column(
     tracks: &[AlbumTrackViewModel],
     palette_provider: Option<&gtk::CssProvider>,
+    context_menu: &TrackRowContextMenu,
 ) -> gtk::Grid {
     let grid = gtk::Grid::new();
     grid.add_css_class("album-track-list");
@@ -623,7 +648,7 @@ fn track_list_column(
     grid.set_hexpand(true);
 
     for (index, track) in tracks.iter().enumerate() {
-        attach_track_row(&grid, track, index as i32, palette_provider);
+        attach_track_row(&grid, track, index as i32, palette_provider, context_menu);
     }
 
     grid
@@ -634,6 +659,7 @@ fn attach_track_row(
     track: &AlbumTrackViewModel,
     row: i32,
     palette_provider: Option<&gtk::CssProvider>,
+    context_menu: &TrackRowContextMenu,
 ) {
     let number = gtk::Label::new(Some(&track_number_text(track)));
     number.add_css_class("album-track-number");
@@ -657,6 +683,10 @@ fn attach_track_row(
     apply_palette_style(&duration, palette_provider, "album-detail-palette-muted");
     duration.set_xalign(1.0);
     grid.attach(&duration, 2, row, 1, 1);
+
+    install_track_row_context_menu(&number, track.id, context_menu);
+    install_track_row_context_menu(&title, track.id, context_menu);
+    install_track_row_context_menu(&duration, track.id, context_menu);
 }
 
 fn play_album(runtime: &SharedRuntime, album: &AlbumViewModel) {

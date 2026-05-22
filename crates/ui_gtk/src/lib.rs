@@ -14,6 +14,7 @@ use library_scan::{LibraryScanRequestedCallback, library_scan_requested_callback
 use now_playing::NowPlayingView;
 use preferences::{install_preferences_action, settings_button};
 use status_bar::StatusBar;
+use track_context::{TrackActionCallback, TrackContextCallbacks, TrackRowContextMenu};
 use track_table::{TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table};
 
 pub use xtunes_app_runtime::{
@@ -31,6 +32,7 @@ mod library_scan;
 mod now_playing;
 mod preferences;
 mod status_bar;
+mod track_context;
 mod track_table;
 
 const TITLEBAR_HEIGHT: i32 = 72;
@@ -63,7 +65,8 @@ const PLAYLISTS_VIEW: &str = "playlists";
 
 pub(crate) type SharedRuntime = Rc<RefCell<ApplicationRuntime>>;
 pub(crate) type LibraryChangedCallback = Rc<dyn Fn()>;
-type PlaybackChangedCallback = Rc<dyn Fn()>;
+pub(crate) type LibraryChangedHolder = Rc<RefCell<Option<LibraryChangedCallback>>>;
+pub(crate) type PlaybackChangedCallback = Rc<dyn Fn()>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MainViewMode {
@@ -132,15 +135,32 @@ fn build_main_window(app: &gtk::Application, runtime: SharedRuntime) -> gtk::App
 
     let library_tracks = runtime_library_table_rows(&runtime.borrow());
     let track_activated = track_activated_callback(&runtime, playback_changed.clone());
-    let songs_table = build_track_table(library_tracks.clone(), Some(track_activated.clone()));
+    let library_changed_holder: LibraryChangedHolder = Rc::new(RefCell::new(None));
+    let context_callbacks =
+        track_context_callbacks(&runtime, playback_changed.clone(), library_changed_holder.clone());
+    let context_menu = TrackRowContextMenu::new(context_callbacks);
+    let songs_table = build_track_table(
+        library_tracks.clone(),
+        Some(track_activated.clone()),
+        Some(context_menu.clone()),
+    );
     songs_table_holder.replace(Some(songs_table.clone()));
-    let albums_view = AlbumsView::new(runtime.clone(), playback_changed.clone());
+    let albums_view = AlbumsView::new(
+        runtime.clone(),
+        playback_changed.clone(),
+        context_menu.clone(),
+    );
     playback_changed();
-    let content_stack =
-        build_content_stack(songs_table.widget(), albums_view.widget(), track_activated);
+    let content_stack = build_content_stack(
+        songs_table.widget(),
+        albums_view.widget(),
+        track_activated,
+        context_menu,
+    );
     let status_bar = StatusBar::new(&library_tracks);
     let library_changed =
         library_changed_callback(&runtime, &songs_table, &albums_view, &status_bar);
+    library_changed_holder.replace(Some(library_changed.clone()));
     let scan_requested =
         library_scan_requested_callback(&runtime, library_changed.clone(), &status_bar);
     install_preferences_action(app, &window, runtime.clone(), scan_requested.clone());
@@ -240,6 +260,49 @@ fn track_activated_callback(
                 track_id,
             )));
         playback_changed();
+    })
+}
+
+fn track_context_callbacks(
+    runtime: &SharedRuntime,
+    playback_changed: PlaybackChangedCallback,
+    library_changed_holder: LibraryChangedHolder,
+) -> TrackContextCallbacks {
+    TrackContextCallbacks {
+        remove_from_library: track_mutation_callback(
+            runtime,
+            playback_changed.clone(),
+            library_changed_holder.clone(),
+            |track_id| ApplicationCommand::RemoveTrackFromLibrary { track_id },
+        ),
+        move_to_trash: track_mutation_callback(
+            runtime,
+            playback_changed,
+            library_changed_holder,
+            |track_id| ApplicationCommand::MoveTrackToTrash { track_id },
+        ),
+    }
+}
+
+fn track_mutation_callback(
+    runtime: &SharedRuntime,
+    playback_changed: PlaybackChangedCallback,
+    library_changed_holder: LibraryChangedHolder,
+    command_builder: impl Fn(TrackId) -> ApplicationCommand + 'static,
+) -> TrackActionCallback {
+    let runtime = runtime.clone();
+
+    Rc::new(move |track_id: TrackId| {
+        let result = runtime
+            .borrow_mut()
+            .handle_command(command_builder(track_id));
+        if result.is_err() {
+            return;
+        }
+        playback_changed();
+        if let Some(callback) = library_changed_holder.borrow().as_ref() {
+            callback();
+        }
     })
 }
 
@@ -1247,12 +1310,14 @@ fn build_content_stack(
     songs_view: gtk::ScrolledWindow,
     albums_view: gtk::ScrolledWindow,
     track_activated: TrackActivatedCallback,
+    context_menu: TrackRowContextMenu,
 ) -> gtk::Stack {
     let stack = gtk::Stack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
 
-    let playlists_view = build_track_table(Vec::new(), Some(track_activated)).widget();
+    let playlists_view =
+        build_track_table(Vec::new(), Some(track_activated), Some(context_menu)).widget();
 
     stack.add_named(&songs_view, Some(SONGS_VIEW));
     stack.add_named(&albums_view, Some(ALBUMS_VIEW));

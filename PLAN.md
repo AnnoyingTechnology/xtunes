@@ -449,6 +449,25 @@ Build the first version in this order:
 
 This slice should prove the full architecture without adding non-core features.
 
+## Waveform Analysis (Tentative)
+
+Per-track waveform analysis would be a nice-to-have. Computing a downsampled
+amplitude envelope (peak/RMS bins) per track at import or first-play time,
+cached alongside the track in the library, would unlock a visual representation
+of the audio that could be displayed somewhere in the UI.
+
+The placement is undecided. Candidates worth considering later include the
+now-playing area, a seek-bar replacement, or a track-detail surface. None of
+these are committed; the right home has to be found before this is worth
+implementing.
+
+Constraints if/when this is built:
+
+- analysis is a background task, never blocking the UI or playback start
+- the cached envelope is small, fixed-resolution, and detached from the audio
+  file itself so it survives metadata edits
+- the renderer must work cleanly in both native light and dark modes
+
 ## Distribution
 
 Target Debian as the primary distribution platform. The project should produce a

@@ -29,6 +29,7 @@ pub enum ApplicationRuntimeError {
     SettingsLoadFailed,
     SettingsSaveFailed,
     TrackUnavailable,
+    TrackTrashFailed,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -244,10 +245,61 @@ impl ApplicationRuntime {
             ApplicationCommand::ScanLibrary { library_path } => {
                 self.scan_library(library_path)?;
             }
+            ApplicationCommand::RemoveTrackFromLibrary { track_id } => {
+                self.remove_track_from_library(track_id)?;
+            }
+            ApplicationCommand::MoveTrackToTrash { track_id } => {
+                self.move_track_to_trash(track_id)?;
+            }
             _ => {}
         }
 
         Ok(())
+    }
+
+    fn remove_track_from_library(
+        &mut self,
+        track_id: TrackId,
+    ) -> ApplicationRuntimeResult<()> {
+        self.stop_playback_if_playing(track_id);
+        let library_store = self
+            .library_store
+            .as_ref()
+            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
+        library_store
+            .delete_track(track_id)
+            .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
+        self.library_tracks.retain(|track| track.id != track_id);
+        Ok(())
+    }
+
+    fn move_track_to_trash(&mut self, track_id: TrackId) -> ApplicationRuntimeResult<()> {
+        let track = self
+            .library_tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .cloned()
+            .ok_or(ApplicationRuntimeError::TrackUnavailable)?;
+
+        self.stop_playback_if_playing(track_id);
+
+        if let Some(path) = self.absolute_track_path(&track) {
+            if path.exists() {
+                trash::delete(&path)
+                    .map_err(|_| ApplicationRuntimeError::TrackTrashFailed)?;
+            }
+        }
+
+        self.remove_track_from_library(track_id)
+    }
+
+    fn stop_playback_if_playing(&self, track_id: TrackId) {
+        let Some(service) = self.playback_service.as_deref() else {
+            return;
+        };
+        if playback_track_id(&service.state()) == Some(track_id) {
+            let _ = service.stop();
+        }
     }
 
     fn handle_playback_command(
@@ -1054,6 +1106,114 @@ mod tests {
                 position: std::time::Duration::ZERO,
             }
         );
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
+    #[test]
+    fn runtime_removes_tracks_from_library_and_stops_playback() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+        std::fs::write(root.join("track.flac"), b"not real audio").expect("write fake track");
+
+        let removed_id = track_id(1);
+        let store = Arc::new(InMemoryLibraryStore::new());
+        assert_eq!(store.save_track(test_track(removed_id, "track.flac")), Ok(()));
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings {
+                library_path: Some(root.clone()),
+            }),
+        ))
+        .expect("load settings")
+        .with_library_services(store.clone(), Arc::new(TestMetadataService))
+        .expect("library services initialize")
+        .with_playback_service(Box::new(NullPlaybackService::new()));
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
+                removed_id,
+            ))),
+            Ok(())
+        );
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::RemoveTrackFromLibrary {
+                track_id: removed_id,
+            }),
+            Ok(())
+        );
+
+        assert!(runtime.library_tracks().is_empty());
+        assert_eq!(store.track(removed_id), Ok(None));
+        assert_eq!(runtime.playback_state(), PlaybackState::Stopped);
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
+    #[test]
+    fn runtime_moves_tracks_to_trash_and_removes_underlying_file() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+        let track_path = root.join("track.flac");
+        std::fs::write(&track_path, b"not real audio").expect("write fake track");
+
+        let trashed_id = track_id(1);
+        let store = Arc::new(InMemoryLibraryStore::new());
+        assert_eq!(store.save_track(test_track(trashed_id, "track.flac")), Ok(()));
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings {
+                library_path: Some(root.clone()),
+            }),
+        ))
+        .expect("load settings")
+        .with_library_services(store.clone(), Arc::new(TestMetadataService))
+        .expect("library services initialize")
+        .with_playback_service(Box::new(NullPlaybackService::new()));
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::MoveTrackToTrash {
+                track_id: trashed_id,
+            }),
+            Ok(())
+        );
+
+        assert!(runtime.library_tracks().is_empty());
+        assert_eq!(store.track(trashed_id), Ok(None));
+        assert!(!track_path.exists(), "audio file should be moved to trash");
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
+    #[test]
+    fn runtime_move_to_trash_succeeds_when_file_is_already_missing() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+
+        let trashed_id = track_id(1);
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut missing = test_track(trashed_id, "absent.flac");
+        missing.location = missing_track_location("absent.flac");
+        assert_eq!(store.save_track(missing), Ok(()));
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings {
+                library_path: Some(root.clone()),
+            }),
+        ))
+        .expect("load settings")
+        .with_library_services(store.clone(), Arc::new(TestMetadataService))
+        .expect("library services initialize")
+        .with_playback_service(Box::new(NullPlaybackService::new()));
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::MoveTrackToTrash {
+                track_id: trashed_id,
+            }),
+            Ok(())
+        );
+        assert!(runtime.library_tracks().is_empty());
+        assert_eq!(store.track(trashed_id), Ok(None));
 
         std::fs::remove_dir_all(root).expect("remove test library");
     }

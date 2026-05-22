@@ -111,6 +111,9 @@ fn task_status_text(status: &BackgroundTaskStatus) -> String {
             | super::ApplicationRuntimeError::TrackUnavailable => {
                 "Playback is not available.".to_owned()
             }
+            super::ApplicationRuntimeError::TrackTrashFailed => {
+                "The track could not be moved to trash.".to_owned()
+            }
         },
     }
 }

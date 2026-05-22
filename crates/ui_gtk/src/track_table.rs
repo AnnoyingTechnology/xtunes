@@ -1,11 +1,13 @@
 use gtk::glib::variant::ToVariant;
 use gtk::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering as CmpOrdering;
 use std::path::Path;
 use std::rc::Rc;
 use xtunes_app_runtime::{Track, TrackId};
+
+use super::track_context::TrackRowContextMenu;
 
 #[derive(Clone, Debug)]
 pub(crate) struct TrackTableRow {
@@ -29,6 +31,12 @@ pub(crate) struct TrackTableRow {
 }
 
 pub(crate) type TrackActivatedCallback = Rc<dyn Fn(TrackId)>;
+
+#[derive(Clone)]
+struct TrackTableContextMenu {
+    menu: TrackRowContextMenu,
+    selection: gtk::SingleSelection,
+}
 
 struct StatusBinding {
     list_item: gtk::ListItem,
@@ -321,6 +329,7 @@ impl TrackTableColumn {
 pub(crate) fn build_track_table(
     rows: Vec<TrackTableRow>,
     track_activated: Option<TrackActivatedCallback>,
+    context_menu: Option<TrackRowContextMenu>,
 ) -> TrackTable {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     for row in rows {
@@ -339,16 +348,27 @@ pub(crate) fn build_track_table(
     let playing_track_id: Rc<Cell<Option<TrackId>>> = Rc::new(Cell::new(None));
     let status_bindings: StatusBindingsList = Rc::new(RefCell::new(Vec::new()));
 
+    let sorted_rows = gtk::SortListModel::new(Some(store.clone()), table.sorter());
+    let selection = gtk::SingleSelection::new(Some(sorted_rows));
+    selection.set_autoselect(false);
+    selection.set_can_unselect(true);
+
+    let context_menu = context_menu.map(|menu| TrackTableContextMenu {
+        menu,
+        selection: selection.clone(),
+    });
+
     table.append_column(&build_status_column(
         playing_track_id.clone(),
         status_bindings.clone(),
+        context_menu.clone(),
     ));
 
     let header_menu = build_column_visibility_menu();
     let column_actions = gio::SimpleActionGroup::new();
 
     for column in TRACK_TABLE_COLUMNS.iter().copied() {
-        let table_column = build_table_column(column, &header_menu);
+        let table_column = build_table_column(column, &header_menu, context_menu.clone());
         let action = gio::SimpleAction::new_stateful(
             column.action_name(),
             None,
@@ -363,14 +383,10 @@ pub(crate) fn build_track_table(
         column_actions.add_action(&action);
         table.append_column(&table_column);
     }
-    table.append_column(&build_filler_column());
+    table.append_column(&build_filler_column(context_menu.clone()));
 
     table.insert_action_group("columns", Some(&column_actions));
 
-    let sorted_rows = gtk::SortListModel::new(Some(store.clone()), table.sorter());
-    let selection = gtk::SingleSelection::new(Some(sorted_rows));
-    selection.set_autoselect(false);
-    selection.set_can_unselect(true);
     if let Some(track_activated) = track_activated {
         let selection_for_activate = selection.clone();
         table.connect_activate(move |_table, position| {
@@ -405,11 +421,48 @@ pub(crate) fn build_track_table(
     }
 }
 
-fn build_table_column(column: TrackTableColumn, header_menu: &gio::Menu) -> gtk::ColumnViewColumn {
+fn install_cell_context_menu(
+    list_item: &gtk::ListItem,
+    cell: &gtk::Box,
+    context: &TrackTableContextMenu,
+) {
+    let gesture = gtk::GestureClick::new();
+    gesture.set_button(gdk::BUTTON_SECONDARY);
+    gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+    let context = context.clone();
+    let list_item = list_item.clone();
+    let cell_for_gesture = cell.clone();
+    gesture.connect_pressed(move |_gesture, _n_press, x, y| {
+        let position = list_item.position();
+        if position == gtk::INVALID_LIST_POSITION {
+            return;
+        }
+        context.selection.set_selected(position);
+
+        let Some(track_id) = row_track_id(list_item.item()) else {
+            return;
+        };
+        context.menu.popup_at(track_id, &cell_for_gesture, x, y);
+    });
+    cell.add_controller(gesture);
+}
+
+fn row_track_id(item: Option<glib::Object>) -> Option<TrackId> {
+    let row_object = item?.downcast::<glib::BoxedAnyObject>().ok()?;
+    let row = row_object.try_borrow::<TrackTableRow>().ok()?;
+    row.track_id
+}
+
+fn build_table_column(
+    column: TrackTableColumn,
+    header_menu: &gio::Menu,
+    context_menu: Option<TrackTableContextMenu>,
+) -> gtk::ColumnViewColumn {
     let factory = if column == TrackTableColumn::Rating {
-        build_rating_cell_factory()
+        build_rating_cell_factory(context_menu)
     } else {
-        build_text_cell_factory(column)
+        build_text_cell_factory(column, context_menu)
     };
     let table_column = gtk::ColumnViewColumn::new(Some(column.title()), Some(factory));
     table_column.set_resizable(true);
@@ -425,8 +478,8 @@ fn build_table_column(column: TrackTableColumn, header_menu: &gio::Menu) -> gtk:
     table_column
 }
 
-fn build_filler_column() -> gtk::ColumnViewColumn {
-    let table_column = gtk::ColumnViewColumn::new(None, Some(build_filler_factory()));
+fn build_filler_column(context_menu: Option<TrackTableContextMenu>) -> gtk::ColumnViewColumn {
+    let table_column = gtk::ColumnViewColumn::new(None, Some(build_filler_factory(context_menu)));
     table_column.set_expand(true);
     table_column.set_resizable(false);
     table_column.set_visible(true);
@@ -436,8 +489,9 @@ fn build_filler_column() -> gtk::ColumnViewColumn {
 fn build_status_column(
     playing_track_id: Rc<Cell<Option<TrackId>>>,
     bindings: StatusBindingsList,
+    context_menu: Option<TrackTableContextMenu>,
 ) -> gtk::ColumnViewColumn {
-    let factory = build_status_cell_factory(playing_track_id, bindings);
+    let factory = build_status_cell_factory(playing_track_id, bindings, context_menu);
     let table_column = gtk::ColumnViewColumn::new(None, Some(factory));
     table_column.set_resizable(false);
     table_column.set_fixed_width(STATUS_COLUMN_WIDTH);
@@ -445,13 +499,26 @@ fn build_status_column(
     table_column
 }
 
+fn install_cell_chrome(
+    list_item: &gtk::ListItem,
+    cell: &gtk::Box,
+    context_menu: Option<&TrackTableContextMenu>,
+) {
+    install_cell_selection_sync(list_item, cell);
+    if let Some(menu) = context_menu {
+        install_cell_context_menu(list_item, cell, menu);
+    }
+}
+
 fn build_status_cell_factory(
     playing_track_id: Rc<Cell<Option<TrackId>>>,
     bindings: StatusBindingsList,
+    context_menu: Option<TrackTableContextMenu>,
 ) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
 
     let bindings_for_setup = bindings.clone();
+    let context_for_setup = context_menu;
     factory.connect_setup(move |_factory, item| {
         let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -463,7 +530,7 @@ fn build_status_cell_factory(
         cell.set_vexpand(true);
         cell.set_halign(gtk::Align::Fill);
         cell.set_valign(gtk::Align::Fill);
-        install_cell_selection_sync(list_item, &cell);
+        install_cell_chrome(list_item, &cell, context_for_setup.as_ref());
 
         let icon = gtk::Image::new();
         icon.set_pixel_size(STATUS_ICON_SIZE);
@@ -562,8 +629,12 @@ fn clear_status_icon(icon: &gtk::Image) {
     icon.set_visible(false);
 }
 
-fn build_text_cell_factory(column: TrackTableColumn) -> gtk::SignalListItemFactory {
+fn build_text_cell_factory(
+    column: TrackTableColumn,
+    context_menu: Option<TrackTableContextMenu>,
+) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
+    let context_for_setup = context_menu;
     factory.connect_setup(move |_factory, item| {
         let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -575,7 +646,7 @@ fn build_text_cell_factory(column: TrackTableColumn) -> gtk::SignalListItemFacto
         cell.set_vexpand(true);
         cell.set_halign(gtk::Align::Fill);
         cell.set_valign(gtk::Align::Fill);
-        install_cell_selection_sync(list_item, &cell);
+        install_cell_chrome(list_item, &cell, context_for_setup.as_ref());
 
         let label = gtk::Label::new(None);
         label.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -624,8 +695,11 @@ fn build_text_cell_factory(column: TrackTableColumn) -> gtk::SignalListItemFacto
     factory
 }
 
-fn build_rating_cell_factory() -> gtk::SignalListItemFactory {
+fn build_rating_cell_factory(
+    context_menu: Option<TrackTableContextMenu>,
+) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
+    let context_for_setup = context_menu;
     factory.connect_setup(move |_factory, item| {
         let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -637,7 +711,7 @@ fn build_rating_cell_factory() -> gtk::SignalListItemFactory {
         cell.set_vexpand(true);
         cell.set_halign(gtk::Align::Fill);
         cell.set_valign(gtk::Align::Fill);
-        install_cell_selection_sync(list_item, &cell);
+        install_cell_chrome(list_item, &cell, context_for_setup.as_ref());
         list_item.set_child(Some(&cell));
     });
 
@@ -705,8 +779,11 @@ fn build_rating_cell_factory() -> gtk::SignalListItemFactory {
     factory
 }
 
-fn build_filler_factory() -> gtk::SignalListItemFactory {
+fn build_filler_factory(
+    context_menu: Option<TrackTableContextMenu>,
+) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
+    let context_for_setup = context_menu;
     factory.connect_setup(move |_factory, item| {
         let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -718,7 +795,7 @@ fn build_filler_factory() -> gtk::SignalListItemFactory {
         cell.set_vexpand(true);
         cell.set_halign(gtk::Align::Fill);
         cell.set_valign(gtk::Align::Fill);
-        install_cell_selection_sync(list_item, &cell);
+        install_cell_chrome(list_item, &cell, context_for_setup.as_ref());
         list_item.set_child(Some(&cell));
     });
 

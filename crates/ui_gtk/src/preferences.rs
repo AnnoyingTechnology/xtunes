@@ -295,5 +295,6 @@ fn scan_error_text(error: ApplicationRuntimeError) -> &'static str {
         | ApplicationRuntimeError::TrackUnavailable => "Playback is not available.",
         ApplicationRuntimeError::SettingsLoadFailed
         | ApplicationRuntimeError::SettingsSaveFailed => "The library path could not be saved.",
+        ApplicationRuntimeError::TrackTrashFailed => "The track could not be moved to trash.",
     }
 }

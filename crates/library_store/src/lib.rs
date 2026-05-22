@@ -31,6 +31,7 @@ impl From<rusqlite::Error> for StoreError {
 
 pub trait LibraryStore: Send + Sync {
     fn save_track(&self, track: Track) -> StoreResult<()>;
+    fn delete_track(&self, track_id: TrackId) -> StoreResult<()>;
     fn track(&self, track_id: TrackId) -> StoreResult<Option<Track>>;
     fn tracks(&self) -> StoreResult<Vec<Track>>;
     fn save_playlist(&self, playlist: Playlist) -> StoreResult<()>;
@@ -216,6 +217,16 @@ impl LibraryStore for SqliteLibraryStore {
                     statistics.last_skipped_at.and_then(system_time_to_unix),
                     track.location.is_missing(),
                 ],
+            )
+            .map(|_| ())
+            .map_err(StoreError::from)
+    }
+
+    fn delete_track(&self, track_id: TrackId) -> StoreResult<()> {
+        self.connection_guard()?
+            .execute(
+                "DELETE FROM tracks WHERE id = ?1",
+                params![track_id.get()],
             )
             .map(|_| ())
             .map_err(StoreError::from)
@@ -517,6 +528,16 @@ impl LibraryStore for InMemoryLibraryStore {
         Ok(())
     }
 
+    fn delete_track(&self, track_id: TrackId) -> StoreResult<()> {
+        let mut tracks = self.tracks_guard()?;
+        tracks.remove(&track_id);
+        drop(tracks);
+        for playlist in self.playlists_guard()?.values_mut() {
+            playlist.entries.retain(|entry| entry.track_id != track_id);
+        }
+        Ok(())
+    }
+
     fn track(&self, track_id: TrackId) -> StoreResult<Option<Track>> {
         Ok(self.tracks_guard()?.get(&track_id).cloned())
     }
@@ -628,6 +649,59 @@ mod tests {
 
         assert_eq!(store.track(track.id), Ok(Some(track.clone())));
         assert_eq!(store.tracks(), Ok(vec![track]));
+    }
+
+    #[test]
+    fn in_memory_store_deletes_tracks_and_clears_playlist_entries() {
+        let store = InMemoryLibraryStore::new();
+        let first_track = track(1, "a.flac");
+        let other_track = track(2, "b.flac");
+        let stored_playlist = playlist(1, "Favorites", vec![entry(1, 1, 0), entry(1, 2, 1)]);
+
+        assert_eq!(store.save_track(first_track.clone()), Ok(()));
+        assert_eq!(store.save_track(other_track.clone()), Ok(()));
+        assert_eq!(store.save_playlist(stored_playlist.clone()), Ok(()));
+
+        assert_eq!(store.delete_track(first_track.id), Ok(()));
+        assert_eq!(store.track(first_track.id), Ok(None));
+        assert_eq!(store.tracks(), Ok(vec![other_track]));
+
+        let stored = store
+            .playlist(stored_playlist.id)
+            .expect("playlist loads")
+            .expect("playlist exists");
+        assert_eq!(stored.entries.len(), 1);
+        assert_eq!(stored.entries[0].track_id, track_id(2));
+    }
+
+    #[test]
+    fn sqlite_store_deletes_tracks_and_cascades_to_playlist_entries() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory sqlite store");
+        let first_track = track(1, "a.flac");
+        let second_track = track(2, "b.flac");
+        let stored_playlist = playlist(1, "Favorites", vec![entry(1, 1, 0), entry(1, 2, 1)]);
+
+        assert_eq!(store.save_track(first_track.clone()), Ok(()));
+        assert_eq!(store.save_track(second_track.clone()), Ok(()));
+        assert_eq!(store.save_playlist(stored_playlist.clone()), Ok(()));
+
+        assert_eq!(store.delete_track(first_track.id), Ok(()));
+        assert_eq!(store.track(first_track.id), Ok(None));
+        assert_eq!(store.tracks(), Ok(vec![second_track]));
+
+        let stored = store
+            .playlist(stored_playlist.id)
+            .expect("playlist loads")
+            .expect("playlist exists");
+        assert_eq!(stored.entries.len(), 1);
+        assert_eq!(stored.entries[0].track_id, track_id(2));
+    }
+
+    #[test]
+    fn deleting_a_missing_track_is_a_no_op() {
+        let store = InMemoryLibraryStore::new();
+
+        assert_eq!(store.delete_track(track_id(42)), Ok(()));
     }
 
     #[test]
