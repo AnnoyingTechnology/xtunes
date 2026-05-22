@@ -265,6 +265,7 @@ impl AlbumsView {
         content.set_hexpand(true);
         let artwork = self.album_artwork(album);
         let palette_provider = artwork.palette.map(album_detail_palette_provider);
+        install_palette_provider(&content, palette_provider.as_ref());
         apply_palette_style(
             &content,
             palette_provider.as_ref(),
@@ -550,15 +551,31 @@ fn apply_palette_style(
     provider: Option<&gtk::CssProvider>,
     css_class: &str,
 ) {
-    let Some(provider) = provider else {
+    if provider.is_none() {
+        return;
+    }
+
+    widget.as_ref().add_css_class(css_class);
+}
+
+fn install_palette_provider(
+    widget: &impl IsA<gtk::Widget>,
+    provider: Option<&gtk::CssProvider>,
+) {
+    let (Some(display), Some(provider)) = (gdk::Display::default(), provider) else {
         return;
     };
 
-    let widget = widget.as_ref();
-    widget.add_css_class(css_class);
-    widget
-        .style_context()
-        .add_provider(provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 2);
+    gtk::style_context_add_provider_for_display(
+        &display,
+        provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 2,
+    );
+
+    let provider = provider.clone();
+    widget.as_ref().connect_destroy(move |_| {
+        gtk::style_context_remove_provider_for_display(&display, &provider);
+    });
 }
 
 fn album_detail_palette_css(palette: ArtworkPalette) -> String {

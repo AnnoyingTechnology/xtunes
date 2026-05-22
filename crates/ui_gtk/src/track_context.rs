@@ -2,10 +2,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use gtk::{gdk, gio, glib};
+use gtk::{gdk, glib};
 use xtunes_app_runtime::TrackId;
 
 pub(crate) type TrackActionCallback = Rc<dyn Fn(Vec<TrackId>)>;
+type PendingConfirmCallback = Rc<RefCell<Option<Box<dyn FnOnce(Vec<TrackId>)>>>>;
 
 #[derive(Clone)]
 pub(crate) struct TrackContextCallbacks {
@@ -13,85 +14,17 @@ pub(crate) struct TrackContextCallbacks {
     pub(crate) move_to_trash: TrackActionCallback,
 }
 
-const CONTEXT_GROUP: &str = "track-context";
-const REMOVE_ACTION: &str = "remove-from-library";
-const TRASH_ACTION: &str = "move-to-trash";
-const CANCEL_BUTTON_INDEX: i32 = 0;
-const CONFIRM_BUTTON_INDEX: i32 = 1;
-
 #[derive(Clone)]
 pub(crate) struct TrackRowContextMenu {
-    target_track_ids: Rc<RefCell<Vec<TrackId>>>,
-    menu_model: gio::Menu,
-    action_group: gio::SimpleActionGroup,
+    callbacks: TrackContextCallbacks,
+    parent_window: gtk::Window,
 }
 
 impl TrackRowContextMenu {
-    pub(crate) fn new(
-        callbacks: TrackContextCallbacks,
-        parent_window: gtk::Window,
-    ) -> Self {
-        let target_track_ids: Rc<RefCell<Vec<TrackId>>> = Rc::new(RefCell::new(Vec::new()));
-
-        let menu_model = gio::Menu::new();
-        menu_model.append(
-            Some("Remove from Library"),
-            Some(&format!("{CONTEXT_GROUP}.{REMOVE_ACTION}")),
-        );
-        menu_model.append(
-            Some("Move to Trash"),
-            Some(&format!("{CONTEXT_GROUP}.{TRASH_ACTION}")),
-        );
-
-        let action_group = gio::SimpleActionGroup::new();
-
-        let remove_action = gio::SimpleAction::new(REMOVE_ACTION, None);
-        let target_for_remove = target_track_ids.clone();
-        let remove_callback = callbacks.remove_from_library;
-        remove_action.connect_activate(move |_, _| {
-            let ids = target_for_remove.borrow().clone();
-            if ids.is_empty() {
-                return;
-            }
-            remove_callback(ids);
-        });
-        action_group.add_action(&remove_action);
-
-        let trash_action = gio::SimpleAction::new(TRASH_ACTION, None);
-        let target_for_trash = target_track_ids.clone();
-        let window_for_trash = parent_window;
-        let trash_callback = callbacks.move_to_trash;
-        trash_action.connect_activate(move |_, _| {
-            let ids = target_for_trash.borrow().clone();
-            eprintln!(
-                "[xtunes][ctxmenu] trash action fired with {} ids",
-                ids.len()
-            );
-            if ids.is_empty() {
-                return;
-            }
-
-            // Defer the dialog to the next idle so the popover has finished
-            // closing before the modal opens.
-            let parent = window_for_trash.clone();
-            let trash_callback = trash_callback.clone();
-            glib::idle_add_local_once(move || {
-                eprintln!("[xtunes][ctxmenu] idle fired — building dialog");
-                confirm_move_to_trash(&parent, ids, move |confirmed_ids| {
-                    eprintln!(
-                        "[xtunes][ctxmenu] on_confirm running ({} ids)",
-                        confirmed_ids.len()
-                    );
-                    trash_callback(confirmed_ids);
-                });
-            });
-        });
-        action_group.add_action(&trash_action);
-
+    pub(crate) fn new(callbacks: TrackContextCallbacks, parent_window: gtk::Window) -> Self {
         Self {
-            target_track_ids,
-            menu_model,
-            action_group,
+            callbacks,
+            parent_window,
         }
     }
 
@@ -106,22 +39,93 @@ impl TrackRowContextMenu {
             return;
         }
 
-        self.target_track_ids.replace(track_ids);
+        self.popup_at_parent(track_ids, anchor, anchor, x, y);
+    }
 
-        let popover = gtk::PopoverMenu::from_model(Some(&self.menu_model));
+    pub(crate) fn popup_at_parent(
+        &self,
+        track_ids: Vec<TrackId>,
+        anchor: &impl IsA<gtk::Widget>,
+        popover_parent: &impl IsA<gtk::Widget>,
+        x: f64,
+        y: f64,
+    ) {
+        if track_ids.is_empty() {
+            return;
+        }
+
+        let (parent_x, parent_y) = if anchor.as_ref() == popover_parent.as_ref() {
+            (x, y)
+        } else {
+            let Some(coordinates) =
+                anchor
+                    .as_ref()
+                    .translate_coordinates(popover_parent.as_ref(), x, y)
+            else {
+                return;
+            };
+            coordinates
+        };
+
+        let popover = gtk::Popover::new();
         popover.set_has_arrow(false);
-        popover.insert_action_group(CONTEXT_GROUP, Some(&self.action_group));
-        popover.set_parent(anchor.as_ref());
+        popover.set_parent(popover_parent.as_ref());
+        popover.set_child(Some(&self.menu_content(&popover, track_ids)));
 
         let popover_for_close = popover.clone();
         popover.connect_closed(move |_| {
             popover_for_close.unparent();
         });
 
-        let rect = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+        let rect = gdk::Rectangle::new(parent_x as i32, parent_y as i32, 1, 1);
         popover.set_pointing_to(Some(&rect));
         popover.popup();
     }
+
+    fn menu_content(&self, popover: &gtk::Popover, track_ids: Vec<TrackId>) -> gtk::Box {
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.add_css_class("track-context-menu");
+
+        let remove_button = context_menu_button("Remove from Library");
+        let ids_for_remove = track_ids.clone();
+        let remove_callback = self.callbacks.remove_from_library.clone();
+        let popover_for_remove = popover.clone();
+        remove_button.connect_clicked(move |_| {
+            popover_for_remove.popdown();
+            remove_callback(ids_for_remove.clone());
+        });
+        content.append(&remove_button);
+
+        let trash_button = context_menu_button("Move to Trash");
+        let parent = self.parent_window.clone();
+        let trash_callback = self.callbacks.move_to_trash.clone();
+        let popover_for_trash = popover.clone();
+        trash_button.connect_clicked(move |_| {
+            popover_for_trash.popdown();
+            confirm_move_to_trash(&parent, track_ids.clone(), {
+                let trash_callback = trash_callback.clone();
+                move |confirmed_ids| trash_callback(confirmed_ids)
+            });
+        });
+        content.append(&trash_button);
+
+        content
+    }
+}
+
+fn context_menu_button(label: &str) -> gtk::Button {
+    let text = gtk::Label::new(Some(label));
+    text.set_xalign(0.0);
+    text.set_halign(gtk::Align::Fill);
+    text.set_hexpand(true);
+
+    let button = gtk::Button::new();
+    button.add_css_class("flat");
+    button.add_css_class("track-context-menu-item");
+    button.set_child(Some(&text));
+    button.set_halign(gtk::Align::Fill);
+    button.set_hexpand(true);
+    button
 }
 
 fn confirm_move_to_trash(
@@ -129,73 +133,96 @@ fn confirm_move_to_trash(
     track_ids: Vec<TrackId>,
     on_confirm: impl FnOnce(Vec<TrackId>) + 'static,
 ) {
-    let (message, detail) = trash_confirmation_text(track_ids.len());
-    eprintln!(
-        "[xtunes][ctxmenu] confirm_move_to_trash: parent={:?}, message={}",
-        parent.title().map(|t| t.to_string()),
-        message
-    );
+    let detail = trash_confirmation_detail(track_ids.len());
 
-    let dialog = gtk::AlertDialog::builder()
+    let window = gtk::Window::builder()
+        .title("Move to Trash")
+        .transient_for(parent)
         .modal(true)
-        .message(message)
-        .detail(detail)
-        .buttons(["Cancel", "Move to Trash"])
-        .default_button(CONFIRM_BUTTON_INDEX)
-        .cancel_button(CANCEL_BUTTON_INDEX)
+        .resizable(false)
+        .default_width(440)
         .build();
 
-    // Hold the dialog alive in the callback so the GObject cannot be freed
-    // before the async choose completes.
-    let dialog_keepalive = dialog.clone();
-    dialog.choose(
-        Some(parent),
-        None::<&gio::Cancellable>,
-        move |result| {
-            eprintln!(
-                "[xtunes][ctxmenu] AlertDialog.choose callback fired with result: {:?}",
-                result
-            );
-            let _keepalive = dialog_keepalive;
-            if matches!(result, Ok(index) if index == CONFIRM_BUTTON_INDEX) {
-                on_confirm(track_ids);
-            }
-        },
-    );
-    eprintln!("[xtunes][ctxmenu] dialog.choose returned (async pending)");
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_top(18);
+    content.set_margin_end(18);
+    content.set_margin_bottom(18);
+    content.set_margin_start(18);
+
+    let detail_label = gtk::Label::new(Some(&detail));
+    detail_label.add_css_class("dim-label");
+    detail_label.set_xalign(0.0);
+    detail_label.set_wrap(true);
+    content.append(&detail_label);
+
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+
+    let cancel_button = gtk::Button::with_label("Cancel");
+    let trash_button = gtk::Button::with_label("Move to Trash");
+    trash_button.add_css_class("destructive-action");
+
+    let window_for_cancel = window.clone();
+    cancel_button.connect_clicked(move |_| {
+        window_for_cancel.close();
+    });
+
+    let confirm_callback: PendingConfirmCallback =
+        Rc::new(RefCell::new(Some(Box::new(on_confirm))));
+    let callback_for_trash = confirm_callback.clone();
+    let window_for_trash = window.clone();
+    trash_button.connect_clicked(move |_| {
+        if let Some(callback) = callback_for_trash.borrow_mut().take() {
+            callback(track_ids.clone());
+        }
+        window_for_trash.close();
+    });
+
+    buttons.append(&cancel_button);
+    buttons.append(&trash_button);
+    content.append(&buttons);
+    window.set_child(Some(&content));
+    window.set_default_widget(Some(&cancel_button));
+
+    let key_controller = gtk::EventControllerKey::new();
+    let window_for_escape = window.clone();
+    key_controller.connect_key_pressed(move |_controller, key, _keycode, _state| {
+        if key == gdk::Key::Escape {
+            window_for_escape.close();
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    window.add_controller(key_controller);
+
+    window.present();
+    cancel_button.grab_focus();
 }
 
-fn trash_confirmation_text(count: usize) -> (String, String) {
+fn trash_confirmation_detail(count: usize) -> String {
     if count == 1 {
-        (
-            "Move this track to the Trash?".to_owned(),
-            "The audio file will be moved to the system trash and the track will be removed from the library.".to_owned(),
-        )
+        "The audio file will be moved to the system trash and the track will be removed from the library.".to_owned()
     } else {
-        (
-            format!("Move {count} tracks to the Trash?"),
-            format!(
-                "The {count} audio files will be moved to the system trash and the tracks will be removed from the library."
-            ),
+        format!(
+            "The {count} audio files will be moved to the system trash and the tracks will be removed from the library."
         )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::trash_confirmation_text;
+    use super::trash_confirmation_detail;
 
     #[test]
-    fn single_track_confirmation_uses_singular_phrasing() {
-        let (message, detail) = trash_confirmation_text(1);
-        assert_eq!(message, "Move this track to the Trash?");
+    fn single_track_confirmation_detail_uses_singular_phrasing() {
+        let detail = trash_confirmation_detail(1);
         assert!(detail.contains("audio file will be moved"));
     }
 
     #[test]
-    fn multi_track_confirmation_uses_plural_phrasing_with_count() {
-        let (message, detail) = trash_confirmation_text(3);
-        assert_eq!(message, "Move 3 tracks to the Trash?");
+    fn multi_track_confirmation_detail_uses_plural_phrasing_with_count() {
+        let detail = trash_confirmation_detail(3);
         assert!(detail.contains("3 audio files"));
     }
 }

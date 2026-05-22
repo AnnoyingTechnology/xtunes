@@ -133,7 +133,6 @@ fn accent_css(palette: AccentPalette) -> String {
         columnview.track-table listview row:selected cell {{
             background-color: {background};
             background-image: none;
-            color: {foreground};
         }}
 
         columnview.track-table listview row:selected .track-table-cell,
@@ -142,13 +141,14 @@ fn accent_css(palette: AccentPalette) -> String {
         .track-table-cell.track-table-row-selected {{
             background-color: {background};
             background-image: none;
-            color: {foreground};
         }}
 
-        columnview.track-table listview row:selected label,
-        .track-table-cell.track-table-row-selected label,
-        columnview.track-table listview row:selected button.rating-star,
-        .track-table-cell.track-table-row-selected button.rating-star {{
+        columnview.track-table listview row:selected .track-table-cell > label,
+        columnview.track-table listview row:selected .track-table-cell > image,
+        columnview.track-table listview row:selected .track-table-cell .rating-stars button.rating-star,
+        .track-table-cell.track-table-row-selected > label,
+        .track-table-cell.track-table-row-selected > image,
+        .track-table-cell.track-table-row-selected .rating-stars button.rating-star {{
             color: {foreground};
         }}
 

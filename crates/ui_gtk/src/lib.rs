@@ -749,6 +749,17 @@ fn install_app_css() {
             color: #e66100;
         }
 
+        .track-context-menu {
+            padding: 4px;
+        }
+
+        button.track-context-menu-item {
+            min-height: 30px;
+            min-width: 160px;
+            padding-left: 8px;
+            padding-right: 8px;
+        }
+
         .track-table header {
             background-color: alpha(@theme_fg_color, 0.08);
         }
@@ -830,8 +841,10 @@ fn install_app_css() {
 
         .track-table listview row:selected .track-table-cell > label,
         .track-table listview row:selected .track-table-cell > image,
+        .track-table listview row:selected .track-table-cell .rating-stars button.rating-star,
         .track-table-cell.track-table-row-selected > label,
-        .track-table-cell.track-table-row-selected > image {
+        .track-table-cell.track-table-row-selected > image,
+        .track-table-cell.track-table-row-selected .rating-stars button.rating-star {
             color: @theme_selected_fg_color;
         }
 

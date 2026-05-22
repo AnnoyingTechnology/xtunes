@@ -36,6 +36,7 @@ pub(crate) type TrackActivatedCallback = Rc<dyn Fn(TrackId)>;
 struct TrackTableContextMenu {
     menu: TrackRowContextMenu,
     selection: gtk::MultiSelection,
+    popover_parent: gtk::ScrolledWindow,
 }
 
 struct StatusBinding {
@@ -351,9 +352,15 @@ pub(crate) fn build_track_table(
     let sorted_rows = gtk::SortListModel::new(Some(store.clone()), table.sorter());
     let selection = gtk::MultiSelection::new(Some(sorted_rows));
 
+    let scroller = gtk::ScrolledWindow::new();
+    scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    scroller.set_vexpand(true);
+    scroller.set_hexpand(true);
+
     let context_menu = context_menu.map(|menu| TrackTableContextMenu {
         menu,
         selection: selection.clone(),
+        popover_parent: scroller.clone(),
     });
 
     table.append_column(&build_status_column(
@@ -406,10 +413,6 @@ pub(crate) fn build_track_table(
     }
     table.set_model(Some(&selection));
 
-    let scroller = gtk::ScrolledWindow::new();
-    scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    scroller.set_vexpand(true);
-    scroller.set_hexpand(true);
     scroller.set_child(Some(&table));
     TrackTable {
         scroller,
@@ -444,7 +447,9 @@ fn install_cell_context_menu(
         if track_ids.is_empty() {
             return;
         }
-        context.menu.popup_at(track_ids, &cell_for_gesture, x, y);
+        context
+            .menu
+            .popup_at_parent(track_ids, &cell_for_gesture, &context.popover_parent, x, y);
     });
     cell.add_controller(gesture);
 }
