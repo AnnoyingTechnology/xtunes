@@ -4,14 +4,15 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 
 use super::{
-    ApplicationCommand, ApplicationRuntimeError, LibraryScanRequestedCallback, PREFERENCES_HEIGHT,
-    PREFERENCES_WIDTH, SharedRuntime, UserSettings, WINDOW_SHADOW_MARGIN,
+    ApplicationCommand, ApplicationRuntimeError, PREFERENCES_HEIGHT, PREFERENCES_WIDTH,
+    UserSettings, WINDOW_SHADOW_MARGIN, command_controller::SharedCommandController,
+    library_scan::LibraryScanRequestedCallback,
 };
 
 pub(crate) fn install_preferences_action(
     app: &gtk::Application,
     window: &gtk::ApplicationWindow,
-    runtime: SharedRuntime,
+    command_controller: SharedCommandController,
     scan_requested: LibraryScanRequestedCallback,
 ) {
     if app.lookup_action("preferences").is_some() {
@@ -20,10 +21,10 @@ pub(crate) fn install_preferences_action(
 
     let preferences = gio::SimpleAction::new("preferences", None);
     let window = window.clone();
-    let runtime = runtime.clone();
+    let command_controller = command_controller.clone();
     let scan_requested = scan_requested.clone();
     preferences.connect_activate(move |_action, _parameter| {
-        open_preferences_window(&window, runtime.clone(), scan_requested.clone());
+        open_preferences_window(&window, command_controller.clone(), scan_requested.clone());
     });
     app.add_action(&preferences);
     app.set_accels_for_action("app.preferences", &["<Primary>comma"]);
@@ -31,7 +32,7 @@ pub(crate) fn install_preferences_action(
 
 pub(crate) fn settings_button(
     window: &gtk::ApplicationWindow,
-    runtime: SharedRuntime,
+    command_controller: SharedCommandController,
     scan_requested: LibraryScanRequestedCallback,
 ) -> gtk::Button {
     let icon = gtk::Image::from_icon_name("preferences-system-symbolic");
@@ -45,10 +46,10 @@ pub(crate) fn settings_button(
     button.set_valign(gtk::Align::Center);
 
     let window = window.clone();
-    let runtime = runtime.clone();
+    let command_controller = command_controller.clone();
     let scan_requested = scan_requested.clone();
     button.connect_clicked(move |_| {
-        open_preferences_window(&window, runtime.clone(), scan_requested.clone());
+        open_preferences_window(&window, command_controller.clone(), scan_requested.clone());
     });
 
     button
@@ -56,7 +57,7 @@ pub(crate) fn settings_button(
 
 fn open_preferences_window(
     parent: &gtk::ApplicationWindow,
-    runtime: SharedRuntime,
+    command_controller: SharedCommandController,
     scan_requested: LibraryScanRequestedCallback,
 ) {
     let window = gtk::Window::builder()
@@ -134,7 +135,12 @@ fn open_preferences_window(
     let path_entry = gtk::Entry::new();
     path_entry.set_hexpand(true);
     path_entry.set_placeholder_text(Some("/home/julien/Music"));
-    if let Some(library_path) = &runtime.borrow().settings().library_path {
+    if let Some(library_path) = command_controller
+        .runtime()
+        .borrow()
+        .settings()
+        .library_path()
+    {
         path_entry.set_text(&library_path.to_string_lossy());
     }
 
@@ -153,23 +159,23 @@ fn open_preferences_window(
     scan_status.set_xalign(0.0);
     scan_status.set_wrap(true);
 
-    let runtime_for_entry = runtime.clone();
+    let command_controller_for_entry = command_controller.clone();
     path_entry.connect_activate(move |entry| {
-        let _result = save_library_path_from_entry(&runtime_for_entry, entry);
+        let _result = save_library_path_from_entry(&command_controller_for_entry, entry);
     });
 
     let window_for_folder = window.clone();
-    let runtime_for_folder = runtime.clone();
+    let command_controller_for_folder = command_controller.clone();
     let path_entry_for_folder = path_entry.clone();
     folder_button.connect_clicked(move |_| {
         open_library_folder_chooser(
             &window_for_folder,
-            &runtime_for_folder,
+            &command_controller_for_folder,
             &path_entry_for_folder,
         );
     });
 
-    let runtime_for_scan = runtime.clone();
+    let command_controller_for_scan = command_controller.clone();
     let path_entry_for_scan = path_entry.clone();
     let scan_status_for_scan = scan_status.clone();
     let scan_requested_for_scan = scan_requested.clone();
@@ -179,17 +185,19 @@ fn open_preferences_window(
             return;
         }
 
-        let scan_message =
-            match save_library_path_from_entry(&runtime_for_scan, &path_entry_for_scan) {
-                Ok(()) => match request_library_scan_from_entry(
-                    &path_entry_for_scan,
-                    &scan_requested_for_scan,
-                ) {
-                    Ok(()) => "Scan started. Progress is shown in the status bar.".to_owned(),
-                    Err(error) => scan_error_text(error).to_owned(),
-                },
+        let scan_message = match save_library_path_from_entry(
+            &command_controller_for_scan,
+            &path_entry_for_scan,
+        ) {
+            Ok(()) => match request_library_scan_from_entry(
+                &path_entry_for_scan,
+                &scan_requested_for_scan,
+            ) {
+                Ok(()) => "Scan started. Progress is shown in the status bar.".to_owned(),
                 Err(error) => scan_error_text(error).to_owned(),
-            };
+            },
+            Err(error) => scan_error_text(error).to_owned(),
+        };
         scan_status_for_scan.set_text(&scan_message);
     });
 
@@ -222,7 +230,7 @@ fn open_preferences_window(
 
 fn open_library_folder_chooser(
     parent: &gtk::Window,
-    runtime: &SharedRuntime,
+    command_controller: &SharedCommandController,
     path_entry: &gtk::Entry,
 ) {
     let dialog = gtk::FileDialog::builder()
@@ -237,26 +245,22 @@ fn open_library_folder_chooser(
         dialog.set_initial_folder(Some(&current_folder));
     }
 
-    let runtime = runtime.clone();
+    let command_controller = command_controller.clone();
     let path_entry = path_entry.clone();
-    dialog.select_folder(
-        Some(parent),
-        None::<&gio::Cancellable>,
-        move |result| {
-            let Ok(file) = result else {
-                return;
-            };
-            let Some(folder_path) = file.path() else {
-                return;
-            };
-            path_entry.set_text(&folder_path.to_string_lossy());
-            let _result = save_library_path_from_entry(&runtime, &path_entry);
-        },
-    );
+    dialog.select_folder(Some(parent), None::<&gio::Cancellable>, move |result| {
+        let Ok(file) = result else {
+            return;
+        };
+        let Some(folder_path) = file.path() else {
+            return;
+        };
+        path_entry.set_text(&folder_path.to_string_lossy());
+        let _result = save_library_path_from_entry(&command_controller, &path_entry);
+    });
 }
 
 fn save_library_path_from_entry(
-    runtime: &SharedRuntime,
+    command_controller: &SharedCommandController,
     path_entry: &gtk::Entry,
 ) -> Result<(), ApplicationRuntimeError> {
     let path_text = path_entry.text().trim().to_owned();
@@ -265,11 +269,9 @@ fn save_library_path_from_entry(
     } else {
         Some(PathBuf::from(path_text))
     };
-    let settings = UserSettings { library_path };
+    let settings = UserSettings::with_library_path(library_path);
 
-    runtime
-        .borrow_mut()
-        .handle_command(ApplicationCommand::UpdateSettings(settings))
+    command_controller.dispatch(ApplicationCommand::UpdateSettings(settings))
 }
 
 fn request_library_scan_from_entry(
@@ -291,6 +293,10 @@ fn scan_error_text(error: ApplicationRuntimeError) -> &'static str {
             "Library scanning is not available in this build."
         }
         ApplicationRuntimeError::LibraryStoreFailed => "The library database could not be updated.",
+        ApplicationRuntimeError::MetadataWriteFailed => "The track metadata could not be updated.",
+        ApplicationRuntimeError::InvalidPlaylistName => "The playlist name is not valid.",
+        ApplicationRuntimeError::PlaylistEntryNotFound
+        | ApplicationRuntimeError::PlaylistNotFound => "The playlist could not be updated.",
         ApplicationRuntimeError::BackgroundTaskRunning => "A library scan is already running.",
         ApplicationRuntimeError::PlaybackFailed
         | ApplicationRuntimeError::PlaybackServiceUnavailable
@@ -298,5 +304,6 @@ fn scan_error_text(error: ApplicationRuntimeError) -> &'static str {
         ApplicationRuntimeError::SettingsLoadFailed
         | ApplicationRuntimeError::SettingsSaveFailed => "The library path could not be saved.",
         ApplicationRuntimeError::TrackTrashFailed => "The track could not be moved to trash.",
+        ApplicationRuntimeError::UnsupportedCommand(_) => "This action is not available yet.",
     }
 }

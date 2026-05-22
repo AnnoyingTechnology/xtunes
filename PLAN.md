@@ -2,6 +2,16 @@
 
 ## Summary
 
+developer => desired contextual menu on tracks:
+- Add to playlist => list
+- Play Next (inject next in the queue)
+- Get Info (show the full edition window, multitab)
+- Show Album (switches to the associated Album view)
+- Copy (actually copy the audio file itself)
+- Show in folder (open nautilus or whatever)
+- Remove from library (already implemented)
+- Move to trash (already implemented)
+
 `xTunes` is a Linux-only, Debian-first music library/player built with Rust,
 GTK4, GStreamer, and SQLite. The product target is an iTunes 8~12-like desktop
 music manager centered on a dense table/list workflow.

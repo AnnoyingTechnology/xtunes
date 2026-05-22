@@ -9,7 +9,7 @@ use std::{
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
-pub use xtunes_domain::UserSettings;
+pub use xtunes_domain::{LibrarySettings, UserSettings};
 
 pub type SettingsResult<T> = Result<T, SettingsError>;
 
@@ -110,19 +110,28 @@ impl SettingsStore for TomlSettingsStore {
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct SettingsDocument {
-    library_path: Option<PathBuf>,
+    library: LibrarySettingsDocument,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct LibrarySettingsDocument {
+    path: Option<PathBuf>,
 }
 
 impl SettingsDocument {
     fn from_settings(settings: UserSettings) -> Self {
         Self {
-            library_path: settings.library_path,
+            library: LibrarySettingsDocument {
+                path: settings.library.path,
+            },
         }
     }
 
     fn into_settings(self) -> UserSettings {
         UserSettings {
-            library_path: self.library_path,
+            library: LibrarySettings {
+                path: self.library.path,
+            },
         }
     }
 }
@@ -137,18 +146,13 @@ mod tests {
     fn in_memory_settings_store_defaults_to_no_library_path() {
         let store = InMemorySettingsStore::default();
 
-        assert_eq!(
-            store.load_settings(),
-            Ok(UserSettings { library_path: None })
-        );
+        assert_eq!(store.load_settings(), Ok(UserSettings::default()));
     }
 
     #[test]
     fn in_memory_settings_store_saves_settings() {
         let store = InMemorySettingsStore::default();
-        let settings = UserSettings {
-            library_path: Some(PathBuf::from("/music")),
-        };
+        let settings = UserSettings::with_library_path(Some(PathBuf::from("/music")));
 
         assert_eq!(store.save_settings(settings.clone()), Ok(()));
 
@@ -167,9 +171,7 @@ mod tests {
     fn toml_settings_store_saves_and_loads_library_path() {
         let path = unique_settings_path();
         let store = TomlSettingsStore::new(&path);
-        let settings = UserSettings {
-            library_path: Some(PathBuf::from("/music")),
-        };
+        let settings = UserSettings::with_library_path(Some(PathBuf::from("/music")));
 
         assert_eq!(store.save_settings(settings.clone()), Ok(()));
         assert_eq!(store.load_settings(), Ok(settings));

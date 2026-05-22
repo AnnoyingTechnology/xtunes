@@ -3,8 +3,8 @@ use std::{path::PathBuf, rc::Rc, sync::mpsc, time::Duration};
 use gtk::glib;
 
 use super::{
-    ApplicationRuntimeError, LibraryChangedCallback, SharedRuntime, StatusBar,
-    run_library_scan_task,
+    ApplicationRuntimeError, LibraryChangedCallback, SharedRuntime, run_library_scan_task,
+    status_bar::StatusBar,
 };
 
 pub(crate) type LibraryScanRequestedCallback =

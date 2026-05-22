@@ -10,10 +10,15 @@ use gtk::{cairo, gdk, glib};
 
 use super::{
     APP_ID, NOW_PLAYING_ICON_SIZE, NOW_PLAYING_SIDE_WIDTH, SharedRuntime, TITLEBAR_HEIGHT,
+    command_controller::SharedCommandController,
 };
-use xtunes_app_runtime::{
-    ApplicationCommand, NowPlaying, PlaybackCommand, PlaybackState, Track, TrackMetadata,
+use model::{
+    artist_album_text, playback_position, progress_fraction, progress_fraction_from_x,
+    remaining_time_text, time_text, track_title,
 };
+use xtunes_app_runtime::{ApplicationCommand, NowPlaying, PlaybackCommand, Track};
+
+mod model;
 
 #[derive(Clone)]
 pub(crate) struct NowPlayingView {
@@ -69,7 +74,7 @@ const MARQUEE_SPEED: f64 = 0.75;
 const MARQUEE_VIEWPORT_WIDTH: i32 = 400;
 
 impl NowPlayingView {
-    pub(crate) fn new(runtime: SharedRuntime) -> Self {
+    pub(crate) fn new(runtime: SharedRuntime, command_controller: SharedCommandController) -> Self {
         let area = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         area.add_css_class("now-playing-area");
         area.set_size_request(super::NOW_PLAYING_WIDTH, TITLEBAR_HEIGHT);
@@ -122,7 +127,7 @@ impl NowPlayingView {
         progress.set_cursor_from_name(Some("pointer"));
 
         let duration = Rc::new(Cell::new(Duration::ZERO));
-        install_progress_seeking(&progress, runtime.clone(), duration.clone());
+        install_progress_seeking(&progress, command_controller.clone(), duration.clone());
 
         details.append(&detail_content);
         details.append(&progress);
@@ -164,7 +169,7 @@ impl NowPlayingView {
             artwork_path,
             duration,
         };
-        install_playback_option_controls(&view, runtime.clone());
+        install_playback_option_controls(&view, command_controller);
         view.refresh(&runtime.borrow().now_playing());
         install_refresh_timer(&view, runtime);
         view
@@ -213,7 +218,7 @@ impl NowPlayingView {
             self.progress.set_fraction(0.0);
             self.duration.set(Duration::ZERO);
             sync_playback_option_icon(&self.shuffle_icon, now_playing.options.shuffle_enabled);
-            sync_playback_option_icon(&self.repeat_icon, now_playing.options.repeat_enabled);
+            sync_playback_option_icon(&self.repeat_icon, now_playing.options.repeat_enabled());
             return;
         };
 
@@ -231,7 +236,7 @@ impl NowPlayingView {
         self.progress
             .set_fraction(progress_fraction(position, duration));
         sync_playback_option_icon(&self.shuffle_icon, now_playing.options.shuffle_enabled);
-        sync_playback_option_icon(&self.repeat_icon, now_playing.options.repeat_enabled);
+        sync_playback_option_icon(&self.repeat_icon, now_playing.options.repeat_enabled());
     }
 }
 
@@ -240,42 +245,57 @@ fn texture_from_bytes(bytes: Vec<u8>) -> Option<gdk::Texture> {
     Some(gdk::Texture::for_pixbuf(&pixbuf))
 }
 
-fn install_playback_option_controls(view: &NowPlayingView, runtime: SharedRuntime) {
-    let runtime_for_shuffle = runtime.clone();
+fn install_playback_option_controls(
+    view: &NowPlayingView,
+    command_controller: SharedCommandController,
+) {
+    let command_controller_for_shuffle = command_controller.clone();
     let view_for_shuffle = view.clone();
     view.shuffle_button.connect_clicked(move |_| {
-        let _result = runtime_for_shuffle
-            .borrow_mut()
-            .handle_command(ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle));
-        view_for_shuffle.refresh(&runtime_for_shuffle.borrow().now_playing());
+        if command_controller_for_shuffle
+            .dispatch_succeeded(ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle))
+        {
+            view_for_shuffle.refresh(
+                &command_controller_for_shuffle
+                    .runtime()
+                    .borrow()
+                    .now_playing(),
+            );
+        }
     });
 
-    let runtime_for_repeat = runtime;
+    let command_controller_for_repeat = command_controller;
     let view_for_repeat = view.clone();
     view.repeat_button.connect_clicked(move |_| {
-        let _result = runtime_for_repeat
-            .borrow_mut()
-            .handle_command(ApplicationCommand::Playback(PlaybackCommand::ToggleRepeat));
-        view_for_repeat.refresh(&runtime_for_repeat.borrow().now_playing());
+        if command_controller_for_repeat
+            .dispatch_succeeded(ApplicationCommand::Playback(PlaybackCommand::ToggleRepeat))
+        {
+            view_for_repeat.refresh(
+                &command_controller_for_repeat
+                    .runtime()
+                    .borrow()
+                    .now_playing(),
+            );
+        }
     });
 }
 
 fn install_progress_seeking(
     progress: &gtk::ProgressBar,
-    runtime: SharedRuntime,
+    command_controller: SharedCommandController,
     duration: Rc<Cell<Duration>>,
 ) {
     let click = gtk::GestureClick::new();
     click.set_button(gdk::BUTTON_PRIMARY);
     click.set_exclusive(true);
     let progress_for_click = progress.clone();
-    let runtime_for_click = runtime.clone();
+    let command_controller_for_click = command_controller.clone();
     let duration_for_click = duration.clone();
     click.connect_pressed(move |click, _press_count, x, _y| {
         claim_gesture_sequence(click);
         commit_seek_from_progress_x(
             &progress_for_click,
-            &runtime_for_click,
+            &command_controller_for_click,
             &duration_for_click,
             x,
         );
@@ -307,7 +327,7 @@ fn install_progress_seeking(
     });
 
     let progress_for_drag_end = progress.clone();
-    let runtime_for_drag_end = runtime.clone();
+    let command_controller_for_drag_end = command_controller.clone();
     let duration_for_drag_end = duration.clone();
     drag.connect_drag_end(move |drag, offset_x, _offset_y| {
         claim_gesture_sequence(drag);
@@ -316,7 +336,7 @@ fn install_progress_seeking(
         };
         commit_seek_from_progress_x(
             &progress_for_drag_end,
-            &runtime_for_drag_end,
+            &command_controller_for_drag_end,
             &duration_for_drag_end,
             start_x + offset_x,
         );
@@ -344,7 +364,7 @@ fn preview_progress_from_x(
 
 fn commit_seek_from_progress_x(
     progress: &gtk::ProgressBar,
-    runtime: &SharedRuntime,
+    command_controller: &SharedCommandController,
     duration: &Cell<Duration>,
     x: f64,
 ) {
@@ -352,28 +372,22 @@ fn commit_seek_from_progress_x(
         return;
     };
 
-    commit_seek_to_fraction(runtime, duration.get(), fraction);
+    commit_seek_to_fraction(command_controller, duration.get(), fraction);
 }
 
-fn commit_seek_to_fraction(runtime: &SharedRuntime, duration: Duration, fraction: f64) {
+fn commit_seek_to_fraction(
+    command_controller: &SharedCommandController,
+    duration: Duration,
+    fraction: f64,
+) {
     if duration.is_zero() {
         return;
     }
 
     let position = duration.mul_f64(fraction.clamp(0.0, 1.0));
-    let _result = runtime
-        .borrow_mut()
-        .handle_command(ApplicationCommand::Playback(PlaybackCommand::Seek(
-            position,
-        )));
-}
-
-fn progress_fraction_from_x(x: f64, width: i32) -> Option<f64> {
-    if width <= 0 {
-        return None;
-    }
-
-    Some((x / f64::from(width)).clamp(0.0, 1.0))
+    let _result = command_controller.dispatch(ApplicationCommand::Playback(PlaybackCommand::Seek(
+        position,
+    )));
 }
 
 fn install_refresh_timer(view: &NowPlayingView, runtime: SharedRuntime) {
@@ -706,143 +720,4 @@ fn time_label() -> gtk::Label {
     label.set_halign(gtk::Align::Center);
     label.set_xalign(0.5);
     label
-}
-
-fn track_title(track: &Track) -> String {
-    non_empty_text(&track.metadata.title)
-        .or_else(|| {
-            track
-                .location
-                .relative_path
-                .as_path()
-                .file_stem()
-                .and_then(|file_stem| file_stem.to_str())
-                .map(str::trim)
-                .filter(|file_stem| !file_stem.is_empty())
-                .map(ToOwned::to_owned)
-        })
-        .unwrap_or_default()
-}
-
-fn artist_album_text(metadata: &TrackMetadata) -> String {
-    match (
-        non_empty_text(&metadata.artist),
-        non_empty_text(&metadata.album),
-    ) {
-        (Some(artist), Some(album)) => format!("{artist} - {album}"),
-        (Some(artist), None) => artist,
-        (None, Some(album)) => album,
-        (None, None) => String::new(),
-    }
-}
-
-fn non_empty_text(value: &Option<String>) -> Option<String> {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn playback_position(state: &PlaybackState) -> Option<Duration> {
-    match state {
-        PlaybackState::Playing { position, .. } | PlaybackState::Paused { position, .. } => {
-            Some(*position)
-        }
-        PlaybackState::Stopped | PlaybackState::Loading { .. } => None,
-    }
-}
-
-fn remaining_time_text(position: Duration, duration: Duration) -> String {
-    if duration.is_zero() {
-        return String::new();
-    }
-
-    format!("-{}", time_text(duration.saturating_sub(position)))
-}
-
-fn time_text(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-    let hours = seconds / 3_600;
-    let minutes = seconds % 3_600 / 60;
-    let seconds = seconds % 60;
-
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
-}
-
-fn progress_fraction(position: Duration, duration: Duration) -> f64 {
-    if duration.is_zero() {
-        return 0.0;
-    }
-
-    (position.as_secs_f64() / duration.as_secs_f64()).clamp(0.0, 1.0)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use xtunes_app_runtime::TrackMetadata;
-
-    use super::{
-        artist_album_text, progress_fraction, progress_fraction_from_x, remaining_time_text,
-        time_text,
-    };
-
-    #[test]
-    fn artist_album_joins_available_fields() {
-        let metadata = TrackMetadata {
-            artist: Some("M83".to_owned()),
-            album: Some("Hurry Up".to_owned()),
-            ..TrackMetadata::default()
-        };
-
-        assert_eq!(artist_album_text(&metadata), "M83 - Hurry Up");
-    }
-
-    #[test]
-    fn time_text_uses_minutes_until_one_hour() {
-        assert_eq!(time_text(Duration::from_secs(245)), "4:05");
-    }
-
-    #[test]
-    fn time_text_uses_hours_when_needed() {
-        assert_eq!(time_text(Duration::from_secs(3_665)), "1:01:05");
-    }
-
-    #[test]
-    fn remaining_time_is_negative_duration_left() {
-        assert_eq!(
-            remaining_time_text(Duration::from_secs(40), Duration::from_secs(100)),
-            "-1:00"
-        );
-    }
-
-    #[test]
-    fn progress_fraction_is_clamped() {
-        assert_eq!(
-            progress_fraction(Duration::from_secs(150), Duration::from_secs(100)),
-            1.0
-        );
-    }
-
-    #[test]
-    fn progress_fraction_from_x_maps_coordinates_to_fraction() {
-        assert_eq!(progress_fraction_from_x(25.0, 100), Some(0.25));
-    }
-
-    #[test]
-    fn progress_fraction_from_x_clamps_outside_coordinates() {
-        assert_eq!(progress_fraction_from_x(-10.0, 100), Some(0.0));
-        assert_eq!(progress_fraction_from_x(120.0, 100), Some(1.0));
-    }
-
-    #[test]
-    fn progress_fraction_from_x_ignores_unallocated_width() {
-        assert_eq!(progress_fraction_from_x(50.0, 0), None);
-    }
 }

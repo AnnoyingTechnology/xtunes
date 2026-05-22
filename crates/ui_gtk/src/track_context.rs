@@ -8,22 +8,120 @@ use xtunes_app_runtime::TrackId;
 pub(crate) type TrackActionCallback = Rc<dyn Fn(Vec<TrackId>)>;
 type PendingConfirmCallback = Rc<RefCell<Option<Box<dyn FnOnce(Vec<TrackId>)>>>>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TrackContextActionId {
+    RemoveFromLibrary,
+    MoveToTrash,
+}
+
+impl TrackContextActionId {
+    fn css_class(self) -> &'static str {
+        match self {
+            Self::RemoveFromLibrary => "track-context-remove-from-library",
+            Self::MoveToTrash => "track-context-move-to-trash",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TrackSelectionRequirement {
+    AtLeastOne,
+    Single,
+}
+
+const TRACK_SELECTION_REQUIREMENTS: &[TrackSelectionRequirement] = &[
+    TrackSelectionRequirement::AtLeastOne,
+    TrackSelectionRequirement::Single,
+];
+
+impl TrackSelectionRequirement {
+    fn accepts(self, selected_count: usize) -> bool {
+        match self {
+            Self::AtLeastOne => selected_count > 0,
+            Self::Single => selected_count == 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TrackActionConfirmation {
+    None,
+    MoveToTrash,
+}
+
 #[derive(Clone)]
-pub(crate) struct TrackContextCallbacks {
-    pub(crate) remove_from_library: TrackActionCallback,
-    pub(crate) move_to_trash: TrackActionCallback,
+pub(crate) struct TrackContextAction {
+    id: TrackContextActionId,
+    label: &'static str,
+    destructive: bool,
+    selection: TrackSelectionRequirement,
+    confirmation: TrackActionConfirmation,
+    callback: TrackActionCallback,
+}
+
+impl TrackContextAction {
+    pub(crate) fn remove_from_library(callback: TrackActionCallback) -> Self {
+        Self {
+            id: TrackContextActionId::RemoveFromLibrary,
+            label: "Remove from Library",
+            destructive: false,
+            selection: TrackSelectionRequirement::AtLeastOne,
+            confirmation: TrackActionConfirmation::None,
+            callback,
+        }
+    }
+
+    pub(crate) fn move_to_trash(callback: TrackActionCallback) -> Self {
+        Self {
+            id: TrackContextActionId::MoveToTrash,
+            label: "Move to Trash",
+            destructive: true,
+            selection: TrackSelectionRequirement::AtLeastOne,
+            confirmation: TrackActionConfirmation::MoveToTrash,
+            callback,
+        }
+    }
+
+    fn is_available(&self, selected_count: usize) -> bool {
+        self.selection.accepts(selected_count)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TrackContextActionSet {
+    actions: Vec<TrackContextAction>,
+}
+
+impl TrackContextActionSet {
+    pub(crate) fn new(actions: Vec<TrackContextAction>) -> Self {
+        debug_assert!(
+            actions
+                .iter()
+                .all(|action| TRACK_SELECTION_REQUIREMENTS.contains(&action.selection))
+        );
+        Self { actions }
+    }
+
+    fn available_actions(
+        &self,
+        selected_count: usize,
+    ) -> impl Iterator<Item = &TrackContextAction> {
+        self.actions
+            .iter()
+            .filter(move |action| action.is_available(selected_count))
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct TrackRowContextMenu {
-    callbacks: TrackContextCallbacks,
+    actions: TrackContextActionSet,
     parent_window: gtk::Window,
 }
 
 impl TrackRowContextMenu {
-    pub(crate) fn new(callbacks: TrackContextCallbacks, parent_window: gtk::Window) -> Self {
+    pub(crate) fn new(actions: TrackContextActionSet, parent_window: gtk::Window) -> Self {
         Self {
-            callbacks,
+            actions,
             parent_window,
         }
     }
@@ -86,35 +184,25 @@ impl TrackRowContextMenu {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.add_css_class("track-context-menu");
 
-        let remove_button = context_menu_button("Remove from Library");
-        let ids_for_remove = track_ids.clone();
-        let remove_callback = self.callbacks.remove_from_library.clone();
-        let popover_for_remove = popover.clone();
-        remove_button.connect_clicked(move |_| {
-            popover_for_remove.popdown();
-            remove_callback(ids_for_remove.clone());
-        });
-        content.append(&remove_button);
-
-        let trash_button = context_menu_button("Move to Trash");
-        let parent = self.parent_window.clone();
-        let trash_callback = self.callbacks.move_to_trash.clone();
-        let popover_for_trash = popover.clone();
-        trash_button.connect_clicked(move |_| {
-            popover_for_trash.popdown();
-            confirm_move_to_trash(&parent, track_ids.clone(), {
-                let trash_callback = trash_callback.clone();
-                move |confirmed_ids| trash_callback(confirmed_ids)
+        for action in self.actions.available_actions(track_ids.len()) {
+            let button = context_menu_button(action);
+            let action = action.clone();
+            let parent = self.parent_window.clone();
+            let popover = popover.clone();
+            let track_ids = track_ids.clone();
+            button.connect_clicked(move |_| {
+                popover.popdown();
+                run_context_action(&action, &parent, track_ids.clone());
             });
-        });
-        content.append(&trash_button);
+            content.append(&button);
+        }
 
         content
     }
 }
 
-fn context_menu_button(label: &str) -> gtk::Button {
-    let text = gtk::Label::new(Some(label));
+fn context_menu_button(action: &TrackContextAction) -> gtk::Button {
+    let text = gtk::Label::new(Some(action.label));
     text.set_xalign(0.0);
     text.set_halign(gtk::Align::Fill);
     text.set_hexpand(true);
@@ -122,10 +210,28 @@ fn context_menu_button(label: &str) -> gtk::Button {
     let button = gtk::Button::new();
     button.add_css_class("flat");
     button.add_css_class("track-context-menu-item");
+    button.add_css_class(action.id.css_class());
+    if action.destructive {
+        button.add_css_class("destructive-action");
+    }
     button.set_child(Some(&text));
     button.set_halign(gtk::Align::Fill);
     button.set_hexpand(true);
     button
+}
+
+fn run_context_action(action: &TrackContextAction, parent: &gtk::Window, track_ids: Vec<TrackId>) {
+    match action.confirmation {
+        TrackActionConfirmation::None => {
+            (action.callback)(track_ids);
+        }
+        TrackActionConfirmation::MoveToTrash => {
+            let callback = action.callback.clone();
+            confirm_move_to_trash(parent, track_ids, move |confirmed_ids| {
+                callback(confirmed_ids);
+            });
+        }
+    }
 }
 
 fn confirm_move_to_trash(
@@ -212,7 +318,12 @@ fn trash_confirmation_detail(count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::trash_confirmation_detail;
+    use std::{cell::RefCell, rc::Rc};
+
+    use super::{
+        TrackActionCallback, TrackContextAction, TrackContextActionId, TrackSelectionRequirement,
+        trash_confirmation_detail,
+    };
 
     #[test]
     fn single_track_confirmation_detail_uses_singular_phrasing() {
@@ -224,5 +335,38 @@ mod tests {
     fn multi_track_confirmation_detail_uses_plural_phrasing_with_count() {
         let detail = trash_confirmation_detail(3);
         assert!(detail.contains("3 audio files"));
+    }
+
+    #[test]
+    fn declared_actions_have_stable_identity_and_labels() {
+        let callback = no_op_callback();
+        let actions = [
+            TrackContextAction::remove_from_library(callback.clone()),
+            TrackContextAction::move_to_trash(callback),
+        ];
+
+        assert_eq!(actions[0].id, TrackContextActionId::RemoveFromLibrary);
+        assert_eq!(actions[0].label, "Remove from Library");
+        assert!(!actions[0].destructive);
+        assert_eq!(actions[1].id, TrackContextActionId::MoveToTrash);
+        assert_eq!(actions[1].label, "Move to Trash");
+        assert!(actions[1].destructive);
+    }
+
+    #[test]
+    fn action_selection_requirements_are_deterministic() {
+        assert!(!TrackSelectionRequirement::AtLeastOne.accepts(0));
+        assert!(TrackSelectionRequirement::AtLeastOne.accepts(2));
+        assert!(TrackSelectionRequirement::Single.accepts(1));
+        assert!(!TrackSelectionRequirement::Single.accepts(2));
+    }
+
+    fn no_op_callback() -> TrackActionCallback {
+        Rc::new({
+            let calls = Rc::new(RefCell::new(0usize));
+            move |_track_ids| {
+                *calls.borrow_mut() += 1;
+            }
+        })
     }
 }

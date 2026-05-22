@@ -24,6 +24,10 @@ impl LibraryQuery {
 
     pub fn in_playlist(mut self, playlist_id: PlaylistId) -> Self {
         self.playlist_id = Some(playlist_id);
+        self.sort = TrackSort {
+            column: TrackSortColumn::PlaylistPosition,
+            direction: SortDirection::Ascending,
+        };
         self
     }
 
@@ -50,6 +54,7 @@ impl Default for TrackSort {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TrackSortColumn {
+    PlaylistPosition,
     Title,
     Artist,
     Album,
@@ -91,6 +96,20 @@ mod tests {
             LibraryQuery::default().sort,
             TrackSort {
                 column: TrackSortColumn::Title,
+                direction: SortDirection::Ascending
+            }
+        );
+    }
+
+    #[test]
+    fn playlist_queries_default_to_playlist_position_order() {
+        let playlist_id = crate::PlaylistId::new(1).expect("valid playlist id");
+        let query = LibraryQuery::all().in_playlist(playlist_id);
+
+        assert_eq!(
+            query.sort,
+            TrackSort {
+                column: TrackSortColumn::PlaylistPosition,
                 direction: SortDirection::Ascending
             }
         );

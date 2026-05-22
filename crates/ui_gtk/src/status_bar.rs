@@ -1,11 +1,12 @@
 use gtk::prelude::*;
 
-use super::{BackgroundTaskStatus, LibraryScanSummary, STATUS_BAR_HEIGHT};
+use super::{ApplicationRuntimeError, BackgroundTaskStatus, LibraryScanSummary, STATUS_BAR_HEIGHT};
 use crate::track_table::TrackTableRow;
 
 #[derive(Clone)]
 pub(crate) struct StatusBar {
     root: gtk::CenterBox,
+    command_label: gtk::Label,
     summary: gtk::Label,
     task_box: gtk::Box,
     task_spinner: gtk::Spinner,
@@ -18,6 +19,11 @@ impl StatusBar {
         root.add_css_class("status-bar");
         root.set_height_request(STATUS_BAR_HEIGHT);
         root.set_hexpand(true);
+
+        let command_label = gtk::Label::new(None);
+        command_label.add_css_class("command-status-label");
+        command_label.set_xalign(0.0);
+        command_label.set_visible(false);
 
         let summary = gtk::Label::new(None);
         summary.set_xalign(0.5);
@@ -37,11 +43,13 @@ impl StatusBar {
         task_box.append(&task_spinner);
         task_box.append(&task_label);
 
+        root.set_start_widget(Some(&command_label));
         root.set_center_widget(Some(&summary));
         root.set_end_widget(Some(&task_box));
 
         let status_bar = Self {
             root,
+            command_label,
             summary,
             task_box,
             task_spinner,
@@ -82,6 +90,20 @@ impl StatusBar {
             .set_spinning(matches!(status, BackgroundTaskStatus::LibraryScanRunning));
         self.task_label.set_text(&task_status_text(status));
     }
+
+    pub(crate) fn show_command_error(&self, error: &ApplicationRuntimeError) {
+        self.show_command_message(runtime_error_text(error));
+    }
+
+    pub(crate) fn show_command_message(&self, message: &str) {
+        self.command_label.set_text(message);
+        self.command_label.set_visible(true);
+    }
+
+    pub(crate) fn clear_command_message(&self) {
+        self.command_label.set_text("");
+        self.command_label.set_visible(false);
+    }
 }
 
 fn task_status_text(status: &BackgroundTaskStatus) -> String {
@@ -89,32 +111,31 @@ fn task_status_text(status: &BackgroundTaskStatus) -> String {
         BackgroundTaskStatus::Idle => String::new(),
         BackgroundTaskStatus::LibraryScanRunning => "Scanning library...".to_owned(),
         BackgroundTaskStatus::LibraryScanCompleted(summary) => scan_summary_text(summary),
-        BackgroundTaskStatus::LibraryScanFailed(error) => match error {
-            super::ApplicationRuntimeError::BackgroundTaskRunning => {
-                "Another background task is already running.".to_owned()
-            }
-            super::ApplicationRuntimeError::LibraryScanFailed => {
-                "The selected folder could not be scanned.".to_owned()
-            }
-            super::ApplicationRuntimeError::LibraryServicesUnavailable => {
-                "Library scanning is not available in this build.".to_owned()
-            }
-            super::ApplicationRuntimeError::LibraryStoreFailed => {
-                "The library database could not be updated.".to_owned()
-            }
-            super::ApplicationRuntimeError::SettingsLoadFailed
-            | super::ApplicationRuntimeError::SettingsSaveFailed => {
-                "The library path could not be saved.".to_owned()
-            }
-            super::ApplicationRuntimeError::PlaybackFailed
-            | super::ApplicationRuntimeError::PlaybackServiceUnavailable
-            | super::ApplicationRuntimeError::TrackUnavailable => {
-                "Playback is not available.".to_owned()
-            }
-            super::ApplicationRuntimeError::TrackTrashFailed => {
-                "The track could not be moved to trash.".to_owned()
-            }
-        },
+        BackgroundTaskStatus::LibraryScanFailed(error) => runtime_error_text(error).to_owned(),
+    }
+}
+
+pub(crate) fn runtime_error_text(error: &ApplicationRuntimeError) -> &'static str {
+    match error {
+        ApplicationRuntimeError::BackgroundTaskRunning => {
+            "Another background task is already running."
+        }
+        ApplicationRuntimeError::LibraryScanFailed => "The selected folder could not be scanned.",
+        ApplicationRuntimeError::LibraryServicesUnavailable => {
+            "Library scanning is not available in this build."
+        }
+        ApplicationRuntimeError::LibraryStoreFailed => "The library database could not be updated.",
+        ApplicationRuntimeError::MetadataWriteFailed => "The track metadata could not be updated.",
+        ApplicationRuntimeError::InvalidPlaylistName => "The playlist name is not valid.",
+        ApplicationRuntimeError::PlaylistEntryNotFound
+        | ApplicationRuntimeError::PlaylistNotFound => "The playlist could not be updated.",
+        ApplicationRuntimeError::SettingsLoadFailed
+        | ApplicationRuntimeError::SettingsSaveFailed => "The library path could not be saved.",
+        ApplicationRuntimeError::PlaybackFailed
+        | ApplicationRuntimeError::PlaybackServiceUnavailable
+        | ApplicationRuntimeError::TrackUnavailable => "Playback is not available.",
+        ApplicationRuntimeError::TrackTrashFailed => "The track could not be moved to trash.",
+        ApplicationRuntimeError::UnsupportedCommand(_) => "This action is not available yet.",
     }
 }
 
@@ -199,6 +220,22 @@ mod tests {
         assert_eq!(
             scan_summary_text(&summary),
             "Scan complete: 10 tracks, 2 missing, 1 failed"
+        );
+    }
+
+    #[test]
+    fn runtime_error_text_covers_command_errors() {
+        assert_eq!(
+            runtime_error_text(&ApplicationRuntimeError::MetadataWriteFailed),
+            "The track metadata could not be updated."
+        );
+        assert_eq!(
+            runtime_error_text(&ApplicationRuntimeError::UnsupportedCommand(
+                super::super::ApplicationCommand::CreatePlaylist {
+                    name: "Test".to_owned(),
+                }
+            )),
+            "This action is not available yet."
         );
     }
 }

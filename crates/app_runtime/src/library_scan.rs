@@ -1,0 +1,235 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
+
+use xtunes_domain::{
+    PlayStatistics, Track, TrackAvailability, TrackId, TrackLocation, TrackRelativePath,
+};
+use xtunes_library_store::LibraryStore;
+use xtunes_metadata::{LibraryScan, LibraryScanner, ScannedTrack};
+
+use crate::{
+    ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult, LibraryScanResult,
+    LibraryScanSummary, LibraryScanTask,
+};
+
+impl ApplicationRuntime {
+    pub(super) fn scan_library(
+        &mut self,
+        library_path: std::path::PathBuf,
+    ) -> ApplicationRuntimeResult<()> {
+        let task = self.prepare_library_scan(library_path)?;
+        match run_library_scan_task(task) {
+            Ok(result) => {
+                self.apply_library_scan_result(result);
+                Ok(())
+            }
+            Err(error) => {
+                self.fail_library_scan(error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    pub fn prepare_library_scan(
+        &mut self,
+        library_path: std::path::PathBuf,
+    ) -> ApplicationRuntimeResult<LibraryScanTask> {
+        if self.background_task_status.is_running() {
+            return Err(ApplicationRuntimeError::BackgroundTaskRunning);
+        }
+
+        self.last_scan_library_path = Some(library_path.clone());
+        let library_store = self
+            .library_store
+            .clone()
+            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
+        let metadata_service = self
+            .metadata_service
+            .clone()
+            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
+
+        self.background_task_status = crate::BackgroundTaskStatus::LibraryScanRunning;
+
+        Ok(LibraryScanTask {
+            library_path,
+            existing_tracks: self.library_tracks.clone(),
+            library_store,
+            metadata_service,
+        })
+    }
+
+    pub fn apply_library_scan_result(&mut self, result: LibraryScanResult) {
+        let summary = result.summary;
+        self.last_scan_summary = Some(summary.clone());
+        self.library_tracks = result.tracks;
+        self.refresh_playback_queue_track_ids();
+        self.background_task_status = crate::BackgroundTaskStatus::LibraryScanCompleted(summary);
+    }
+
+    pub fn fail_library_scan(&mut self, error: ApplicationRuntimeError) {
+        self.background_task_status = crate::BackgroundTaskStatus::LibraryScanFailed(error);
+    }
+}
+
+pub fn run_library_scan_task(task: LibraryScanTask) -> ApplicationRuntimeResult<LibraryScanResult> {
+    let scan = LibraryScanner::new(task.metadata_service.as_ref())
+        .scan(&task.library_path)
+        .map_err(|_| ApplicationRuntimeError::LibraryScanFailed)?;
+    let result = reconcile_library_scan(&task.library_path, task.existing_tracks, scan)?;
+
+    for track in &result.tracks {
+        task.library_store
+            .save_track(track.clone())
+            .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
+    }
+
+    Ok(result)
+}
+
+fn reconcile_library_scan(
+    library_path: &Path,
+    existing_tracks: Vec<Track>,
+    scan: LibraryScan,
+) -> ApplicationRuntimeResult<LibraryScanResult> {
+    let skipped_unsupported_files = scan.skipped_unsupported_files;
+    let failed_files = scan.failures.len();
+    let scanned_tracks = scan.tracks;
+    let mut tracks_by_path = tracks_by_path(existing_tracks.clone());
+    let mut scanned_paths = BTreeSet::new();
+    let mut tracks = Vec::new();
+    let mut next_track_id = next_track_id(&existing_tracks)?;
+    let mut added_tracks = 0;
+    let mut updated_tracks = 0;
+
+    let scanned_track_count = scanned_tracks.len();
+    for scanned_track in scanned_tracks {
+        scanned_paths.insert(scanned_track.relative_path.clone());
+        let existing_track = tracks_by_path.remove(&scanned_track.relative_path);
+        if existing_track.is_some() {
+            updated_tracks += 1;
+        } else {
+            added_tracks += 1;
+        }
+        let track = track_from_scanned_track(scanned_track, existing_track, &mut next_track_id)?;
+        tracks.push(track);
+    }
+
+    let mut missing_tracks = 0;
+    for track in existing_tracks
+        .into_iter()
+        .filter(|track| !scanned_paths.contains(&track.location.relative_path))
+    {
+        let track = track_with_current_availability(library_path, track);
+        if track.location.is_missing() {
+            missing_tracks += 1;
+        }
+        tracks.push(track);
+    }
+
+    tracks.sort_by_key(|track| track.id);
+
+    Ok(LibraryScanResult {
+        summary: LibraryScanSummary {
+            scanned_tracks: scanned_track_count,
+            added_tracks,
+            updated_tracks,
+            missing_tracks,
+            skipped_unsupported_files,
+            failed_files,
+        },
+        tracks,
+    })
+}
+
+fn tracks_by_path(tracks: Vec<Track>) -> BTreeMap<TrackRelativePath, Track> {
+    tracks
+        .into_iter()
+        .map(|track| (track.location.relative_path.clone(), track))
+        .collect()
+}
+
+fn track_from_scanned_track(
+    scanned_track: ScannedTrack,
+    existing_track: Option<Track>,
+    next_track_id: &mut i64,
+) -> ApplicationRuntimeResult<Track> {
+    let (id, statistics) = match existing_track {
+        Some(track) => (track.id, track.statistics),
+        None => {
+            let Some(track_id) = TrackId::new(*next_track_id) else {
+                return Err(ApplicationRuntimeError::LibraryStoreFailed);
+            };
+            *next_track_id += 1;
+            (track_id, PlayStatistics::default())
+        }
+    };
+
+    Ok(Track {
+        id,
+        location: TrackLocation::available(scanned_track.relative_path),
+        metadata: scanned_track.metadata,
+        rating: scanned_track.rating,
+        statistics,
+    })
+}
+
+pub(super) fn track_with_current_availability(library_path: &Path, track: Track) -> Track {
+    let Track {
+        id,
+        location,
+        metadata,
+        rating,
+        statistics,
+    } = track;
+    let availability = if location.absolute_path(library_path).exists() {
+        TrackAvailability::Available
+    } else {
+        TrackAvailability::Missing
+    };
+
+    Track {
+        id,
+        location: match availability {
+            TrackAvailability::Available => TrackLocation::available(location.relative_path),
+            TrackAvailability::Missing => TrackLocation::missing(location.relative_path),
+        },
+        metadata,
+        rating,
+        statistics,
+    }
+}
+
+pub(super) fn load_library_tracks(
+    library_store: &dyn LibraryStore,
+    library_path: Option<&Path>,
+) -> ApplicationRuntimeResult<Vec<Track>> {
+    let tracks = library_store
+        .tracks()
+        .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
+
+    Ok(match library_path {
+        Some(library_path) => tracks
+            .into_iter()
+            .map(|track| track_with_current_availability(library_path, track))
+            .collect(),
+        None => tracks,
+    })
+}
+
+fn next_track_id(existing_tracks: &[Track]) -> ApplicationRuntimeResult<i64> {
+    let next_id = existing_tracks
+        .iter()
+        .map(|track| track.id.get())
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(ApplicationRuntimeError::LibraryStoreFailed)?;
+
+    if TrackId::new(next_id).is_some() {
+        Ok(next_id)
+    } else {
+        Err(ApplicationRuntimeError::LibraryStoreFailed)
+    }
+}

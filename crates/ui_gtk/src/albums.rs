@@ -12,7 +12,8 @@ use xtunes_app_runtime::{ApplicationCommand, PlaybackCommand, Track, TrackId};
 
 use super::{
     PlaybackChangedCallback, SharedRuntime, artwork_color::ArtworkPalette,
-    height_reveal::HeightReveal, track_context::TrackRowContextMenu,
+    command_controller::SharedCommandController, height_reveal::HeightReveal,
+    track_context::TrackRowContextMenu,
 };
 use model::{
     AlbumTrackViewModel, AlbumViewModel, album_subtitle, duration_text, group_albums,
@@ -26,6 +27,7 @@ pub(crate) struct AlbumsView {
     scroller: gtk::ScrolledWindow,
     container: gtk::Box,
     runtime: SharedRuntime,
+    command_controller: SharedCommandController,
     playback_changed: PlaybackChangedCallback,
     context_menu: TrackRowContextMenu,
     albums: Rc<RefCell<Vec<AlbumViewModel>>>,
@@ -74,6 +76,7 @@ const ALBUM_COVER_PLACEHOLDER_ICON: &str = "image-missing-symbolic";
 impl AlbumsView {
     pub(crate) fn new(
         runtime: SharedRuntime,
+        command_controller: SharedCommandController,
         playback_changed: PlaybackChangedCallback,
         context_menu: TrackRowContextMenu,
     ) -> Self {
@@ -95,6 +98,7 @@ impl AlbumsView {
             scroller,
             container,
             runtime,
+            command_controller,
             playback_changed,
             context_menu,
             albums: Rc::new(RefCell::new(Vec::new())),
@@ -300,11 +304,12 @@ impl AlbumsView {
             palette_provider.as_ref(),
         );
         let album_for_play = album.clone();
-        let runtime_for_play = self.runtime.clone();
+        let command_controller_for_play = self.command_controller.clone();
         let playback_changed_for_play = self.playback_changed.clone();
         play_button.connect_clicked(move |_| {
-            play_album(&runtime_for_play, &album_for_play);
-            playback_changed_for_play();
+            if play_album(&command_controller_for_play, &album_for_play) {
+                playback_changed_for_play();
+            }
         });
         header.append(&play_button);
 
@@ -314,12 +319,13 @@ impl AlbumsView {
             palette_provider.as_ref(),
         );
         let album_for_shuffle = album.clone();
-        let runtime_for_shuffle = self.runtime.clone();
+        let command_controller_for_shuffle = self.command_controller.clone();
         let playback_changed_for_shuffle = self.playback_changed.clone();
         shuffle_button.connect_clicked(move |_| {
-            ensure_shuffle_enabled(&runtime_for_shuffle);
-            play_album(&runtime_for_shuffle, &album_for_shuffle);
-            playback_changed_for_shuffle();
+            ensure_shuffle_enabled(&command_controller_for_shuffle);
+            if play_album(&command_controller_for_shuffle, &album_for_shuffle) {
+                playback_changed_for_shuffle();
+            }
         });
         header.append(&shuffle_button);
 
@@ -376,7 +382,7 @@ impl AlbumsView {
     }
 
     fn album_artwork(&self, album: &AlbumViewModel) -> CachedArtwork {
-        let Some(root) = self.runtime.borrow().settings().library_path.clone() else {
+        let Some(root) = self.runtime.borrow().settings().library.path.clone() else {
             return CachedArtwork::default();
         };
         let Some(track) = album
@@ -558,10 +564,7 @@ fn apply_palette_style(
     widget.as_ref().add_css_class(css_class);
 }
 
-fn install_palette_provider(
-    widget: &impl IsA<gtk::Widget>,
-    provider: Option<&gtk::CssProvider>,
-) {
+fn install_palette_provider(widget: &impl IsA<gtk::Widget>, provider: Option<&gtk::CssProvider>) {
     let (Some(display), Some(provider)) = (gdk::Display::default(), provider) else {
         return;
     };
@@ -706,31 +709,33 @@ fn attach_track_row(
     install_track_row_context_menu(&duration, track.id, context_menu);
 }
 
-fn play_album(runtime: &SharedRuntime, album: &AlbumViewModel) {
+fn play_album(command_controller: &SharedCommandController, album: &AlbumViewModel) -> bool {
     let Some(track_id) = album
         .tracks
         .iter()
         .find(|track| !track.is_missing)
         .map(|track| track.id)
     else {
-        return;
+        return false;
     };
 
-    let _result = runtime
-        .borrow_mut()
-        .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
-            track_id,
-        )));
+    command_controller.dispatch_succeeded(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
+        track_id,
+    )))
 }
 
-fn ensure_shuffle_enabled(runtime: &SharedRuntime) {
-    if runtime.borrow().playback_options().shuffle_enabled {
+fn ensure_shuffle_enabled(command_controller: &SharedCommandController) {
+    if command_controller
+        .runtime()
+        .borrow()
+        .playback_options()
+        .shuffle_enabled
+    {
         return;
     }
 
-    let _result = runtime
-        .borrow_mut()
-        .handle_command(ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle));
+    let _result =
+        command_controller.dispatch(ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle));
 }
 
 fn artwork_from_bytes(bytes: Vec<u8>) -> Option<CachedArtwork> {

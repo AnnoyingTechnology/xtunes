@@ -1,0 +1,473 @@
+.app-window {
+    background-color: transparent;
+}
+
+.window-frame {
+    border-radius: 10px;
+    box-shadow:
+        0 14px 36px 0 alpha(black, 0.30),
+        0 2px 10px 0 alpha(black, 0.22);
+}
+
+.preferences-frame {
+    border-radius: 10px;
+    box-shadow:
+        0 14px 36px 0 alpha(black, 0.30),
+        0 2px 10px 0 alpha(black, 0.22);
+}
+
+.app-shell {
+    background-color: @theme_bg_color;
+}
+
+.window-frame .app-shell {
+    border-radius: 10px;
+}
+
+.preferences-panel {
+    background-color: @theme_bg_color;
+    border-radius: 10px;
+}
+
+.media-control {
+    opacity: 0.90;
+}
+
+.now-playing-area {
+    background-color: alpha(@theme_fg_color, 0.035);
+    min-height: 72px;
+    min-width: 600px;
+}
+
+.now-playing-artwork {
+    background-color: alpha(@theme_fg_color, 0.12);
+    min-height: 72px;
+    min-width: 72px;
+}
+
+.now-playing-title {
+    font-weight: bold;
+}
+
+.now-playing-artist,
+.now-playing-time {
+    color: alpha(@theme_fg_color, 0.58);
+}
+
+.marquee-label {
+    min-height: 19px;
+}
+
+.now-playing-time {
+    font-size: 0.85em;
+}
+
+.now-playing-side-icon {
+    opacity: 0.64;
+}
+
+button.now-playing-side-button {
+    background: transparent;
+    border: none;
+    border-radius: 999px;
+    box-shadow: none;
+    color: alpha(@theme_fg_color, 0.64);
+    min-height: 20px;
+    min-width: 20px;
+    padding: 0;
+}
+
+button.now-playing-side-button:hover,
+button.now-playing-side-button:active,
+button.now-playing-side-button:focus {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+
+.now-playing-side-icon-active {
+    opacity: 1;
+}
+
+.song-progress trough {
+    background-color: alpha(@theme_fg_color, 0.18);
+    border: none;
+    border-radius: 0;
+    min-height: 6px;
+    min-width: 6px;
+}
+
+.song-progress progress {
+    background-color: alpha(@theme_fg_color, 0.48);
+    border: none;
+    border-radius: 0;
+    min-height: 6px;
+    min-width: 6px;
+}
+
+.volume-slider trough {
+    background-color: alpha(@theme_fg_color, 0.22);
+    border: none;
+    border-radius: 999px;
+    min-height: 6px;
+}
+
+.volume-slider highlight {
+    background-color: alpha(@theme_fg_color, 0.55);
+    border-radius: 999px;
+    min-height: 6px;
+}
+
+.volume-slider slider {
+    background-color: @theme_bg_color;
+    border: none;
+    box-shadow: none;
+}
+
+.volume-icon {
+    opacity: 0.62;
+}
+
+.settings-button {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    margin-right: 8px;
+    min-height: 28px;
+    min-width: 28px;
+    opacity: 0.72;
+    padding: 0;
+}
+
+.settings-button:hover,
+.settings-button:active,
+.settings-button:focus {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    opacity: 0.90;
+}
+
+.preference-helper {
+    color: alpha(@theme_fg_color, 0.58);
+    font-size: 0.9em;
+}
+
+.preference-close-button {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    min-height: 24px;
+    min-width: 24px;
+    opacity: 0.62;
+    padding: 0;
+}
+
+.preference-close-button:hover,
+.preference-close-button:active,
+.preference-close-button:focus {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    opacity: 0.90;
+}
+
+.mode-button {
+    min-height: 22px;
+    border-radius: 999px;
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+.mode-button label {
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+.mode-bar,
+.status-bar {
+    background-color: alpha(@theme_fg_color, 0.04);
+}
+
+.mode-bar {
+    border-bottom: 1px solid alpha(@theme_fg_color, 0.08);
+}
+
+.topbar-search,
+.topbar-search entry,
+.topbar-search text {
+    border-radius: 999px;
+}
+
+.status-bar {
+    border-top: 1px solid alpha(@theme_fg_color, 0.08);
+}
+
+.task-status {
+    color: alpha(@theme_fg_color, 0.58);
+    font-size: 0.9em;
+    margin-right: 10px;
+}
+
+.command-status-label {
+    color: alpha(@theme_fg_color, 0.68);
+    font-size: 0.9em;
+    margin-left: 10px;
+}
+
+.task-status-spinner {
+    min-height: 14px;
+    min-width: 14px;
+}
+
+.playlist-sidebar {
+    background-color: mix(@theme_bg_color, black, 0.10);
+    border-right: 1px solid alpha(@theme_fg_color, 0.12);
+}
+
+.albums-view {
+    background-color: @theme_bg_color;
+}
+
+.albums-grid {
+    background-color: transparent;
+}
+
+button.album-tile {
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    box-shadow: none;
+    margin: 0;
+    min-height: 198px;
+    padding: 8px;
+}
+
+button.album-tile:hover,
+button.album-tile:active,
+button.album-tile:focus {
+    background-color: alpha(@theme_fg_color, 0.05);
+    border: none;
+    box-shadow: none;
+}
+
+button.album-tile-selected {
+    background-color: alpha(@theme_selected_bg_color, 0.18);
+}
+
+.album-cover,
+.album-detail-cover {
+    background-color: alpha(@theme_fg_color, 0.10);
+    border-radius: 4px;
+}
+
+.album-cover-placeholder-icon {
+    opacity: 0.36;
+}
+
+.album-tile-title {
+    font-weight: bold;
+}
+
+.album-tile-artist,
+.album-detail-subtitle,
+.album-empty-state {
+    color: alpha(@theme_fg_color, 0.58);
+}
+
+.album-track-number,
+.album-track-duration {
+    color: alpha(@theme_fg_color, 0.52);
+}
+
+.album-tile-artist {
+    font-size: 0.88em;
+}
+
+.album-detail {
+    background-color: alpha(@theme_fg_color, 0.035);
+    border: none;
+    padding: 18px;
+}
+
+.album-detail-title {
+    font-size: 1.2em;
+    font-weight: bold;
+}
+
+button.album-detail-icon-button {
+    background: transparent;
+    border: none;
+    border-radius: 999px;
+    box-shadow: none;
+    min-height: 24px;
+    min-width: 24px;
+    padding: 0;
+}
+
+button.album-detail-icon-button:hover,
+button.album-detail-icon-button:active,
+button.album-detail-icon-button:focus {
+    background-color: alpha(@theme_fg_color, 0.06);
+    border: none;
+    box-shadow: none;
+}
+
+.album-track-title,
+.album-track-number,
+.album-track-duration {
+    min-height: 22px;
+}
+
+.album-track-missing {
+    color: #e66100;
+}
+
+.track-context-menu {
+    padding: 4px;
+}
+
+button.track-context-menu-item {
+    min-height: 30px;
+    min-width: 160px;
+    padding-left: 8px;
+    padding-right: 8px;
+}
+
+.track-table header {
+    background-color: alpha(@theme_fg_color, 0.08);
+}
+
+.track-table header button {
+    background: transparent;
+    border: none;
+    border-right: 1px solid alpha(@theme_fg_color, 0.12);
+    border-radius: 0;
+    box-shadow: none;
+    padding-top: 4px;
+    padding-bottom: 4px;
+}
+
+.track-table header button:hover {
+    background-color: alpha(@theme_fg_color, 0.05);
+}
+
+.track-table listview row,
+.track-table listview row cell {
+    border: none;
+    margin: 0;
+    padding: 0;
+}
+
+.track-table-cell {
+    margin: 0;
+    min-height: 28px;
+    padding: 0;
+}
+
+.track-table-row-even {
+    background-color: alpha(@theme_fg_color, 0.025);
+}
+
+.track-table-row-odd {
+    background-color: transparent;
+}
+
+columnview.track-table listview row:not(:selected),
+columnview.track-table listview row:not(:selected):hover,
+columnview.track-table listview row:not(:selected):active,
+columnview.track-table listview row:not(:selected):focus {
+    background-color: transparent;
+    background-image: none;
+    color: @theme_fg_color;
+}
+
+columnview.track-table listview row:not(:selected) cell,
+columnview.track-table listview row:not(:selected):hover cell,
+columnview.track-table listview row:not(:selected):active cell,
+columnview.track-table listview row:not(:selected):focus cell {
+    background-color: transparent;
+    background-image: none;
+    color: @theme_fg_color;
+}
+
+columnview.track-table listview row:not(:selected):hover .track-table-row-even,
+columnview.track-table listview row:not(:selected):active .track-table-row-even,
+columnview.track-table listview row:not(:selected):focus .track-table-row-even {
+    background-color: alpha(@theme_fg_color, 0.025);
+}
+
+columnview.track-table listview row:not(:selected):hover .track-table-row-odd,
+columnview.track-table listview row:not(:selected):active .track-table-row-odd,
+columnview.track-table listview row:not(:selected):focus .track-table-row-odd {
+    background-color: transparent;
+}
+
+/* Selected-row background goes on the cell box. Selected-row
+   foreground is scoped to the text widgets inside the cell so the
+   color does not cascade into popovers parented to the cell (which
+   would inherit @theme_selected_fg_color and render white-on-white
+   menu items). */
+.track-table listview row:selected .track-table-cell,
+.track-table-cell.track-table-row-selected {
+    background-color: @theme_selected_bg_color;
+}
+
+.track-table listview row:selected .track-table-cell > label,
+.track-table listview row:selected .track-table-cell > image,
+.track-table listview row:selected .track-table-cell .rating-stars button.rating-star,
+.track-table-cell.track-table-row-selected > label,
+.track-table-cell.track-table-row-selected > image,
+.track-table-cell.track-table-row-selected .rating-stars button.rating-star {
+    color: @theme_selected_fg_color;
+}
+
+.rating-stars {
+    min-height: 28px;
+}
+
+button.rating-star {
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    box-shadow: none;
+    color: alpha(@theme_fg_color, 0.70);
+    margin: 0;
+    min-height: 20px;
+    min-width: 16px;
+    padding: 0;
+}
+
+button.rating-star:hover,
+button.rating-star:active,
+button.rating-star:focus {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+
+button.rating-star label {
+    margin: 0;
+    padding: 0;
+}
+
+button.rating-star-filled {
+    color: alpha(@theme_fg_color, 0.86);
+}
+
+button.rating-star-empty {
+    color: alpha(@theme_fg_color, 0.35);
+}
+
+.track-table-status-icon {
+    opacity: 1;
+}
+
+.track-table-status-missing {
+    color: #e66100;
+}
+
+columnview.track-table listview row:selected .track-table-status-missing,
+.track-table-cell.track-table-row-selected .track-table-status-missing {
+    color: @theme_selected_fg_color;
+}

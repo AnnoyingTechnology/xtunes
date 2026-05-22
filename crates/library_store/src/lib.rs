@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    cmp::Ordering,
     collections::BTreeMap,
     path::Path,
     sync::{Mutex, MutexGuard},
@@ -10,7 +11,8 @@ use std::{
 use rusqlite::{Connection, Row, params};
 pub use xtunes_domain::{LibraryQuery, Playlist, PlaylistId, Rating, Track, TrackId};
 use xtunes_domain::{
-    PlayStatistics, PlaylistEntry, TrackLocation, TrackMetadata, TrackRelativePath,
+    PlayStatistics, PlaylistEntry, SortDirection, TrackLocation, TrackMetadata, TrackRelativePath,
+    TrackSortColumn,
 };
 
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -37,6 +39,35 @@ pub trait LibraryStore: Send + Sync {
     fn save_playlist(&self, playlist: Playlist) -> StoreResult<()>;
     fn playlist(&self, playlist_id: PlaylistId) -> StoreResult<Option<Playlist>>;
     fn playlists(&self) -> StoreResult<Vec<Playlist>>;
+    fn delete_playlist(&self, playlist_id: PlaylistId) -> StoreResult<()>;
+
+    fn tracks_matching(&self, query: LibraryQuery) -> StoreResult<Vec<Track>> {
+        let mut tracks = if let Some(playlist_id) = query.playlist_id {
+            let Some(playlist) = self.playlist(playlist_id)? else {
+                return Ok(Vec::new());
+            };
+            let tracks_by_id = self
+                .tracks()?
+                .into_iter()
+                .map(|track| (track.id, track))
+                .collect::<BTreeMap<_, _>>();
+
+            playlist
+                .entries
+                .into_iter()
+                .filter_map(|entry| tracks_by_id.get(&entry.track_id).cloned())
+                .collect()
+        } else {
+            self.tracks()?
+        };
+
+        if let Some(search_text) = query.search_text.as_deref() {
+            tracks.retain(|track| track_matches_search(track, search_text));
+        }
+
+        sort_tracks(&mut tracks, query.sort);
+        Ok(tracks)
+    }
 }
 
 #[derive(Debug)]
@@ -147,6 +178,77 @@ fn default_database_path() -> Option<std::path::PathBuf> {
     })
 }
 
+fn track_matches_search(track: &Track, search_text: &str) -> bool {
+    let needle = search_text.to_ascii_lowercase();
+    [
+        track.metadata.title.as_deref(),
+        track.metadata.artist.as_deref(),
+        track.metadata.album.as_deref(),
+        track.metadata.album_artist.as_deref(),
+        track.metadata.composer.as_deref(),
+        track.metadata.genre.as_deref(),
+        track.location.relative_path.as_path().to_str(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value.to_ascii_lowercase().contains(&needle))
+}
+
+fn sort_tracks(tracks: &mut [Track], sort: xtunes_domain::TrackSort) {
+    tracks.sort_by(|left, right| {
+        let ordering = compare_tracks(left, right, sort.column);
+        let ordering = if sort.column == TrackSortColumn::PlaylistPosition {
+            ordering
+        } else {
+            ordering.then_with(|| left.id.cmp(&right.id))
+        };
+        match sort.direction {
+            SortDirection::Ascending => ordering,
+            SortDirection::Descending => ordering.reverse(),
+        }
+    });
+}
+
+fn compare_tracks(left: &Track, right: &Track, column: TrackSortColumn) -> Ordering {
+    match column {
+        TrackSortColumn::PlaylistPosition => Ordering::Equal,
+        TrackSortColumn::Title => {
+            compare_optional_text(&left.metadata.title, &right.metadata.title)
+        }
+        TrackSortColumn::Artist => {
+            compare_optional_text(&left.metadata.artist, &right.metadata.artist)
+        }
+        TrackSortColumn::Album => {
+            compare_optional_text(&left.metadata.album, &right.metadata.album)
+        }
+        TrackSortColumn::Genre => {
+            compare_optional_text(&left.metadata.genre, &right.metadata.genre)
+        }
+        TrackSortColumn::Rating => left.rating.stars().cmp(&right.rating.stars()),
+        TrackSortColumn::PlayCount => left.statistics.play_count.cmp(&right.statistics.play_count),
+        TrackSortColumn::LastPlayed => left
+            .statistics
+            .last_played_at
+            .cmp(&right.statistics.last_played_at),
+        TrackSortColumn::Duration => left.metadata.duration.cmp(&right.metadata.duration),
+        TrackSortColumn::DateAdded => left.id.cmp(&right.id),
+    }
+}
+
+fn compare_optional_text(left: &Option<String>, right: &Option<String>) -> Ordering {
+    let left = left
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let right = right
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    left.cmp(&right)
+}
+
 impl LibraryStore for SqliteLibraryStore {
     fn save_track(&self, track: Track) -> StoreResult<()> {
         let metadata = track.metadata;
@@ -224,10 +326,7 @@ impl LibraryStore for SqliteLibraryStore {
 
     fn delete_track(&self, track_id: TrackId) -> StoreResult<()> {
         self.connection_guard()?
-            .execute(
-                "DELETE FROM tracks WHERE id = ?1",
-                params![track_id.get()],
-            )
+            .execute("DELETE FROM tracks WHERE id = ?1", params![track_id.get()])
             .map(|_| ())
             .map_err(StoreError::from)
     }
@@ -389,6 +488,16 @@ impl LibraryStore for SqliteLibraryStore {
         }
 
         Ok(playlists)
+    }
+
+    fn delete_playlist(&self, playlist_id: PlaylistId) -> StoreResult<()> {
+        self.connection_guard()?
+            .execute(
+                "DELETE FROM playlists WHERE id = ?1",
+                params![playlist_id.get()],
+            )
+            .map(|_| ())
+            .map_err(StoreError::from)
     }
 }
 
@@ -558,6 +667,11 @@ impl LibraryStore for InMemoryLibraryStore {
     fn playlists(&self) -> StoreResult<Vec<Playlist>> {
         Ok(self.playlists_guard()?.values().cloned().collect())
     }
+
+    fn delete_playlist(&self, playlist_id: PlaylistId) -> StoreResult<()> {
+        self.playlists_guard()?.remove(&playlist_id);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -565,8 +679,8 @@ mod tests {
     use std::path::PathBuf;
 
     use xtunes_domain::{
-        PlayStatistics, PlaylistEntry, Rating, TrackLocation, TrackMetadata, TrackRelativePath,
-        TrackSort,
+        PlayStatistics, PlaylistEntry, Rating, SortDirection, TrackLocation, TrackMetadata,
+        TrackRelativePath, TrackSort, TrackSortColumn,
     };
 
     use super::{
@@ -614,6 +728,18 @@ mod tests {
 
         assert_eq!(store.playlist(playlist.id), Ok(Some(playlist.clone())));
         assert_eq!(store.playlists(), Ok(vec![playlist]));
+    }
+
+    #[test]
+    fn in_memory_store_deletes_playlists() {
+        let store = InMemoryLibraryStore::new();
+        let playlist = playlist(1, "Favorites", Vec::new());
+
+        assert_eq!(store.save_playlist(playlist.clone()), Ok(()));
+        assert_eq!(store.delete_playlist(playlist.id), Ok(()));
+
+        assert_eq!(store.playlist(playlist.id), Ok(None));
+        assert_eq!(store.playlists(), Ok(Vec::new()));
     }
 
     #[test]
@@ -715,6 +841,62 @@ mod tests {
 
         assert_eq!(store.playlist(playlist.id), Ok(Some(playlist.clone())));
         assert_eq!(store.playlists(), Ok(vec![playlist]));
+    }
+
+    #[test]
+    fn sqlite_store_deletes_playlists() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory sqlite store");
+        let playlist = playlist(1, "Favorites", Vec::new());
+
+        assert_eq!(store.save_playlist(playlist.clone()), Ok(()));
+        assert_eq!(store.delete_playlist(playlist.id), Ok(()));
+
+        assert_eq!(store.playlist(playlist.id), Ok(None));
+        assert_eq!(store.playlists(), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn library_query_can_select_tracks_in_playlist_order() {
+        let store = InMemoryLibraryStore::new();
+        let first = track(1, "first.flac");
+        let second = track(2, "second.flac");
+        let playlist = playlist(1, "Favorites", vec![entry(1, 2, 0), entry(1, 1, 1)]);
+
+        assert_eq!(store.save_track(first.clone()), Ok(()));
+        assert_eq!(store.save_track(second.clone()), Ok(()));
+        assert_eq!(store.save_playlist(playlist.clone()), Ok(()));
+
+        assert_eq!(
+            store.tracks_matching(LibraryQuery::all().in_playlist(playlist.id)),
+            Ok(vec![second, first])
+        );
+    }
+
+    #[test]
+    fn library_query_filters_and_sorts_tracks() {
+        let store = InMemoryLibraryStore::new();
+        let mut first = track(1, "first.flac");
+        first.metadata.title = Some("Beta".to_owned());
+        first.metadata.artist = Some("Massive Attack".to_owned());
+        let mut second = track(2, "second.flac");
+        second.metadata.title = Some("Alpha".to_owned());
+        second.metadata.artist = Some("Massive Attack".to_owned());
+        let mut third = track(3, "third.flac");
+        third.metadata.title = Some("Ignored".to_owned());
+        third.metadata.artist = Some("Other".to_owned());
+
+        assert_eq!(store.save_track(first.clone()), Ok(()));
+        assert_eq!(store.save_track(second.clone()), Ok(()));
+        assert_eq!(store.save_track(third), Ok(()));
+
+        let query = LibraryQuery::all()
+            .with_search_text("massive")
+            .sorted_by(TrackSort {
+                column: TrackSortColumn::Title,
+                direction: SortDirection::Ascending,
+            });
+
+        assert_eq!(store.tracks_matching(query), Ok(vec![second, first]));
     }
 
     fn track(id: i64, path: &str) -> Track {

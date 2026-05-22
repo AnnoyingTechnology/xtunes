@@ -36,6 +36,9 @@ pub fn track_matches_search_text(track: &Track, search_text: &str) -> bool {
 }
 
 pub fn sort_tracks(mut tracks: Vec<Track>, sort: TrackSort) -> SearchResult<Vec<Track>> {
+    if sort.column == TrackSortColumn::PlaylistPosition {
+        return Ok(tracks);
+    }
     if sort.column == TrackSortColumn::DateAdded {
         return Err(SearchError::UnsupportedSortColumn(
             TrackSortColumn::DateAdded,
@@ -48,6 +51,7 @@ pub fn sort_tracks(mut tracks: Vec<Track>, sort: TrackSort) -> SearchResult<Vec<
 
 fn compare_tracks(left: &Track, right: &Track, sort: TrackSort) -> Ordering {
     let ordering = match sort.column {
+        TrackSortColumn::PlaylistPosition => Ordering::Equal,
         TrackSortColumn::Title => {
             compare_optional_text(&left.metadata.title, &right.metadata.title)
         }
