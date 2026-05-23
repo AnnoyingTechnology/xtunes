@@ -4,10 +4,11 @@
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use gtk::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib};
 
 use xtunes_app_runtime::{
-    ApplicationRuntime, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistItem, SmartPlaylist,
+    ApplicationRuntime, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, PlaylistItem,
+    SmartPlaylist, SmartPlaylistId,
 };
 
 use super::{
@@ -16,6 +17,7 @@ use super::{
 };
 
 pub(crate) type SidebarSelectionChangedCallback = Rc<dyn Fn(Option<PlaylistItem>)>;
+pub(crate) type SidebarMoveCallback = Rc<dyn Fn(PlaylistItem, PlaylistItem)>;
 
 #[derive(Clone, Debug)]
 struct SidebarItem {
@@ -111,12 +113,15 @@ impl SidebarSnapshot {
     }
 }
 
+type MoveCallbackHolder = Rc<RefCell<Option<SidebarMoveCallback>>>;
+
 #[derive(Clone)]
 pub(crate) struct PlaylistSidebar {
     root: gtk::Box,
     selection: gtk::SingleSelection,
     runtime: SharedRuntime,
     on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>>,
+    on_move: MoveCallbackHolder,
 }
 
 impl PlaylistSidebar {
@@ -141,7 +146,11 @@ impl PlaylistSidebar {
         selection.set_autoselect(false);
         selection.set_can_unselect(true);
 
-        let list_view = gtk::ListView::new(Some(selection.clone()), Some(build_row_factory()));
+        let on_move: MoveCallbackHolder = Rc::new(RefCell::new(None));
+        let list_view = gtk::ListView::new(
+            Some(selection.clone()),
+            Some(build_row_factory(on_move.clone())),
+        );
         list_view.add_css_class("playlist-sidebar-list");
         list_view.set_vexpand(true);
         list_view.set_single_click_activate(false);
@@ -162,6 +171,7 @@ impl PlaylistSidebar {
             selection,
             runtime,
             on_selection_changed,
+            on_move,
         }
     }
 
@@ -171,6 +181,10 @@ impl PlaylistSidebar {
 
     pub(crate) fn set_selection_changed(&self, callback: SidebarSelectionChangedCallback) {
         self.on_selection_changed.replace(Some(callback));
+    }
+
+    pub(crate) fn set_move_callback(&self, callback: SidebarMoveCallback) {
+        self.on_move.replace(Some(callback));
     }
 
     pub(crate) fn current_selection(&self) -> Option<PlaylistItem> {
@@ -272,7 +286,7 @@ fn list_store_for(items: &[SidebarItem]) -> gio::ListStore {
     store
 }
 
-fn build_row_factory() -> gtk::SignalListItemFactory {
+fn build_row_factory(on_move: MoveCallbackHolder) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_factory, list_item| {
         let Some(list_item) = list_item.downcast_ref::<gtk::ListItem>() else {
@@ -295,7 +309,7 @@ fn build_row_factory() -> gtk::SignalListItemFactory {
         list_item.set_child(Some(&expander));
     });
 
-    factory.connect_bind(|_factory, list_item| {
+    factory.connect_bind(move |_factory, list_item| {
         let Some(list_item) = list_item.downcast_ref::<gtk::ListItem>() else {
             return;
         };
@@ -322,6 +336,10 @@ fn build_row_factory() -> gtk::SignalListItemFactory {
         let Ok(sidebar_item) = boxed.try_borrow::<SidebarItem>() else {
             return;
         };
+        let playlist_item = sidebar_item.item;
+        let label_text = sidebar_item.name.clone();
+        let icon_name = sidebar_item.icon_name();
+        drop(sidebar_item);
 
         let Some(row_widget) = expander.child() else {
             return;
@@ -342,11 +360,84 @@ fn build_row_factory() -> gtk::SignalListItemFactory {
             return;
         };
 
-        icon.set_icon_name(Some(sidebar_item.icon_name()));
-        label.set_text(&sidebar_item.name);
+        icon.set_icon_name(Some(icon_name));
+        label.set_text(&label_text);
+
+        attach_drag_and_drop(&row, playlist_item, on_move.clone());
     });
 
     factory
+}
+
+fn attach_drag_and_drop(row: &gtk::Box, item: PlaylistItem, on_move: MoveCallbackHolder) {
+    remove_drag_and_drop_controllers(row);
+
+    let drag_source = gtk::DragSource::new();
+    drag_source.set_actions(gdk::DragAction::MOVE);
+    drag_source.connect_prepare(move |_source, _x, _y| {
+        Some(gdk::ContentProvider::for_value(
+            &drag_payload(item).to_value(),
+        ))
+    });
+    row.add_controller(drag_source);
+
+    let drop_target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
+    drop_target.connect_drop(move |_target, value, _x, _y| {
+        let Ok(text) = value.get::<String>() else {
+            return false;
+        };
+        let Some(source_item) = parse_drag_payload(&text) else {
+            return false;
+        };
+        if source_item == item {
+            return false;
+        }
+        if let Some(callback) = on_move.borrow().as_ref() {
+            callback(source_item, item);
+        }
+        true
+    });
+    row.add_controller(drop_target);
+}
+
+fn remove_drag_and_drop_controllers(widget: &gtk::Box) {
+    let controllers = widget.observe_controllers();
+    let mut to_remove: Vec<gtk::EventController> = Vec::new();
+    for index in 0..controllers.n_items() {
+        let Some(object) = controllers.item(index) else {
+            continue;
+        };
+        let is_drag_or_drop = object.downcast_ref::<gtk::DragSource>().is_some()
+            || object.downcast_ref::<gtk::DropTarget>().is_some();
+        if !is_drag_or_drop {
+            continue;
+        }
+        if let Ok(controller) = object.downcast::<gtk::EventController>() {
+            to_remove.push(controller);
+        }
+    }
+    for controller in to_remove {
+        widget.remove_controller(&controller);
+    }
+}
+
+fn drag_payload(item: PlaylistItem) -> String {
+    match item {
+        PlaylistItem::Folder(id) => format!("folder:{}", id.get()),
+        PlaylistItem::Playlist(id) => format!("playlist:{}", id.get()),
+        PlaylistItem::SmartPlaylist(id) => format!("smart:{}", id.get()),
+    }
+}
+
+fn parse_drag_payload(text: &str) -> Option<PlaylistItem> {
+    let (kind, id_str) = text.split_once(':')?;
+    let id = id_str.parse::<i64>().ok()?;
+    match kind {
+        "folder" => PlaylistFolderId::new(id).map(PlaylistItem::Folder),
+        "playlist" => PlaylistId::new(id).map(PlaylistItem::Playlist),
+        "smart" => SmartPlaylistId::new(id).map(PlaylistItem::SmartPlaylist),
+        _ => None,
+    }
 }
 
 pub(crate) fn build_content_area(sidebar: &gtk::Box, main_content: &gtk::Box) -> gtk::Paned {
@@ -464,5 +555,29 @@ mod tests {
                 .is_empty()
         );
     }
-}
 
+    #[test]
+    fn drag_payload_round_trips_for_each_kind() {
+        let folder_id = PlaylistFolderId::new(42).expect("positive id");
+        let playlist_id = PlaylistId::new(7).expect("positive id");
+        let smart_id = SmartPlaylistId::new(3).expect("positive id");
+
+        let cases = [
+            PlaylistItem::Folder(folder_id),
+            PlaylistItem::Playlist(playlist_id),
+            PlaylistItem::SmartPlaylist(smart_id),
+        ];
+        for item in cases {
+            let payload = drag_payload(item);
+            assert_eq!(parse_drag_payload(&payload), Some(item));
+        }
+    }
+
+    #[test]
+    fn drag_payload_rejects_unknown_kind_and_invalid_id() {
+        assert_eq!(parse_drag_payload("bogus:1"), None);
+        assert_eq!(parse_drag_payload("folder:not-a-number"), None);
+        assert_eq!(parse_drag_payload("folder:-3"), None);
+        assert_eq!(parse_drag_payload("no-colon"), None);
+    }
+}

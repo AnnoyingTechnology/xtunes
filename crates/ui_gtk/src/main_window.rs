@@ -149,6 +149,11 @@ pub(crate) fn build_main_window(
         &runtime,
         &sidebar,
     )));
+    sidebar.set_move_callback(sidebar_move_callback(
+        &command_controller,
+        &runtime,
+        &sidebar,
+    ));
     library_changed_holder.replace(Some(library_changed.clone()));
     let scan_requested =
         library_scan_requested_callback(&runtime, library_changed.clone(), &status_bar);
@@ -278,6 +283,75 @@ fn sidebar_action_callback(
             );
         }
     })
+}
+
+fn sidebar_move_callback(
+    command_controller: &SharedCommandController,
+    runtime: &SharedRuntime,
+    sidebar: &PlaylistSidebar,
+) -> super::sidebar::SidebarMoveCallback {
+    let command_controller = command_controller.clone();
+    let runtime = runtime.clone();
+    let sidebar = sidebar.clone();
+
+    Rc::new(move |source, target| {
+        let Some((target_parent_folder_id, position)) =
+            resolve_move_target(&runtime.borrow(), source, target)
+        else {
+            return;
+        };
+        if command_controller.dispatch_succeeded(ApplicationCommand::MovePlaylistItem {
+            item: source,
+            target_parent_folder_id,
+            position,
+        }) {
+            sidebar.refresh();
+        }
+    })
+}
+
+fn resolve_move_target(
+    runtime: &ApplicationRuntime,
+    source: PlaylistItem,
+    target: PlaylistItem,
+) -> Option<(Option<xtunes_app_runtime::PlaylistFolderId>, u32)> {
+    if source == target {
+        return None;
+    }
+    match target {
+        PlaylistItem::Folder(folder_id) => {
+            let child_count = runtime
+                .playlist_folders()
+                .iter()
+                .filter(|folder| folder.parent_folder_id == Some(folder_id))
+                .count()
+                + runtime
+                    .playlists()
+                    .iter()
+                    .filter(|playlist| playlist.parent_folder_id == Some(folder_id))
+                    .count()
+                + runtime
+                    .smart_playlists()
+                    .iter()
+                    .filter(|smart| smart.parent_folder_id == Some(folder_id))
+                    .count();
+            Some((Some(folder_id), child_count as u32))
+        }
+        PlaylistItem::Playlist(target_id) => {
+            let playlist = runtime
+                .playlists()
+                .iter()
+                .find(|playlist| playlist.id == target_id)?;
+            Some((playlist.parent_folder_id, playlist.position))
+        }
+        PlaylistItem::SmartPlaylist(target_id) => {
+            let smart = runtime
+                .smart_playlists()
+                .iter()
+                .find(|smart| smart.id == target_id)?;
+            Some((smart.parent_folder_id, smart.position))
+        }
+    }
 }
 
 fn sidebar_selection_changed_callback(
