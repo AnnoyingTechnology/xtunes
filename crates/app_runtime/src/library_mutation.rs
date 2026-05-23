@@ -81,6 +81,30 @@ impl ApplicationRuntime {
         Ok(())
     }
 
+    pub(super) fn reset_play_count(&mut self, track_id: TrackId) -> ApplicationRuntimeResult<()> {
+        let library_store = self
+            .library_store
+            .clone()
+            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
+        let track_index = self
+            .library_tracks
+            .iter()
+            .position(|track| track.id == track_id)
+            .ok_or(ApplicationRuntimeError::TrackUnavailable)?;
+
+        let mut track = self.library_tracks[track_index].clone();
+        track.statistics.play_count = 0;
+        track.statistics.skip_count = 0;
+        track.statistics.last_played_at = None;
+        track.statistics.last_skipped_at = None;
+        library_store
+            .save_track(track.clone())
+            .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
+        self.library_tracks[track_index] = track;
+
+        Ok(())
+    }
+
     pub(super) fn remove_track_from_library(
         &mut self,
         track_id: TrackId,

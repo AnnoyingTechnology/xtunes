@@ -9,19 +9,20 @@ use std::{
 };
 
 pub use xtunes_domain::{
-    ApplicationCommand, ApplicationQuery, LibrarySettings, PlayStatistics, PlaybackCommand,
-    PlaybackOptions, PlaybackQueue, PlaybackQueueSource, PlaybackState, Playlist, PlaylistEntry,
-    PlaylistFolder, PlaylistFolderId, PlaylistId, PlaylistItem, Rating, RepeatMode, SmartPlaylist,
-    SmartPlaylistDateField, SmartPlaylistId, SmartPlaylistLimit, SmartPlaylistLimitSelection,
-    SmartPlaylistMatchKind, SmartPlaylistNumberField, SmartPlaylistNumberOperator,
-    SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField, SmartPlaylistTextOperator,
-    Track, TrackAvailability, TrackId, TrackLocation, TrackMetadata, TrackPlaybackSource,
-    TrackRelativePath, UserSettings, VolumePercent, matching_tracks,
+    ApplicationCommand, ApplicationQuery, FieldChange, LibrarySettings, MetadataChange,
+    PlayStatistics, PlaybackCommand, PlaybackOptions, PlaybackQueue, PlaybackQueueSource,
+    PlaybackState, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId,
+    PlaylistItem, Rating, RepeatMode, SmartPlaylist, SmartPlaylistDateField, SmartPlaylistId,
+    SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind,
+    SmartPlaylistNumberField, SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet,
+    SmartPlaylistTextField, SmartPlaylistTextOperator, Track, TrackAvailability, TrackId,
+    TrackLocation, TrackMetadata, TrackPlaybackSource, TrackRelativePath, UserSettings,
+    VolumePercent, matching_tracks,
 };
 use xtunes_library_store::LibraryStore;
 use xtunes_metadata::MetadataService;
-pub use xtunes_playback::TrackEndedCallback;
 use xtunes_playback::PlaybackService;
+pub use xtunes_playback::TrackEndedCallback;
 use xtunes_settings::SettingsStore;
 
 mod commands;

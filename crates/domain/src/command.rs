@@ -72,6 +72,9 @@ pub enum ApplicationCommand {
         track_id: TrackId,
         change: MetadataChange,
     },
+    ResetPlayCount {
+        track_id: TrackId,
+    },
     RemoveTrackFromLibrary {
         track_id: TrackId,
     },

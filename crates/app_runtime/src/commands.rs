@@ -111,6 +111,9 @@ impl ApplicationRuntime {
             ApplicationCommand::UpdateMetadata { track_id, change } => {
                 self.update_metadata(track_id, change)?;
             }
+            ApplicationCommand::ResetPlayCount { track_id } => {
+                self.reset_play_count(track_id)?;
+            }
         }
 
         Ok(())

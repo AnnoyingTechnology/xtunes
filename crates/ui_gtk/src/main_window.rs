@@ -43,8 +43,9 @@ use super::{
         TrackActionVisibility, TrackContextAction, TrackContextActionSet, TrackRowContextMenu,
     },
     track_context_ops::{
-        copy_files_callback, play_next_callback, playback_has_current_track_visibility,
-        show_album_callback, show_in_folder_callback, track_has_album_visibility,
+        copy_files_callback, get_info_callback, play_next_callback,
+        playback_has_current_track_visibility, show_album_callback, show_in_folder_callback,
+        track_has_album_visibility,
     },
     track_table::{
         RatingChangedCallback, TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table,
@@ -167,12 +168,8 @@ pub(crate) fn build_main_window(
         albums_view.widget(),
         playlists_table.widget(),
     );
-    let visible_summary_refresh = visible_summary_refresh_callback(
-        &runtime,
-        &content_stack,
-        &sidebar,
-        &status_bar,
-    );
+    let visible_summary_refresh =
+        visible_summary_refresh_callback(&runtime, &content_stack, &sidebar, &status_bar);
     let library_changed = library_changed_callback(
         &runtime,
         &songs_table,
@@ -284,8 +281,7 @@ fn library_changed_callback(
         songs_table.replace_rows(rows);
         albums_view.replace_tracks(runtime.borrow().library_tracks().to_vec());
         sidebar.refresh();
-        let playlist_rows =
-            playlist_table_rows_for(&runtime.borrow(), sidebar.current_selection());
+        let playlist_rows = playlist_table_rows_for(&runtime.borrow(), sidebar.current_selection());
         playlists_table.replace_rows(playlist_rows);
         visible_summary_refresh();
     })
@@ -488,21 +484,12 @@ fn sidebar_delete_callback(
 
     Rc::new(move |item| {
         let dispatched = match item {
-            PlaylistItem::Playlist(playlist_id) => {
-                command_controller.dispatch_succeeded(ApplicationCommand::DeletePlaylist {
-                    playlist_id,
-                })
-            }
-            PlaylistItem::Folder(folder_id) => {
-                command_controller.dispatch_succeeded(ApplicationCommand::DeletePlaylistFolder {
-                    folder_id,
-                })
-            }
-            PlaylistItem::SmartPlaylist(smart_playlist_id) => {
-                command_controller.dispatch_succeeded(ApplicationCommand::DeleteSmartPlaylist {
-                    smart_playlist_id,
-                })
-            }
+            PlaylistItem::Playlist(playlist_id) => command_controller
+                .dispatch_succeeded(ApplicationCommand::DeletePlaylist { playlist_id }),
+            PlaylistItem::Folder(folder_id) => command_controller
+                .dispatch_succeeded(ApplicationCommand::DeletePlaylistFolder { folder_id }),
+            PlaylistItem::SmartPlaylist(smart_playlist_id) => command_controller
+                .dispatch_succeeded(ApplicationCommand::DeleteSmartPlaylist { smart_playlist_id }),
         };
         if dispatched {
             sidebar.refresh();
@@ -670,8 +657,8 @@ fn sidebar_tracks_drop_callback(
         if track_ids.is_empty() {
             return;
         }
-        let dispatched = command_controller
-            .dispatch_succeeded(ApplicationCommand::AddTracksToPlaylist {
+        let dispatched =
+            command_controller.dispatch_succeeded(ApplicationCommand::AddTracksToPlaylist {
                 playlist_id,
                 track_ids,
             });
@@ -729,8 +716,8 @@ fn add_to_playlist_callback(
         if track_ids.is_empty() {
             return;
         }
-        let dispatched = command_controller
-            .dispatch_succeeded(ApplicationCommand::AddTracksToPlaylist {
+        let dispatched =
+            command_controller.dispatch_succeeded(ApplicationCommand::AddTracksToPlaylist {
                 playlist_id,
                 track_ids,
             });
@@ -811,15 +798,13 @@ fn install_track_ended_callback(
     // The bus watch fires from glib's main context, the same thread that
     // services GTK events. Dispatching PlayNextTrack therefore happens at a
     // quiescent point, so no other borrow of the runtime can be in flight.
-    runtime
-        .borrow()
-        .set_track_ended_callback(Box::new(move || {
-            if command_controller.dispatch_succeeded(ApplicationCommand::Playback(
-                PlaybackCommand::PlayNextTrack,
-            )) {
-                playback_changed();
-            }
-        }));
+    runtime.borrow().set_track_ended_callback(Box::new(move || {
+        if command_controller
+            .dispatch_succeeded(ApplicationCommand::Playback(PlaybackCommand::PlayNextTrack))
+        {
+            playback_changed();
+        }
+    }));
 }
 
 fn rating_changed_callback(
@@ -854,6 +839,12 @@ fn track_context_actions(
             play_next_callback(command_controller),
             playback_has_current_track_visibility(runtime),
         ),
+        TrackContextAction::get_info(get_info_callback(
+            window,
+            runtime,
+            command_controller,
+            &library_changed_holder,
+        )),
         TrackContextAction::show_album(
             show_album_callback(show_album_holder),
             track_has_album_visibility(runtime),
@@ -889,6 +880,12 @@ fn playlist_track_context_actions(
             play_next_callback(command_controller),
             playback_has_current_track_visibility(runtime),
         ),
+        TrackContextAction::get_info(get_info_callback(
+            window,
+            runtime,
+            command_controller,
+            &library_changed_holder,
+        )),
         TrackContextAction::show_album(
             show_album_callback(show_album_holder),
             track_has_album_visibility(runtime),

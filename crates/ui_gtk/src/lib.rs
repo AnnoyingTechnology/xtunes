@@ -33,6 +33,7 @@ mod status_bar;
 mod titlebar;
 mod track_context;
 mod track_context_ops;
+mod track_info;
 mod track_table;
 mod window_chrome;
 

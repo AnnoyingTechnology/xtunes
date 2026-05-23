@@ -29,6 +29,7 @@ struct AddToPlaylistAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrackContextActionId {
     PlayNext,
+    GetInfo,
     CopyFiles,
     ShowInFolder,
     ShowAlbum,
@@ -41,6 +42,7 @@ impl TrackContextActionId {
     fn css_class(self) -> &'static str {
         match self {
             Self::PlayNext => "track-context-play-next",
+            Self::GetInfo => "track-context-get-info",
             Self::CopyFiles => "track-context-copy-files",
             Self::ShowInFolder => "track-context-show-in-folder",
             Self::ShowAlbum => "track-context-show-album",
@@ -112,6 +114,18 @@ impl TrackContextAction {
             selection: TrackSelectionRequirement::AtLeastOne,
             confirmation: TrackActionConfirmation::None,
             visibility: Some(visibility),
+            callback,
+        }
+    }
+
+    pub(crate) fn get_info(callback: TrackActionCallback) -> Self {
+        Self {
+            id: TrackContextActionId::GetInfo,
+            label: "Get Info",
+            section: TrackContextActionSection::Safe,
+            selection: TrackSelectionRequirement::Single,
+            confirmation: TrackActionConfirmation::None,
+            visibility: None,
             callback,
         }
     }
@@ -648,6 +662,7 @@ mod tests {
         let callback = no_op_callback();
         let actions = [
             TrackContextAction::play_next(callback.clone(), always_visible()),
+            TrackContextAction::get_info(callback.clone()),
             TrackContextAction::copy_files(callback.clone()),
             TrackContextAction::show_in_folder(callback.clone()),
             TrackContextAction::show_album(callback.clone(), always_visible()),
@@ -657,16 +672,29 @@ mod tests {
 
         assert_eq!(actions[0].id, TrackContextActionId::PlayNext);
         assert_eq!(actions[0].label, "Play Next");
-        assert_eq!(actions[1].id, TrackContextActionId::CopyFiles);
-        assert_eq!(actions[1].label, "Copy");
-        assert_eq!(actions[2].id, TrackContextActionId::ShowInFolder);
-        assert_eq!(actions[2].label, "Show in Folder");
-        assert_eq!(actions[3].id, TrackContextActionId::ShowAlbum);
-        assert_eq!(actions[3].label, "Show Album");
-        assert_eq!(actions[4].id, TrackContextActionId::RemoveFromLibrary);
-        assert_eq!(actions[4].label, "Remove from Library");
-        assert_eq!(actions[5].id, TrackContextActionId::MoveToTrash);
-        assert_eq!(actions[5].label, "Move to Trash");
+        assert_eq!(actions[1].id, TrackContextActionId::GetInfo);
+        assert_eq!(actions[1].label, "Get Info");
+        assert_eq!(actions[2].id, TrackContextActionId::CopyFiles);
+        assert_eq!(actions[2].label, "Copy");
+        assert_eq!(actions[3].id, TrackContextActionId::ShowInFolder);
+        assert_eq!(actions[3].label, "Show in Folder");
+        assert_eq!(actions[4].id, TrackContextActionId::ShowAlbum);
+        assert_eq!(actions[4].label, "Show Album");
+        assert_eq!(actions[5].id, TrackContextActionId::RemoveFromLibrary);
+        assert_eq!(actions[5].label, "Remove from Library");
+        assert_eq!(actions[6].id, TrackContextActionId::MoveToTrash);
+        assert_eq!(actions[6].label, "Move to Trash");
+    }
+
+    #[test]
+    fn get_info_requires_single_selection() {
+        let action = TrackContextAction::get_info(no_op_callback());
+        let one = TrackId::new(1).expect("positive track id");
+        let two = TrackId::new(2).expect("positive track id");
+
+        assert!(!action.is_available(&[]));
+        assert!(action.is_available(&[one]));
+        assert!(!action.is_available(&[one, two]));
     }
 
     #[test]

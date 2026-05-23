@@ -9,9 +9,10 @@ use gtk::{FileLauncher, gdk, gio};
 use xtunes_app_runtime::{ApplicationCommand, PlaybackCommand, TrackId};
 
 use super::{
-    SharedRuntime, ShowAlbumHolder,
+    LibraryChangedHolder, SharedRuntime, ShowAlbumHolder,
     command_controller::SharedCommandController,
     track_context::{TrackActionCallback, TrackActionVisibility},
+    track_info::open_track_info_dialog,
 };
 
 pub(crate) fn copy_files_callback(
@@ -29,6 +30,30 @@ pub(crate) fn copy_files_callback(
     })
 }
 
+pub(crate) fn get_info_callback(
+    parent_window: &gtk::Window,
+    runtime: &SharedRuntime,
+    command_controller: &SharedCommandController,
+    library_changed_holder: &LibraryChangedHolder,
+) -> TrackActionCallback {
+    let parent_window = parent_window.clone();
+    let runtime = runtime.clone();
+    let command_controller = command_controller.clone();
+    let library_changed_holder = library_changed_holder.clone();
+    Rc::new(move |track_ids: Vec<TrackId>| {
+        let Some(&track_id) = track_ids.first() else {
+            return;
+        };
+        open_track_info_dialog(
+            &parent_window,
+            &runtime,
+            &command_controller,
+            &library_changed_holder,
+            track_id,
+        );
+    })
+}
+
 pub(crate) fn play_next_callback(
     command_controller: &SharedCommandController,
 ) -> TrackActionCallback {
@@ -37,10 +62,9 @@ pub(crate) fn play_next_callback(
         if track_ids.is_empty() {
             return;
         }
-        let _result = command_controller
-            .dispatch(ApplicationCommand::Playback(PlaybackCommand::EnqueueNext(
-                track_ids,
-            )));
+        let _result = command_controller.dispatch(ApplicationCommand::Playback(
+            PlaybackCommand::EnqueueNext(track_ids),
+        ));
     })
 }
 
