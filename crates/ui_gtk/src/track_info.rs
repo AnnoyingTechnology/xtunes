@@ -18,10 +18,12 @@ use xtunes_app_runtime::{
 use super::{LibraryChangedHolder, SharedRuntime, command_controller::SharedCommandController};
 
 const DIALOG_WIDTH: i32 = 540;
+const DIALOG_HEIGHT: i32 = 700;
 const COVER_THUMB_SIZE: i32 = 64;
 const ARTWORK_PREVIEW_SIZE: i32 = 320;
 const NUMBER_ENTRY_WIDTH_CHARS: i32 = 5;
 const PAIR_ENTRY_WIDTH_CHARS: i32 = 4;
+const READONLY_VALUE_MAX_WIDTH_CHARS: i32 = 60;
 
 pub(crate) fn open_track_info_dialog(
     parent: &gtk::Window,
@@ -54,6 +56,7 @@ pub(crate) fn open_track_info_dialog(
         .modal(true)
         .resizable(false)
         .default_width(DIALOG_WIDTH)
+        .default_height(DIALOG_HEIGHT)
         .build();
     window.add_css_class("track-info-window");
 
@@ -339,8 +342,17 @@ impl DetailsPage {
             comments.buffer().set_text(text);
         }
         let comments_scroll = gtk::ScrolledWindow::new();
+        // Without these caps the ScrolledWindow propagates the TextView's
+        // natural height, which scales with content length (audio
+        // fingerprints in comments can be thousands of pixels tall and
+        // overflow the dialog). Lock the row to a predictable height and
+        // let the SW handle scrolling internally.
         comments_scroll.set_min_content_height(70);
+        comments_scroll.set_max_content_height(90);
+        comments_scroll.set_propagate_natural_height(false);
         comments_scroll.set_hexpand(true);
+        comments_scroll.set_vexpand(false);
+        comments_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         comments_scroll.set_child(Some(&comments));
         let comments_label = gtk::Label::new(Some("Comments"));
         comments_label.set_xalign(0.0);
@@ -558,6 +570,7 @@ fn attach_readonly_field(grid: &gtk::Grid, row: i32, label_text: &str, value: &s
     value_label.set_valign(gtk::Align::Start);
     value_label.set_wrap(true);
     value_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    value_label.set_max_width_chars(READONLY_VALUE_MAX_WIDTH_CHARS);
     value_label.set_selectable(true);
     value_label.set_hexpand(true);
     grid.attach(&value_label, 1, row, 1, 1);
