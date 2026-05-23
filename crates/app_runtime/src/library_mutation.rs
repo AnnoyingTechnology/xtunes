@@ -81,6 +81,30 @@ impl ApplicationRuntime {
         Ok(())
     }
 
+    pub(super) fn set_artwork(
+        &mut self,
+        track_id: TrackId,
+        artwork: Option<Vec<u8>>,
+    ) -> ApplicationRuntimeResult<()> {
+        let metadata_service = self
+            .metadata_service
+            .clone()
+            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
+        let track = self
+            .library_tracks
+            .iter()
+            .find(|track| track.id == track_id && !track.location.is_missing())
+            .cloned()
+            .ok_or(ApplicationRuntimeError::TrackUnavailable)?;
+        let path = self
+            .absolute_track_path(&track)
+            .ok_or(ApplicationRuntimeError::TrackUnavailable)?;
+        metadata_service
+            .write_artwork(&path, artwork)
+            .map_err(|_| ApplicationRuntimeError::MetadataWriteFailed)?;
+        Ok(())
+    }
+
     pub(super) fn reset_play_count(&mut self, track_id: TrackId) -> ApplicationRuntimeResult<()> {
         let library_store = self
             .library_store

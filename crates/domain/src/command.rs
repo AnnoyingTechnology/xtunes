@@ -75,6 +75,10 @@ pub enum ApplicationCommand {
     ResetPlayCount {
         track_id: TrackId,
     },
+    SetArtwork {
+        track_id: TrackId,
+        artwork: Option<Vec<u8>>,
+    },
     RemoveTrackFromLibrary {
         track_id: TrackId,
     },

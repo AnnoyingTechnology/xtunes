@@ -1781,6 +1781,10 @@ mod tests {
         fn read_artwork(&self, _path: &Path) -> MetadataResult<Option<Vec<u8>>> {
             Ok(None)
         }
+
+        fn write_artwork(&self, _path: &Path, _artwork: Option<Vec<u8>>) -> MetadataResult<()> {
+            Ok(())
+        }
     }
 
     #[derive(Debug)]
@@ -1863,6 +1867,10 @@ mod tests {
 
         fn read_artwork(&self, _path: &Path) -> MetadataResult<Option<Vec<u8>>> {
             Ok(None)
+        }
+
+        fn write_artwork(&self, _path: &Path, _artwork: Option<Vec<u8>>) -> MetadataResult<()> {
+            Ok(())
         }
     }
 

@@ -10,7 +10,7 @@ use std::{
 };
 
 use gtk::prelude::*;
-use gtk::{gdk, glib};
+use gtk::{FileDialog, FileFilter, gdk, gio, glib};
 use xtunes_app_runtime::{
     ApplicationCommand, FieldChange, MetadataChange, Rating, Track, TrackId, TrackMetadata,
 };
@@ -69,8 +69,8 @@ pub(crate) fn open_track_info_dialog(
     let artwork_bytes = absolute_path
         .as_deref()
         .and_then(|path| runtime.borrow().read_artwork(path));
-    let header = build_header(&track, &artwork_bytes);
-    outer.append(&header);
+    let header = build_header(&track, artwork_bytes.as_deref());
+    outer.append(&header.widget);
 
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
@@ -81,8 +81,15 @@ pub(crate) fn open_track_info_dialog(
     let details = DetailsPage::new(&initial_metadata, initial_rating, initial_play_count);
     stack.add_titled(&details.widget, Some("details"), "Details");
 
-    let artwork = build_artwork_page(&artwork_bytes);
-    stack.add_titled(&artwork, Some("artwork"), "Artwork");
+    let artwork = ArtworkPage::new(
+        parent,
+        command_controller,
+        library_changed_holder,
+        track_id,
+        header.cover_frame.clone(),
+        artwork_bytes.as_deref(),
+    );
+    stack.add_titled(&artwork.widget, Some("artwork"), "Artwork");
 
     let lyrics = LyricsPage::new(&initial_metadata);
     stack.add_titled(&lyrics.widget, Some("lyrics"), "Lyrics");
@@ -166,22 +173,19 @@ pub(crate) fn open_track_info_dialog(
     window.present();
 }
 
-fn build_header(track: &Track, artwork_bytes: &Option<Vec<u8>>) -> gtk::Box {
+struct Header {
+    widget: gtk::Box,
+    cover_frame: gtk::Frame,
+}
+
+fn build_header(track: &Track, artwork_bytes: Option<&[u8]>) -> Header {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     row.add_css_class("track-info-header");
 
     let cover_frame = gtk::Frame::new(None);
     cover_frame.add_css_class("track-info-cover");
     cover_frame.set_size_request(COVER_THUMB_SIZE, COVER_THUMB_SIZE);
-    if let Some(texture) = artwork_texture(artwork_bytes) {
-        let image = gtk::Image::from_paintable(Some(&texture));
-        image.set_pixel_size(COVER_THUMB_SIZE);
-        cover_frame.set_child(Some(&image));
-    } else {
-        let placeholder = gtk::Image::from_icon_name("image-missing-symbolic");
-        placeholder.set_pixel_size(COVER_THUMB_SIZE / 2);
-        cover_frame.set_child(Some(&placeholder));
-    }
+    update_artwork_frame(&cover_frame, artwork_bytes, COVER_THUMB_SIZE);
     row.append(&cover_frame);
 
     let info = gtk::Box::new(gtk::Orientation::Vertical, 2);
@@ -211,7 +215,10 @@ fn build_header(track: &Track, artwork_bytes: &Option<Vec<u8>>) -> gtk::Box {
     }
 
     row.append(&info);
-    row
+    Header {
+        widget: row,
+        cover_frame,
+    }
 }
 
 #[derive(Clone)]
@@ -470,37 +477,162 @@ impl LyricsPage {
     }
 }
 
-fn build_artwork_page(artwork_bytes: &Option<Vec<u8>>) -> gtk::Box {
-    let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    page.add_css_class("track-info-artwork");
-    page.set_margin_top(10);
-    page.set_halign(gtk::Align::Center);
+struct ArtworkPage {
+    widget: gtk::Box,
+}
 
-    let frame = gtk::Frame::new(None);
-    frame.add_css_class("track-info-artwork-frame");
-    frame.set_size_request(ARTWORK_PREVIEW_SIZE, ARTWORK_PREVIEW_SIZE);
+impl ArtworkPage {
+    fn new(
+        parent_window: &gtk::Window,
+        command_controller: &SharedCommandController,
+        library_changed_holder: &LibraryChangedHolder,
+        track_id: TrackId,
+        header_cover: gtk::Frame,
+        initial_bytes: Option<&[u8]>,
+    ) -> Self {
+        let page = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        page.add_css_class("track-info-artwork");
+        page.set_margin_top(10);
+        page.set_halign(gtk::Align::Center);
 
-    if let Some(texture) = artwork_texture(artwork_bytes) {
+        let frame = gtk::Frame::new(None);
+        frame.add_css_class("track-info-artwork-frame");
+        frame.set_size_request(ARTWORK_PREVIEW_SIZE, ARTWORK_PREVIEW_SIZE);
+        page.append(&frame);
+
+        let note = gtk::Label::new(None);
+        note.add_css_class("dim-label");
+        note.set_margin_top(4);
+        page.append(&note);
+
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        buttons.set_halign(gtk::Align::Center);
+        buttons.set_margin_top(12);
+        let add_button = gtk::Button::with_label("Add Artwork\u{2026}");
+        let remove_button = gtk::Button::with_label("Remove Artwork");
+        remove_button.add_css_class("destructive-action");
+        buttons.append(&add_button);
+        buttons.append(&remove_button);
+        page.append(&buttons);
+
+        let refresh: Rc<dyn Fn(Option<&[u8]>)> = {
+            let frame = frame.clone();
+            let header_cover = header_cover.clone();
+            let note = note.clone();
+            let remove_button = remove_button.clone();
+            Rc::new(move |bytes: Option<&[u8]>| {
+                update_artwork_frame(&frame, bytes, ARTWORK_PREVIEW_SIZE);
+                update_artwork_frame(&header_cover, bytes, COVER_THUMB_SIZE);
+                note.set_text(if bytes.is_some() {
+                    "Artwork is embedded in the audio file."
+                } else {
+                    "This track has no embedded artwork."
+                });
+                remove_button.set_sensitive(bytes.is_some());
+            })
+        };
+        refresh(initial_bytes);
+
+        {
+            let parent_window = parent_window.clone();
+            let command_controller = command_controller.clone();
+            let library_changed_holder = library_changed_holder.clone();
+            let refresh = refresh.clone();
+            add_button.connect_clicked(move |_| {
+                open_artwork_picker(
+                    &parent_window,
+                    command_controller.clone(),
+                    library_changed_holder.clone(),
+                    track_id,
+                    refresh.clone(),
+                );
+            });
+        }
+
+        {
+            let command_controller = command_controller.clone();
+            let library_changed_holder = library_changed_holder.clone();
+            let refresh = refresh.clone();
+            remove_button.connect_clicked(move |_| {
+                if command_controller.dispatch_succeeded(ApplicationCommand::SetArtwork {
+                    track_id,
+                    artwork: None,
+                }) {
+                    refresh(None);
+                    if let Some(callback) = library_changed_holder.borrow().as_ref() {
+                        callback();
+                    }
+                }
+            });
+        }
+
+        Self { widget: page }
+    }
+}
+
+fn update_artwork_frame(frame: &gtk::Frame, bytes: Option<&[u8]>, size: i32) {
+    frame.set_child(None::<&gtk::Widget>);
+    if let Some(texture) = bytes.and_then(artwork_texture_from_slice) {
         let image = gtk::Image::from_paintable(Some(&texture));
-        image.set_pixel_size(ARTWORK_PREVIEW_SIZE);
+        image.set_pixel_size(size);
         frame.set_child(Some(&image));
     } else {
         let placeholder = gtk::Image::from_icon_name("image-missing-symbolic");
-        placeholder.set_pixel_size(ARTWORK_PREVIEW_SIZE / 3);
+        let icon_size = if size > 100 { size / 3 } else { size / 2 };
+        placeholder.set_pixel_size(icon_size.max(16));
         frame.set_child(Some(&placeholder));
     }
-    page.append(&frame);
+}
 
-    let note = gtk::Label::new(Some(if artwork_bytes.is_some() {
-        "Artwork is embedded in the audio file."
-    } else {
-        "This track has no embedded artwork."
-    }));
-    note.add_css_class("dim-label");
-    note.set_margin_top(4);
-    page.append(&note);
+fn artwork_texture_from_slice(bytes: &[u8]) -> Option<gdk::Texture> {
+    let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(bytes.to_vec())).ok()?;
+    Some(gdk::Texture::for_pixbuf(&pixbuf))
+}
 
-    page
+fn open_artwork_picker(
+    parent: &gtk::Window,
+    command_controller: SharedCommandController,
+    library_changed_holder: LibraryChangedHolder,
+    track_id: TrackId,
+    refresh: Rc<dyn Fn(Option<&[u8]>)>,
+) {
+    let dialog = FileDialog::builder()
+        .title("Choose Artwork")
+        .modal(true)
+        .build();
+
+    let filter = FileFilter::new();
+    filter.set_name(Some("Images"));
+    filter.add_mime_type("image/png");
+    filter.add_mime_type("image/jpeg");
+    filter.add_mime_type("image/webp");
+    filter.add_mime_type("image/gif");
+    let filters = gio::ListStore::new::<FileFilter>();
+    filters.append(&filter);
+    dialog.set_filters(Some(&filters));
+    dialog.set_default_filter(Some(&filter));
+
+    dialog.open(Some(parent), None::<&gio::Cancellable>, move |result| {
+        let Ok(file) = result else {
+            return;
+        };
+        let Some(path) = file.path() else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("xtunes: failed to read artwork file: {}", path.display());
+            return;
+        };
+        if command_controller.dispatch_succeeded(ApplicationCommand::SetArtwork {
+            track_id,
+            artwork: Some(bytes.clone()),
+        }) {
+            refresh(Some(&bytes));
+            if let Some(callback) = library_changed_holder.borrow().as_ref() {
+                callback();
+            }
+        }
+    });
 }
 
 fn build_file_page(track: &Track, absolute_path: Option<&Path>) -> gtk::Box {
@@ -746,12 +878,6 @@ fn bool_diff(initial: Option<bool>, current: bool) -> FieldChange<bool> {
     } else {
         FieldChange::Set(current)
     }
-}
-
-fn artwork_texture(artwork_bytes: &Option<Vec<u8>>) -> Option<gdk::Texture> {
-    let bytes = artwork_bytes.as_ref()?;
-    let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(bytes.clone())).ok()?;
-    Some(gdk::Texture::for_pixbuf(&pixbuf))
 }
 
 fn format_kind(path: Option<&Path>) -> String {

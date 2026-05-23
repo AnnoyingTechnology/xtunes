@@ -10,7 +10,7 @@ use std::{
 
 use lofty::{
     config::WriteOptions,
-    picture::PictureType,
+    picture::{Picture, PictureType},
     prelude::{Accessor, AudioFile, TaggedFileExt},
     tag::{
         ItemKey, Tag,
@@ -43,6 +43,7 @@ pub trait MetadataService: Send + Sync {
     fn read_rating(&self, path: &Path) -> MetadataResult<Option<Rating>>;
     fn write_rating(&self, path: &Path, rating: Rating) -> MetadataResult<()>;
     fn read_artwork(&self, path: &Path) -> MetadataResult<Option<Vec<u8>>>;
+    fn write_artwork(&self, path: &Path, artwork: Option<Vec<u8>>) -> MetadataResult<()>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -289,6 +290,41 @@ impl MetadataService for LoftyMetadataService {
             .or_else(|| tag.pictures().first());
         Ok(picture.map(|picture| picture.data().to_vec()))
     }
+
+    fn write_artwork(&self, path: &Path, artwork: Option<Vec<u8>>) -> MetadataResult<()> {
+        audio_format_from_path(path)?;
+        let mut tagged_file = lofty::read_from_path(path).map_err(|_| MetadataError::ReadFailed)?;
+        ensure_primary_tag(&mut tagged_file);
+        let tag = tagged_file
+            .primary_tag_mut()
+            .ok_or(MetadataError::WriteFailed)?;
+
+        // Drop every existing CoverFront picture before writing the new one
+        // (or leaving the slot empty). Walk in reverse so the indices stay
+        // valid as we remove entries.
+        let cover_indices: Vec<usize> = tag
+            .pictures()
+            .iter()
+            .enumerate()
+            .filter(|(_, picture)| picture.pic_type() == PictureType::CoverFront)
+            .map(|(index, _)| index)
+            .collect();
+        for index in cover_indices.into_iter().rev() {
+            let _removed = tag.remove_picture(index);
+        }
+
+        if let Some(bytes) = artwork {
+            let mut cursor = std::io::Cursor::new(bytes);
+            let mut picture =
+                Picture::from_reader(&mut cursor).map_err(|_| MetadataError::WriteFailed)?;
+            picture.set_pic_type(PictureType::CoverFront);
+            tag.push_picture(picture);
+        }
+
+        tagged_file
+            .save_to_path(path, WriteOptions::default())
+            .map_err(|_| MetadataError::WriteFailed)
+    }
 }
 
 pub fn audio_format_from_path(path: &Path) -> MetadataResult<AudioFormat> {
@@ -517,6 +553,10 @@ mod tests {
 
         fn read_artwork(&self, _path: &Path) -> MetadataResult<Option<Vec<u8>>> {
             Ok(None)
+        }
+
+        fn write_artwork(&self, _path: &Path, _artwork: Option<Vec<u8>>) -> MetadataResult<()> {
+            Ok(())
         }
     }
 

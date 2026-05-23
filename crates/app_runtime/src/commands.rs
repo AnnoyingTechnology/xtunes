@@ -114,6 +114,9 @@ impl ApplicationRuntime {
             ApplicationCommand::ResetPlayCount { track_id } => {
                 self.reset_play_count(track_id)?;
             }
+            ApplicationCommand::SetArtwork { track_id, artwork } => {
+                self.set_artwork(track_id, artwork)?;
+            }
         }
 
         Ok(())
