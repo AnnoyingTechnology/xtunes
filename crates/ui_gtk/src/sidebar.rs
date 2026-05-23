@@ -478,8 +478,7 @@ fn build_row_factory(
             return;
         };
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        row.set_margin_top(2);
-        row.set_margin_bottom(2);
+        row.add_css_class("playlist-sidebar-row");
 
         let icon = gtk::Image::new();
         icon.add_css_class("playlist-sidebar-icon");
@@ -956,6 +955,7 @@ fn attach_drag_and_drop(
     row.add_controller(drag_source);
 
     let target_is_folder = matches!(item, PlaylistItem::Folder(_));
+    let target_accepts_tracks = matches!(item, PlaylistItem::Playlist(_));
     let current_position: Rc<Cell<DropPosition>> = Rc::new(Cell::new(if target_is_folder {
         DropPosition::Into
     } else {
@@ -966,17 +966,39 @@ fn attach_drag_and_drop(
         glib::Type::STRING,
         gdk::DragAction::MOVE | gdk::DragAction::COPY,
     );
+    drop_target.set_preload(true);
 
     let row_for_motion = row.clone();
     let current_position_for_motion = current_position.clone();
-    drop_target.connect_motion(move |_target, _x, y| {
-        let row_height = row_for_motion.height() as f64;
-        let position = drop_position_from_motion(y, row_height, target_is_folder);
-        if current_position_for_motion.get() != position {
-            current_position_for_motion.set(position);
-            set_drop_indicator(&row_for_motion, position);
+    drop_target.connect_motion(move |target, _x, y| {
+        let kind = peek_drag_kind(target);
+        match kind {
+            Some(DragKind::Tracks) => {
+                if target_accepts_tracks {
+                    if current_position_for_motion.get() != DropPosition::Into {
+                        current_position_for_motion.set(DropPosition::Into);
+                    }
+                    set_drop_indicator(&row_for_motion, DropPosition::Into);
+                    gdk::DragAction::COPY
+                } else {
+                    clear_drop_indicator(&row_for_motion);
+                    gdk::DragAction::empty()
+                }
+            }
+            Some(DragKind::PlaylistItem) => {
+                let row_height = row_for_motion.height() as f64;
+                let position = drop_position_from_motion(y, row_height, target_is_folder);
+                if current_position_for_motion.get() != position {
+                    current_position_for_motion.set(position);
+                }
+                set_drop_indicator(&row_for_motion, position);
+                gdk::DragAction::MOVE
+            }
+            None => {
+                clear_drop_indicator(&row_for_motion);
+                gdk::DragAction::empty()
+            }
         }
-        gdk::DragAction::MOVE | gdk::DragAction::COPY
     });
 
     let row_for_leave = row.clone();
@@ -993,7 +1015,7 @@ fn attach_drag_and_drop(
             return false;
         };
         if let Some(track_ids) = parse_tracks_payload(&text) {
-            if matches!(item, PlaylistItem::Playlist(_)) {
+            if target_accepts_tracks {
                 if let Some(callback) = on_tracks_drop.borrow().as_ref() {
                     callback(item, track_ids);
                     return true;
@@ -1013,6 +1035,27 @@ fn attach_drag_and_drop(
         true
     });
     row.add_controller(drop_target);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DragKind {
+    Tracks,
+    PlaylistItem,
+}
+
+fn peek_drag_kind(target: &gtk::DropTarget) -> Option<DragKind> {
+    let value = target.value()?;
+    let text = value.get::<String>().ok()?;
+    classify_drag_payload(&text)
+}
+
+fn classify_drag_payload(text: &str) -> Option<DragKind> {
+    let prefix = text.split_once(':')?.0;
+    match prefix {
+        "tracks" => Some(DragKind::Tracks),
+        "folder" | "playlist" | "smart" => Some(DragKind::PlaylistItem),
+        _ => None,
+    }
 }
 
 fn set_drop_indicator(row: &gtk::Box, position: DropPosition) {
@@ -1279,6 +1322,25 @@ mod tests {
         assert_eq!(parse_tracks_payload("tracks:abc"), None);
         assert_eq!(parse_tracks_payload("tracks:-1"), None);
         assert_eq!(parse_tracks_payload("playlist:1"), None);
+    }
+
+    #[test]
+    fn classify_drag_payload_distinguishes_kinds() {
+        assert_eq!(classify_drag_payload("tracks:1,2,3"), Some(DragKind::Tracks));
+        assert_eq!(
+            classify_drag_payload("playlist:7"),
+            Some(DragKind::PlaylistItem)
+        );
+        assert_eq!(
+            classify_drag_payload("folder:42"),
+            Some(DragKind::PlaylistItem)
+        );
+        assert_eq!(
+            classify_drag_payload("smart:3"),
+            Some(DragKind::PlaylistItem)
+        );
+        assert_eq!(classify_drag_payload("garbage"), None);
+        assert_eq!(classify_drag_payload("unknown:42"), None);
     }
 
     #[test]

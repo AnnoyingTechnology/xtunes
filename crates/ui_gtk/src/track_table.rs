@@ -3,13 +3,12 @@
 
 use gtk::glib::variant::ToVariant;
 use gtk::prelude::*;
-use gtk::{gdk, gio, glib};
+use gtk::{gio, glib};
 use std::cell::Cell;
 use std::cmp::Ordering as CmpOrdering;
 use std::rc::Rc;
 use xtunes_app_runtime::{Rating, TrackId};
 
-use super::sidebar::tracks_drag_payload;
 use super::track_context::TrackRowContextMenu;
 use cells::{
     StatusBindings, TrackTableContextMenu, build_filler_column, build_rating_cell_factory,
@@ -143,8 +142,6 @@ pub(crate) fn build_track_table(
     }
     table.set_model(Some(&selection));
 
-    attach_tracks_drag_source(&table, &selection);
-
     scroller.set_child(Some(&table));
     TrackTable {
         scroller,
@@ -152,47 +149,6 @@ pub(crate) fn build_track_table(
         playing_track_id,
         status_bindings,
     }
-}
-
-fn attach_tracks_drag_source(table: &gtk::ColumnView, selection: &gtk::MultiSelection) {
-    let drag_source = gtk::DragSource::new();
-    drag_source.set_actions(gdk::DragAction::COPY);
-
-    let selection = selection.clone();
-    drag_source.connect_prepare(move |_source, _x, _y| {
-        let track_ids = collect_selected_track_ids(&selection);
-        if track_ids.is_empty() {
-            return None;
-        }
-        Some(gdk::ContentProvider::for_value(
-            &tracks_drag_payload(&track_ids).to_value(),
-        ))
-    });
-    table.add_controller(drag_source);
-}
-
-fn collect_selected_track_ids(selection: &gtk::MultiSelection) -> Vec<TrackId> {
-    let bitset = selection.selection();
-    let n = selection.n_items();
-    let mut track_ids = Vec::new();
-    for index in 0..n {
-        if !bitset.contains(index) {
-            continue;
-        }
-        let Some(item) = selection.item(index) else {
-            continue;
-        };
-        let Ok(boxed) = item.downcast::<glib::BoxedAnyObject>() else {
-            continue;
-        };
-        let Ok(row) = boxed.try_borrow::<TrackTableRow>() else {
-            continue;
-        };
-        if let Some(track_id) = row.track_id {
-            track_ids.push(track_id);
-        }
-    }
-    track_ids
 }
 
 fn build_table_column(

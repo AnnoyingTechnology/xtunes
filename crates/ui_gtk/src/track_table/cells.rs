@@ -11,6 +11,7 @@ use gtk::{gdk, glib};
 use xtunes_app_runtime::{Rating, TrackId};
 
 use super::{RatingChangedCallback, columns::TrackTableColumn, row::TrackTableRow};
+use crate::sidebar::tracks_drag_payload;
 use crate::track_context::TrackRowContextMenu;
 
 const EMPTY_STAR: &str = "☆";
@@ -360,7 +361,44 @@ fn install_cell_chrome(
     install_cell_selection_sync(list_item, cell);
     if let Some(menu) = context_menu {
         install_cell_context_menu(list_item, cell, menu);
+        install_cell_drag_source(list_item, cell, &menu.selection);
     }
+}
+
+fn install_cell_drag_source(
+    list_item: &gtk::ListItem,
+    cell: &gtk::Box,
+    selection: &gtk::MultiSelection,
+) {
+    let drag_source = gtk::DragSource::new();
+    drag_source.set_actions(gdk::DragAction::COPY);
+
+    let list_item = list_item.clone();
+    let selection = selection.clone();
+    drag_source.connect_prepare(move |_source, _x, _y| {
+        let position = list_item.position();
+        let row_track_id = row_track_id(list_item.item())?;
+
+        let track_ids = if position != gtk::INVALID_LIST_POSITION
+            && selection.is_selected(position)
+        {
+            let mut selected = collect_selected_track_ids(&selection);
+            if !selected.contains(&row_track_id) {
+                selected.push(row_track_id);
+            }
+            selected
+        } else {
+            vec![row_track_id]
+        };
+
+        if track_ids.is_empty() {
+            return None;
+        }
+        Some(gdk::ContentProvider::for_value(
+            &tracks_drag_payload(&track_ids).to_value(),
+        ))
+    });
+    cell.add_controller(drag_source);
 }
 
 fn install_cell_context_menu(
