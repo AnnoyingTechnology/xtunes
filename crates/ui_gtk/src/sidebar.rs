@@ -12,7 +12,7 @@ use gtk::{gdk, gio, glib};
 
 use xtunes_app_runtime::{
     ApplicationRuntime, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, PlaylistItem,
-    SmartPlaylist, SmartPlaylistId,
+    SmartPlaylist, SmartPlaylistId, TrackId,
 };
 
 use super::{
@@ -20,10 +20,17 @@ use super::{
     sidebar_context::SidebarContextMenu,
 };
 
-pub(crate) type SidebarSelectionChangedCallback = Rc<dyn Fn(Option<PlaylistItem>)>;
+pub(crate) type SidebarSelectionChangedCallback = Rc<dyn Fn(Option<SidebarSelection>)>;
 pub(crate) type SidebarMoveCallback = Rc<dyn Fn(PlaylistItem, PlaylistItem, DropPosition)>;
 pub(crate) type SidebarRenameCallback = Rc<dyn Fn(PlaylistItem, String)>;
 pub(crate) type SidebarDeleteCallback = Rc<dyn Fn(PlaylistItem)>;
+pub(crate) type SidebarTracksDropCallback = Rc<dyn Fn(PlaylistItem, Vec<TrackId>)>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SidebarSelection {
+    Library,
+    Item(PlaylistItem),
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DropPosition {
@@ -157,16 +164,20 @@ impl SidebarSnapshot {
 type MoveCallbackHolder = Rc<RefCell<Option<SidebarMoveCallback>>>;
 type RenameCallbackHolder = Rc<RefCell<Option<SidebarRenameCallback>>>;
 type DeleteCallbackHolder = Rc<RefCell<Option<SidebarDeleteCallback>>>;
+type TracksDropCallbackHolder = Rc<RefCell<Option<SidebarTracksDropCallback>>>;
 
 #[derive(Clone)]
 pub(crate) struct PlaylistSidebar {
     root: gtk::Box,
     selection: gtk::SingleSelection,
+    library_row: gtk::Box,
+    library_selected: Rc<Cell<bool>>,
     runtime: SharedRuntime,
     on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>>,
     on_move: MoveCallbackHolder,
     on_rename: RenameCallbackHolder,
     on_delete: DeleteCallbackHolder,
+    on_tracks_drop: TracksDropCallbackHolder,
 }
 
 impl PlaylistSidebar {
@@ -175,6 +186,11 @@ impl PlaylistSidebar {
         root.add_css_class("playlist-sidebar");
         root.set_vexpand(true);
         root.set_size_request(SIDEBAR_MIN_WIDTH, -1);
+
+        let library_row = build_library_row();
+        root.append(&library_row);
+
+        root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
         let title = gtk::Label::new(Some("Playlists"));
         title.set_margin_top(8);
@@ -194,12 +210,14 @@ impl PlaylistSidebar {
         let on_move: MoveCallbackHolder = Rc::new(RefCell::new(None));
         let on_rename: RenameCallbackHolder = Rc::new(RefCell::new(None));
         let on_delete: DeleteCallbackHolder = Rc::new(RefCell::new(None));
+        let on_tracks_drop: TracksDropCallbackHolder = Rc::new(RefCell::new(None));
         let list_view = gtk::ListView::new(
             Some(selection.clone()),
             Some(build_row_factory(
                 on_move.clone(),
                 on_rename.clone(),
                 on_delete.clone(),
+                on_tracks_drop.clone(),
             )),
         );
         list_view.add_css_class("playlist-sidebar-list");
@@ -213,18 +231,40 @@ impl PlaylistSidebar {
         scroller.set_child(Some(&list_view));
         root.append(&scroller);
 
+        let library_selected = Rc::new(Cell::new(false));
         let on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>> =
             Rc::new(RefCell::new(None));
-        connect_selection_signal(&selection, on_selection_changed.clone());
+
+        connect_library_row(
+            &library_row,
+            &library_selected,
+            &selection,
+            on_selection_changed.clone(),
+        );
+        connect_selection_signal(
+            &selection,
+            &library_row,
+            &library_selected,
+            on_selection_changed.clone(),
+        );
+
+        // Library starts selected by default, matching the user's "Songs" mental
+        // model — opening the Playlists view shows the whole library until a
+        // specific playlist is picked.
+        library_row.add_css_class("selected");
+        library_selected.set(true);
 
         Self {
             root,
             selection,
+            library_row,
+            library_selected,
             runtime,
             on_selection_changed,
             on_move,
             on_rename,
             on_delete,
+            on_tracks_drop,
         }
     }
 
@@ -233,7 +273,9 @@ impl PlaylistSidebar {
     }
 
     pub(crate) fn set_selection_changed(&self, callback: SidebarSelectionChangedCallback) {
+        let initial = callback.clone();
         self.on_selection_changed.replace(Some(callback));
+        initial(self.current_selection());
     }
 
     pub(crate) fn set_move_callback(&self, callback: SidebarMoveCallback) {
@@ -248,8 +290,15 @@ impl PlaylistSidebar {
         self.on_delete.replace(Some(callback));
     }
 
-    pub(crate) fn current_selection(&self) -> Option<PlaylistItem> {
-        selected_item(&self.selection)
+    pub(crate) fn set_tracks_drop_callback(&self, callback: SidebarTracksDropCallback) {
+        self.on_tracks_drop.replace(Some(callback));
+    }
+
+    pub(crate) fn current_selection(&self) -> Option<SidebarSelection> {
+        if self.library_selected.get() {
+            return Some(SidebarSelection::Library);
+        }
+        selected_item(&self.selection).map(SidebarSelection::Item)
     }
 
     pub(crate) fn install_context_menu(&self, menu: SidebarContextMenu) {
@@ -260,8 +309,16 @@ impl PlaylistSidebar {
         let previous = self.current_selection();
         let tree_model = build_tree_model(&self.runtime.borrow());
         self.selection.set_model(Some(&tree_model));
-        if let Some(previous) = previous {
-            select_item(&self.selection, previous);
+        match previous {
+            Some(SidebarSelection::Item(item)) => {
+                self.library_selected.set(false);
+                self.library_row.remove_css_class("selected");
+                select_item(&self.selection, item);
+            }
+            Some(SidebarSelection::Library) | None => {
+                // Library stays selected (its CSS class was unchanged).
+                self.selection.set_selected(gtk::INVALID_LIST_POSITION);
+            }
         }
         if let Some(callback) = self.on_selection_changed.borrow().as_ref() {
             callback(self.current_selection());
@@ -269,15 +326,77 @@ impl PlaylistSidebar {
     }
 }
 
-fn connect_selection_signal(
+fn build_library_row() -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    row.add_css_class("playlist-sidebar-library");
+    row.set_margin_top(6);
+    row.set_margin_end(6);
+    row.set_margin_start(6);
+    row.set_margin_bottom(2);
+
+    let icon = gtk::Image::from_icon_name("audio-x-generic-symbolic");
+    icon.add_css_class("playlist-sidebar-icon");
+
+    let label = gtk::Label::new(Some("Library"));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+
+    row.append(&icon);
+    row.append(&label);
+    row
+}
+
+fn connect_library_row(
+    library_row: &gtk::Box,
+    library_selected: &Rc<Cell<bool>>,
     selection: &gtk::SingleSelection,
     on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>>,
 ) {
-    let selection_clone = selection.clone();
-    selection.connect_selected_notify(move |_selection| {
-        let value = selected_item(&selection_clone);
+    let gesture = gtk::GestureClick::new();
+    gesture.set_button(gdk::BUTTON_PRIMARY);
+
+    let library_row_for_click = library_row.clone();
+    let library_selected_for_click = library_selected.clone();
+    let selection_for_click = selection.clone();
+    gesture.connect_pressed(move |gesture, _n_press, _x, _y| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        if !library_selected_for_click.get() {
+            library_selected_for_click.set(true);
+            library_row_for_click.add_css_class("selected");
+            selection_for_click.set_selected(gtk::INVALID_LIST_POSITION);
+        }
         if let Some(callback) = on_selection_changed.borrow().as_ref() {
-            callback(value);
+            callback(Some(SidebarSelection::Library));
+        }
+    });
+    library_row.add_controller(gesture);
+}
+
+fn connect_selection_signal(
+    selection: &gtk::SingleSelection,
+    library_row: &gtk::Box,
+    library_selected: &Rc<Cell<bool>>,
+    on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>>,
+) {
+    let selection_clone = selection.clone();
+    let library_row = library_row.clone();
+    let library_selected = library_selected.clone();
+    selection.connect_selected_notify(move |_selection| {
+        let item = selected_item(&selection_clone);
+        let new_selection = if let Some(item) = item {
+            if library_selected.get() {
+                library_selected.set(false);
+                library_row.remove_css_class("selected");
+            }
+            Some(SidebarSelection::Item(item))
+        } else if library_selected.get() {
+            Some(SidebarSelection::Library)
+        } else {
+            None
+        };
+        if let Some(callback) = on_selection_changed.borrow().as_ref() {
+            callback(new_selection);
         }
     });
 }
@@ -351,6 +470,7 @@ fn build_row_factory(
     on_move: MoveCallbackHolder,
     on_rename: RenameCallbackHolder,
     on_delete: DeleteCallbackHolder,
+    on_tracks_drop: TracksDropCallbackHolder,
 ) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_factory, list_item| {
@@ -457,7 +577,12 @@ fn build_row_factory(
         entry.set_text(&label_text);
         name_stack.set_visible_child_name("label");
 
-        attach_drag_and_drop(&row, playlist_item, on_move.clone());
+        attach_drag_and_drop(
+            &row,
+            playlist_item,
+            on_move.clone(),
+            on_tracks_drop.clone(),
+        );
         attach_row_context_menu(
             &row,
             playlist_item,
@@ -813,7 +938,12 @@ fn confirm_and_delete(
     cancel_button.grab_focus();
 }
 
-fn attach_drag_and_drop(row: &gtk::Box, item: PlaylistItem, on_move: MoveCallbackHolder) {
+fn attach_drag_and_drop(
+    row: &gtk::Box,
+    item: PlaylistItem,
+    on_move: MoveCallbackHolder,
+    on_tracks_drop: TracksDropCallbackHolder,
+) {
     remove_drag_and_drop_controllers(row);
 
     let drag_source = gtk::DragSource::new();
@@ -832,7 +962,10 @@ fn attach_drag_and_drop(row: &gtk::Box, item: PlaylistItem, on_move: MoveCallbac
         DropPosition::Above
     }));
 
-    let drop_target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
+    let drop_target = gtk::DropTarget::new(
+        glib::Type::STRING,
+        gdk::DragAction::MOVE | gdk::DragAction::COPY,
+    );
 
     let row_for_motion = row.clone();
     let current_position_for_motion = current_position.clone();
@@ -843,7 +976,7 @@ fn attach_drag_and_drop(row: &gtk::Box, item: PlaylistItem, on_move: MoveCallbac
             current_position_for_motion.set(position);
             set_drop_indicator(&row_for_motion, position);
         }
-        gdk::DragAction::MOVE
+        gdk::DragAction::MOVE | gdk::DragAction::COPY
     });
 
     let row_for_leave = row.clone();
@@ -859,6 +992,15 @@ fn attach_drag_and_drop(row: &gtk::Box, item: PlaylistItem, on_move: MoveCallbac
         let Ok(text) = value.get::<String>() else {
             return false;
         };
+        if let Some(track_ids) = parse_tracks_payload(&text) {
+            if matches!(item, PlaylistItem::Playlist(_)) {
+                if let Some(callback) = on_tracks_drop.borrow().as_ref() {
+                    callback(item, track_ids);
+                    return true;
+                }
+            }
+            return false;
+        }
         let Some(source_item) = parse_drag_payload(&text) else {
             return false;
         };
@@ -926,6 +1068,28 @@ fn parse_drag_payload(text: &str) -> Option<PlaylistItem> {
         "smart" => SmartPlaylistId::new(id).map(PlaylistItem::SmartPlaylist),
         _ => None,
     }
+}
+
+pub(crate) fn tracks_drag_payload(track_ids: &[TrackId]) -> String {
+    let joined = track_ids
+        .iter()
+        .map(|id| id.get().to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("tracks:{joined}")
+}
+
+fn parse_tracks_payload(text: &str) -> Option<Vec<TrackId>> {
+    let (kind, ids_str) = text.split_once(':')?;
+    if kind != "tracks" {
+        return None;
+    }
+    let ids: Option<Vec<TrackId>> = ids_str
+        .split(',')
+        .map(|part| part.trim().parse::<i64>().ok().and_then(TrackId::new))
+        .collect();
+    let ids = ids?;
+    if ids.is_empty() { None } else { Some(ids) }
 }
 
 pub(crate) fn build_content_area(sidebar: &gtk::Box, main_content: &gtk::Box) -> gtk::Paned {
@@ -1095,6 +1259,26 @@ mod tests {
             drop_position_from_motion(18.0, 20.0, true),
             DropPosition::Below
         );
+    }
+
+    #[test]
+    fn tracks_payload_round_trips_for_multiple_ids() {
+        let ids = vec![
+            xtunes_app_runtime::TrackId::new(1).expect("positive"),
+            xtunes_app_runtime::TrackId::new(7).expect("positive"),
+            xtunes_app_runtime::TrackId::new(42).expect("positive"),
+        ];
+        let payload = tracks_drag_payload(&ids);
+        assert_eq!(payload, "tracks:1,7,42");
+        assert_eq!(parse_tracks_payload(&payload), Some(ids));
+    }
+
+    #[test]
+    fn tracks_payload_rejects_malformed_input() {
+        assert_eq!(parse_tracks_payload("tracks:"), None);
+        assert_eq!(parse_tracks_payload("tracks:abc"), None);
+        assert_eq!(parse_tracks_payload("tracks:-1"), None);
+        assert_eq!(parse_tracks_payload("playlist:1"), None);
     }
 
     #[test]

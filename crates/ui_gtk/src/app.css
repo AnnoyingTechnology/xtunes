@@ -332,6 +332,20 @@ button.album-detail-icon-button:focus {
     color: #e66100;
 }
 
+.playlist-sidebar-library {
+    padding: 4px 6px;
+    border-radius: 4px;
+}
+
+.playlist-sidebar-library.selected {
+    background-color: alpha(@theme_fg_color, 0.10);
+    font-weight: 600;
+}
+
+.playlist-sidebar-library:hover {
+    background-color: alpha(@theme_fg_color, 0.06);
+}
+
 button.track-context-menu-item,
 button.sidebar-context-menu-item {
     min-height: 30px;

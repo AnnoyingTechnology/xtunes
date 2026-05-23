@@ -22,7 +22,7 @@ use super::{
     mode_bar::build_mode_bar,
     now_playing::NowPlayingView,
     preferences::install_preferences_action,
-    sidebar::{PlaylistSidebar, build_content_area},
+    sidebar::{PlaylistSidebar, SidebarSelection, build_content_area},
     sidebar_context::{
         NEW_PLAYLIST_DEFAULT_NAME, NEW_PLAYLIST_FOLDER_DEFAULT_NAME,
         NEW_SMART_PLAYLIST_DEFAULT_NAME, SidebarActionCallback, SidebarContextAction,
@@ -170,6 +170,10 @@ pub(crate) fn build_main_window(
         &sidebar,
     ));
     sidebar.set_delete_callback(sidebar_delete_callback(&command_controller, &sidebar));
+    sidebar.set_tracks_drop_callback(sidebar_tracks_drop_callback(
+        &command_controller,
+        &library_changed_holder,
+    ));
     library_changed_holder.replace(Some(library_changed.clone()));
     let scan_requested =
         library_scan_requested_callback(&runtime, library_changed.clone(), &status_bar);
@@ -487,10 +491,11 @@ fn runtime_library_table_rows(runtime: &ApplicationRuntime) -> Vec<TrackTableRow
 
 fn playlist_table_rows_for(
     runtime: &ApplicationRuntime,
-    selection: Option<PlaylistItem>,
+    selection: Option<SidebarSelection>,
 ) -> Vec<TrackTableRow> {
     match selection {
-        Some(PlaylistItem::Playlist(playlist_id)) => {
+        Some(SidebarSelection::Library) => runtime_library_table_rows(runtime),
+        Some(SidebarSelection::Item(PlaylistItem::Playlist(playlist_id))) => {
             let Some(playlist) = runtime
                 .playlists()
                 .iter()
@@ -509,7 +514,7 @@ fn playlist_table_rows_for(
                 .map(|track| TrackTableRow::from_track(track, library_root))
                 .collect()
         }
-        Some(PlaylistItem::SmartPlaylist(smart_playlist_id)) => {
+        Some(SidebarSelection::Item(PlaylistItem::SmartPlaylist(smart_playlist_id))) => {
             let library_root = runtime.settings().library_path();
             runtime
                 .smart_playlist_matching_tracks(smart_playlist_id, SystemTime::now())
@@ -519,6 +524,34 @@ fn playlist_table_rows_for(
         }
         _ => Vec::new(),
     }
+}
+
+fn sidebar_tracks_drop_callback(
+    command_controller: &SharedCommandController,
+    library_changed_holder: &LibraryChangedHolder,
+) -> super::sidebar::SidebarTracksDropCallback {
+    let command_controller = command_controller.clone();
+    let library_changed_holder = library_changed_holder.clone();
+
+    Rc::new(move |target, track_ids| {
+        let PlaylistItem::Playlist(playlist_id) = target else {
+            return;
+        };
+        if track_ids.is_empty() {
+            return;
+        }
+        let dispatched = command_controller
+            .dispatch_succeeded(ApplicationCommand::AddTracksToPlaylist {
+                playlist_id,
+                track_ids,
+            });
+        if !dispatched {
+            return;
+        }
+        if let Some(callback) = library_changed_holder.borrow().as_ref() {
+            callback();
+        }
+    })
 }
 
 fn playlist_entries_in_order(playlist: &Playlist) -> impl Iterator<Item = TrackId> + '_ {
