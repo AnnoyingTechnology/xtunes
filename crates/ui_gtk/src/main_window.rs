@@ -33,14 +33,14 @@ use super::{
         NEW_SMART_PLAYLIST_DEFAULT_NAME, SidebarActionCallback, SidebarContextAction,
         SidebarContextMenu, unique_default_name,
     },
-    smart_playlist_editor::open_smart_playlist_editor,
+    smart_playlist_editor::{SmartPlaylistEditorMode, open_smart_playlist_editor},
     status_bar::StatusBar,
     titlebar::{
         Titlebar, build_titlebar, connect_titlebar_playback_controls, sync_play_pause_icon,
     },
     track_context::{
         AddToPlaylistCallback, AddToPlaylistEntry, AddToPlaylistProvider, TrackActionCallback,
-        TrackContextAction, TrackContextActionSet, TrackRowContextMenu,
+        TrackActionVisibility, TrackContextAction, TrackContextActionSet, TrackRowContextMenu,
     },
     track_table::{
         RatingChangedCallback, TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table,
@@ -93,6 +93,7 @@ pub(crate) fn build_main_window(
         command_controller.clone(),
         playback_changed.clone(),
     );
+    install_track_ended_callback(&runtime, &command_controller, &playback_changed);
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.add_css_class("app-shell");
@@ -111,14 +112,28 @@ pub(crate) fn build_main_window(
         playback_changed.clone(),
         library_changed_holder.clone(),
     );
+    let add_to_playlist_provider = add_to_playlist_provider(&runtime);
+    let add_to_playlist_callback =
+        add_to_playlist_callback(&command_controller, &runtime, &library_changed_holder);
     let context_menu = TrackRowContextMenu::new(
         context_actions,
         window.clone().upcast::<gtk::Window>(),
     )
     .with_add_to_playlist(
-        add_to_playlist_provider(&runtime),
-        add_to_playlist_callback(&command_controller, &runtime, &library_changed_holder),
+        add_to_playlist_provider.clone(),
+        add_to_playlist_callback.clone(),
     );
+    let playlist_context_actions = playlist_track_context_actions(
+        &command_controller,
+        playback_changed.clone(),
+        library_changed_holder.clone(),
+        &sidebar,
+    );
+    let playlist_context_menu = TrackRowContextMenu::new(
+        playlist_context_actions,
+        window.clone().upcast::<gtk::Window>(),
+    )
+    .with_add_to_playlist(add_to_playlist_provider, add_to_playlist_callback);
     let rating_changed =
         rating_changed_callback(&command_controller, library_changed_holder.clone());
     let songs_table = build_track_table(
@@ -132,12 +147,12 @@ pub(crate) fn build_main_window(
         runtime.clone(),
         command_controller.clone(),
         playback_changed.clone(),
-        context_menu.clone(),
+        context_menu,
     );
     let playlists_table = build_track_table(
         Vec::new(),
         Some(track_activated.clone()),
-        Some(context_menu.clone()),
+        Some(playlist_context_menu),
         Some(rating_changed),
     );
     playback_changed();
@@ -185,6 +200,12 @@ pub(crate) fn build_main_window(
     sidebar.set_tracks_drop_callback(sidebar_tracks_drop_callback(
         &command_controller,
         &library_changed_holder,
+    ));
+    sidebar.set_edit_smart_playlist_callback(sidebar_edit_smart_playlist_callback(
+        &window,
+        &command_controller,
+        &runtime,
+        &sidebar,
     ));
     library_changed_holder.replace(Some(library_changed.clone()));
     let scan_requested =
@@ -357,7 +378,7 @@ fn sidebar_action_callback(
                 &parent,
                 command_controller.clone(),
                 Rc::new(move || sidebar_for_created.refresh()),
-                name,
+                SmartPlaylistEditorMode::Create { name },
             );
         }
     })
@@ -406,6 +427,41 @@ fn sidebar_rename_callback(
         if dispatched {
             sidebar.refresh();
         }
+    })
+}
+
+fn sidebar_edit_smart_playlist_callback(
+    parent: &gtk::ApplicationWindow,
+    command_controller: &SharedCommandController,
+    runtime: &SharedRuntime,
+    sidebar: &PlaylistSidebar,
+) -> super::sidebar::SidebarEditSmartPlaylistCallback {
+    let parent = parent.clone();
+    let command_controller = command_controller.clone();
+    let runtime = runtime.clone();
+    let sidebar = sidebar.clone();
+
+    Rc::new(move |smart_playlist_id| {
+        let snapshot = runtime
+            .borrow()
+            .smart_playlists()
+            .iter()
+            .find(|smart| smart.id == smart_playlist_id)
+            .map(|smart| (smart.name.clone(), smart.rules.clone()));
+        let Some((name, rules)) = snapshot else {
+            return;
+        };
+        let sidebar_for_saved = sidebar.clone();
+        open_smart_playlist_editor(
+            &parent,
+            command_controller.clone(),
+            Rc::new(move || sidebar_for_saved.refresh()),
+            SmartPlaylistEditorMode::Edit {
+                smart_playlist_id,
+                name,
+                rules,
+            },
+        );
     })
 }
 
@@ -731,6 +787,27 @@ fn track_activated_callback(
     })
 }
 
+fn install_track_ended_callback(
+    runtime: &SharedRuntime,
+    command_controller: &SharedCommandController,
+    playback_changed: &PlaybackChangedCallback,
+) {
+    let command_controller = command_controller.clone();
+    let playback_changed = playback_changed.clone();
+    // The bus watch fires from glib's main context, the same thread that
+    // services GTK events. Dispatching PlayNextTrack therefore happens at a
+    // quiescent point, so no other borrow of the runtime can be in flight.
+    runtime
+        .borrow()
+        .set_track_ended_callback(Box::new(move || {
+            if command_controller.dispatch_succeeded(ApplicationCommand::Playback(
+                PlaybackCommand::PlayNextTrack,
+            )) {
+                playback_changed();
+            }
+        }));
+}
+
 fn rating_changed_callback(
     command_controller: &SharedCommandController,
     library_changed_holder: LibraryChangedHolder,
@@ -769,6 +846,70 @@ fn track_context_actions(
             |track_id| ApplicationCommand::MoveTrackToTrash { track_id },
         )),
     ])
+}
+
+fn playlist_track_context_actions(
+    command_controller: &SharedCommandController,
+    playback_changed: PlaybackChangedCallback,
+    library_changed_holder: LibraryChangedHolder,
+    sidebar: &PlaylistSidebar,
+) -> TrackContextActionSet {
+    TrackContextActionSet::new(vec![
+        TrackContextAction::remove_from_playlist(
+            remove_from_playlist_callback(
+                command_controller,
+                sidebar,
+                library_changed_holder.clone(),
+            ),
+            current_selection_is_regular_playlist(sidebar),
+        ),
+        TrackContextAction::remove_from_library(track_mutation_callback(
+            command_controller,
+            playback_changed.clone(),
+            library_changed_holder.clone(),
+            |track_id| ApplicationCommand::RemoveTrackFromLibrary { track_id },
+        )),
+        TrackContextAction::move_to_trash(track_mutation_callback(
+            command_controller,
+            playback_changed,
+            library_changed_holder,
+            |track_id| ApplicationCommand::MoveTrackToTrash { track_id },
+        )),
+    ])
+}
+
+fn remove_from_playlist_callback(
+    command_controller: &SharedCommandController,
+    sidebar: &PlaylistSidebar,
+    library_changed_holder: LibraryChangedHolder,
+) -> TrackActionCallback {
+    let command_controller = command_controller.clone();
+    let sidebar = sidebar.clone();
+
+    Rc::new(move |track_ids: Vec<TrackId>| {
+        let Some(SidebarSelection::Item(PlaylistItem::Playlist(playlist_id))) =
+            sidebar.current_selection()
+        else {
+            return;
+        };
+        if command_controller.dispatch_succeeded(ApplicationCommand::RemoveTracksFromPlaylist {
+            playlist_id,
+            track_ids,
+        }) && let Some(callback) = library_changed_holder.borrow().as_ref()
+        {
+            callback();
+        }
+    })
+}
+
+fn current_selection_is_regular_playlist(sidebar: &PlaylistSidebar) -> TrackActionVisibility {
+    let sidebar = sidebar.clone();
+    Rc::new(move || {
+        matches!(
+            sidebar.current_selection(),
+            Some(SidebarSelection::Item(PlaylistItem::Playlist(_)))
+        )
+    })
 }
 
 fn track_mutation_callback(

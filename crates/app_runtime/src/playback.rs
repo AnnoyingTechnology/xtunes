@@ -114,6 +114,13 @@ impl ApplicationRuntime {
 
     fn play_adjacent_track(&mut self, track_id: Option<TrackId>) -> ApplicationRuntimeResult<()> {
         let Some(track_id) = track_id else {
+            // End of queue (or no neighbour in the current direction). Stop
+            // the backend so its state stops reporting the previous track as
+            // still playing — otherwise the auto-advance triggered by EOS
+            // would leave the UI showing the last track at a stale position.
+            if let Some(service) = self.playback_service.as_deref() {
+                let _ = service.stop();
+            }
             return Ok(());
         };
 

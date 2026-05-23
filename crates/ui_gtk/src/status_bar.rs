@@ -187,8 +187,11 @@ fn duration_text(duration_seconds: u64) -> String {
     if hours >= 24 {
         let days = hours / 24;
         format!("{} {}", days, pluralize(days as usize, "day", "days"))
-    } else {
+    } else if hours >= 1 {
         format!("{} {}", hours, pluralize(hours as usize, "hour", "hours"))
+    } else {
+        let minutes = duration_seconds / 60;
+        format!("{} {}", minutes, pluralize(minutes as usize, "minute", "minutes"))
     }
 }
 
@@ -216,6 +219,22 @@ mod tests {
         assert_eq!(
             library_status_text(2, 7_200, 250_000_000),
             "2 songs, 2 hours, 250 MB"
+        );
+    }
+
+    #[test]
+    fn library_status_uses_minutes_when_under_an_hour() {
+        assert_eq!(
+            library_status_text(3, 1_800, 12_000_000),
+            "3 songs, 30 minutes, 12 MB"
+        );
+    }
+
+    #[test]
+    fn library_status_uses_singular_minute_for_a_single_minute() {
+        assert_eq!(
+            library_status_text(1, 60, 1_000_000),
+            "1 song, 1 minute, 1 MB"
         );
     }
 

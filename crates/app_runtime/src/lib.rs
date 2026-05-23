@@ -20,6 +20,7 @@ pub use xtunes_domain::{
 };
 use xtunes_library_store::LibraryStore;
 use xtunes_metadata::MetadataService;
+pub use xtunes_playback::TrackEndedCallback;
 use xtunes_playback::PlaybackService;
 use xtunes_settings::SettingsStore;
 
@@ -239,6 +240,12 @@ impl ApplicationRuntime {
             .as_deref()
             .map(PlaybackService::state)
             .unwrap_or_default()
+    }
+
+    pub fn set_track_ended_callback(&self, callback: TrackEndedCallback) {
+        if let Some(service) = self.playback_service.as_deref() {
+            service.set_on_track_ended(callback);
+        }
     }
 
     pub fn playback_options(&self) -> PlaybackOptions {

@@ -1,5 +1,40 @@
 # xTunes Architecture Plan
 
+## Product Name (Open)
+
+The working name `xTunes` is provisional and likely to change before any public
+release. The maintainer is not satisfied with it: the `x` prefix carries a
+late-90s/early-2000s Linux-desktop flavor (xterm, xmms, xchat, xine) that reads
+as dated rather than as heritage, and the `Tunes` half leans too hard on iTunes
+phonetics for an application that is explicitly not iTunes.
+
+Given the quality bar the maintainer is holding the codebase to, the product
+deserves a name worth being proud of. A better name should be chosen before the
+first public release.
+
+Current candidate names the maintainer likes: **Needle** and **Spindle**. Both
+evoke physical-media / turntable imagery, which fits the product's dense,
+pre-streaming, library-ownership ethos. Neither has been committed to yet, and
+each needs a search-collision and trademark check (existing audio software,
+bands, products) before being adopted.
+
+Direction worth exploring when the time comes:
+
+- short, pronounceable, and easy to say out loud
+- not a play on `iTunes`, `Rhythmbox`, or any other existing player
+- not `x`-prefixed and not leaning on dated Linux-desktop naming conventions
+- music-adjacent without being literal (oblique nouns from records, playback,
+  or musical structure tend to age better than compound words)
+- searchable: distinct enough that the project is findable without colliding
+  with an existing product, band, or common word
+- usable as a binary name, crate prefix, and reverse-DNS application id
+  without awkward transformations
+
+Renaming touches the binary name, crate prefix (`xtunes-*` / `xtunes_*`), the
+application id (`io.github.open_xtunes.xtunes`), packaging metadata, and every
+SPDX/copyright header. Plan the rename as a single coordinated change rather
+than a drip of partial renames.
+
 ## Summary
 
 developer => desired contextual menu on tracks:
@@ -148,6 +183,213 @@ should show a warning symbol on that row. Attempting to play the missing track
 should offer a `Locate` workflow that lets the user choose the replacement file
 manually. Relocating should update the track location while preserving playlists,
 rating, metadata cache, and listening statistics.
+
+## Library Scan Performance (Known Issue)
+
+The current scan path does not survive a real-world library. Observed behavior
+on a ~10,000-track library:
+
+- the first 2–3 seconds appear to enumerate files from the filesystem
+- after enumeration, the UI freezes completely with one thread pinned at 100%
+- the freeze persisted for at least 45 seconds before the maintainer killed the
+  process
+- after restart, the status bar showed the correct counts/durations, meaning
+  scan progress was being written to SQLite throughout — the work was
+  succeeding, but on a thread that should not have been the UI thread
+
+This is unacceptable. The UI must never freeze, regardless of library size,
+and a 10k-track library is small, not large. Scan responsiveness and
+throughput are a first-class concern, not a polish item.
+
+Hard requirements:
+
+- the GTK main thread must never block on scanning work; no synchronous
+  filesystem traversal, no synchronous tag reads, no synchronous SQLite
+  writes triggered from the UI thread
+- the scan runs entirely as a background task, communicating with the runtime
+  via typed messages
+- the status bar surfaces live progress (files seen, files indexed, current
+  phase) with the rotating sync icon, and the table remains fully interactive
+  while a scan is in flight
+- cancelling a scan is supported and prompt; the partial result already
+  written to SQLite is preserved and consistent
+- a scan can be interrupted by app exit at any point without corrupting the
+  library database
+
+Design directions to evaluate before committing to an implementation:
+
+- split the scan into explicit phases (enumerate, stat, tag-read, hash if
+  needed, persist) so each phase can be tuned and instrumented independently
+- parallelize the CPU/IO-bound phases across a worker pool sized to the host
+  (likely `num_cpus`-based, with a cap), keeping SQLite writes funneled
+  through a single writer to avoid lock contention
+- batch SQLite writes into transactions of a tuned size rather than one
+  statement per track; measure the sweet spot
+- use `WAL` journaling mode for the library database so readers (the UI) are
+  not blocked by the scan writer
+- prefer streaming the enumeration into the worker pool rather than
+  collecting the full file list first, so work begins overlapping with
+  enumeration
+- consider an explicit bounded channel between phases so a slow phase
+  applies backpressure instead of memory ballooning
+- measure before optimizing: add lightweight per-phase timing/counters that
+  can be inspected (debug log or a hidden diagnostics view) so future
+  regressions are catchable
+
+Non-goals for this work:
+
+- no premature caching layers, no custom thread pools where `rayon` or a
+  scoped worker pool would do, no bespoke async runtime
+- no hand-rolled SQLite connection pool before measuring whether a single
+  writer thread plus read-only connections suffices
+
+Validation target: on the maintainer's ~10k-track library, a full cold scan
+must complete without ever blocking the UI for more than a single animation
+frame, and a warm rescan (no changes) must be substantially faster than a
+cold scan because unchanged files are detected cheaply (mtime + size, not
+full tag re-read).
+
+## Table Interaction Performance (Known Issue)
+
+Independently from the scan freeze, the Songs table itself does not stay
+responsive at real library sizes. Observed on the maintainer's ~10k-track
+library, on top-tier consumer hardware as of mid-2026:
+
+- scrolling is visibly sluggish, not 60+ fps
+- a single click to activate a row has a roughly 500 ms lag before the row
+  reflects the new selection
+- the rest of the UI feels heavy in proportion
+
+This is unacceptable. The target is fluid, instantaneous interaction at the
+scale of a real library, not at the scale of the in-memory fake fixtures used
+during interface-first development. 10k tracks is small; the table must
+remain crisp at that size and degrade gracefully well beyond it.
+
+Reference point: the exact same ~10k-track library is perfectly fluid in
+Rhythmbox on the same hardware. Scrolling is smooth and row selection is
+instantaneous. The performance target here is therefore known to be
+achievable on this machine with this dataset — this is not chasing a wild
+goose, it is matching a baseline that an existing GTK music player already
+hits. If xTunes cannot match it, the bottleneck is in our own code, not in
+GTK, the library, or the hardware.
+
+Hard requirements:
+
+- scrolling stays at the display's native refresh rate with no dropped frames
+  on a populated table
+- single-click row activation reflects in the UI within one frame; no
+  perceptible lag between input and visual feedback
+- sort, search/filter, and column resize stay interactive at 10k+ rows
+- nothing in the row activation path performs synchronous SQLite queries,
+  synchronous tag reads, or synchronous artwork decoding
+
+Design directions to evaluate before committing to an implementation:
+
+- confirm the table is using a virtualized GTK view (`GtkColumnView` /
+  `GtkListView` with a `GtkListItemFactory`) rather than materializing a
+  widget per row; the lag pattern strongly suggests the row set is not
+  virtualized or the factory is doing too much work per bind
+- audit the per-row bind path for unnecessary allocations, string
+  formatting, or property lookups that run on every scroll tick; precompute
+  display strings once and store them on the view model
+- ensure the underlying list model is a flat, indexable structure
+  (`GListModel`-backed) with O(1) item access and O(log n) or better
+  filtering/sorting via `GtkFilterListModel` / `GtkSortListModel`, not a
+  hand-rolled linear filter that re-scans on every change
+- decouple selection-change handling from any downstream work that is not
+  strictly required to draw the new selection state; defer artwork loads,
+  detail-pane updates, and metadata queries to idle callbacks
+- batch model invalidations: a single visible change should trigger one
+  redraw, not a cascade of per-row notifications
+- measure with `GTK_DEBUG=interactive` and frame timing before guessing;
+  the 500 ms click lag is large enough that it points at a specific
+  blocking call, not at general overhead
+
+Non-goals:
+
+- no custom virtualization layer; GTK4 already provides one and the task is
+  to use it correctly, not replace it
+- no premature caching of derived view data before profiling identifies
+  what is actually slow
+
+Validation target: on the maintainer's ~10k-track library, the Songs table
+scrolls smoothly with no perceptible jank, click-to-select is visually
+instantaneous, and search/sort/filter updates apply within one or two
+frames. These targets are gating for any claim that the interface-first
+shell is "done"; meeting them only on small fake fixtures does not count.
+
+## Gapless Track-to-Track Playback (Known Issue)
+
+The current auto-advance path inserts an audible silence between tracks.
+When the currently playing track hits end-of-stream, GStreamer emits an EOS
+message on the playbin's bus; xTunes responds by stopping the pipeline,
+loading the next track's URI, and restarting playback. Between "stop" and
+"playing", the audio output is silent — observable as roughly a half-second
+gap between consecutive tracks.
+
+A half-second of silence between tracks is not acceptable in a music
+player. Pauses between tracks break album playback, ruin transitions on
+mixed records (live recordings, DJ sets, concept albums with crossfaded
+tracks), and make every playlist feel disjointed. This must be fixed
+before xTunes is shippable as a real player. It is deferred, not
+forgotten.
+
+The intended fix uses GStreamer's `playbin` `about-to-finish` signal
+instead of the EOS bus message. `about-to-finish` fires shortly before the
+current track ends, giving the application a chance to set the next
+track's URI on the same `playbin` element. The pipeline then transitions
+to the new stream without tearing down and rebuilding the audio path,
+eliminating the silence. The current EOS bus watch is kept as a fallback
+for true end-of-queue conditions (no next URI to hand off to), where
+stopping the pipeline is the correct behavior.
+
+Design directions to evaluate before committing to an implementation:
+
+- the `about-to-finish` handler runs on a GStreamer streaming thread, not
+  on the GTK main thread; it must resolve the next URI without touching
+  `Rc<RefCell<...>>` state from the UI side, because those types are not
+  thread-safe
+- pre-compute the next track URI on the main thread (whenever the queue,
+  shuffle, or repeat state changes) and store it behind an
+  `Arc<Mutex<Option<NextTrack>>>` or equivalent; the streaming thread
+  reads from that handle without blocking
+- `stream-start` on the bus becomes the authoritative "now playing
+  changed" event; play-count, last-played, and the now-playing UI all
+  update from that message rather than from the about-to-finish signal,
+  so they reflect the moment the audio actually switches and not the
+  moment the next URI was queued
+- skip handling stays on the existing manual-skip path; manual skip
+  remains a `play_track` call that tears down and rebuilds, gapless
+  handoff is only for natural track completion
+- validate against the real library: gapless handoff must work across
+  format boundaries (MP3 → FLAC, FLAC → MP3, AAC → Vorbis, etc.) and
+  must not introduce clicks, pops, or sample-rate-mismatch artefacts;
+  test fixtures alone do not catch these
+- the existing EOS bus watch must remain the path for true end-of-queue
+  (no next track) so the pipeline still stops cleanly and the UI state
+  stops lying about what is playing
+
+Hard requirements once this work begins:
+
+- consecutive tracks in a playlist, album, or library queue play with no
+  perceptible silence between them
+- the play-count and last-played updates for the outgoing track happen
+  at the correct moment, neither too early (before the audio actually
+  finished) nor too late (after the incoming track has already started)
+- shuffle and repeat modes work the same way with gapless handoff as
+  they do today with the EOS path
+- the existing bus-watch fallback for true end-of-queue continues to
+  work and stops the pipeline cleanly
+
+Non-goals:
+
+- no custom audio mixer and no crossfade behavior; gapless means zero
+  gap, not blended overlap
+- no rewrite of the GStreamer abstraction; this is a refinement of how
+  the existing `playbin` element is driven, not a replacement
+- no preemptive decoding of the next track via a separate pipeline; the
+  `about-to-finish` mechanism on a single `playbin` handles this without
+  application-level orchestration
 
 ## Duplicate Consolidation
 
@@ -367,6 +609,30 @@ color as their background so the flip animation reads as one continuous
 surface. The lyrics provider and lyrics-storage path are a prerequisite for
 this feature and need their own design decision before this work can ship.
 
+The now-playing area includes a thin horizontal progress bar showing playback
+position within the current track. The bar is intentionally thin and must
+stay that way visually; it should not be made taller to feel clickable.
+Instead, the interaction behavior should make it feel generous without
+changing its appearance:
+
+- the hit area is roughly double the bar's visual height, extending upward
+  so the user can click slightly above the bar and still seek; the lower
+  edge of the bar stays aligned to its visual position
+- while the cursor hovers anywhere over the now-playing container, a
+  vertical indicator (a thin tick) protrudes above the progress bar at the
+  cursor's horizontal position, previewing where a click would seek to;
+  the indicator disappears when the pointer leaves the container
+- a click anywhere in the hit area seeks immediately to the clicked
+  position; press-and-drag continues to seek as the cursor moves, so the
+  user can scrub through the track without releasing the button; release
+  commits the final position
+- during drag, the audio seek can be live (scrubbing) or deferred to
+  release; this needs to be decided based on GStreamer seek cost on real
+  files, but the visual indicator must track the cursor at native refresh
+  rate either way
+- the seek path goes through the existing playback command, not a direct
+  pipeline call from the widget
+
 Smart playlists are in scope after regular playlist and table behavior is
 stable. They should be rule-based saved queries over the local library, not a
 cloud/recommendation feature.
@@ -477,6 +743,182 @@ Constraints if/when this is built:
 - the cached envelope is small, fixed-resolution, and detached from the audio
   file itself so it survives metadata edits
 - the renderer must work cleanly in both native light and dark modes
+
+## Metadata Backfill (Tentative)
+
+Two related opt-in actions, surfaced from the settings pane:
+
+- `Fetch missing artwork` — for every track in the library that has no embedded
+  cover art and no cached artwork, attempt to retrieve a cover image from an
+  online source and write it to the track.
+- `Fetch missing tags` — for every track with empty fields in its native tag
+  format (ID3 for MP3, Vorbis comments for Ogg/FLAC, MP4 atoms for M4A),
+  attempt to identify the recording from an online source and fill in only the
+  fields that are currently missing.
+
+Strict non-destructive contract, applies to both actions:
+
+- existing artwork is never replaced, re-encoded, or re-cropped; tracks that
+  already have any embedded cover art are skipped entirely
+- existing tag fields are never overwritten, normalized, recased, or
+  reformatted; only fields whose current value is empty/absent are populated
+- a partial existing tag set is respected: if a track has Artist and Title but
+  no Album, only Album may be filled
+- on any ambiguity (multiple plausible matches, low-confidence match), the
+  field is left empty rather than guessed
+- both actions write through the existing tag-writing path so the file on disk
+  and the SQLite cache stay consistent
+
+Open design questions to resolve before implementation:
+
+- which metadata provider(s) to use (MusicBrainz is the obvious local-friendly
+  candidate; Cover Art Archive for artwork; AcoustID/Chromaprint for
+  fingerprint-based identification when tags are too sparse to match by text)
+- match-confidence threshold and how the user is informed when a track was
+  skipped because no confident match was found
+- whether the user can run the actions on a selection (e.g. selected tracks in
+  the Songs table) in addition to whole-library runs from settings
+- rate limiting and offline behavior; both actions must degrade gracefully
+  without network access
+- caching of negative results, so repeated runs do not re-query the provider
+  for tracks that were already determined to be unidentifiable
+- whether a dry-run/preview mode is needed before writes happen
+
+Constraints if/when this is built:
+
+- runs as a background task surfaced in the bottom status bar, never blocking
+  the UI or playback
+- network requests are gated behind an explicit user-initiated action; xTunes
+  must not silently phone home during normal library scanning
+- provider client lives in its own crate (e.g. `metadata_remote`) so the core
+  metadata crate stays offline and testable
+- per-track outcomes (filled, skipped-no-match, skipped-already-present,
+  failed) are reported as explicit results, consistent with the scanner's
+  outcome reporting
+
+This feature is out of scope for the first vertical slice. It should not be
+attempted before the local metadata scan, tag-writing path, and background-task
+status surface are solid.
+
+## Smart Shuffle (Tentative)
+
+In addition to a pure-random shuffle mode, xTunes should offer a `Smart Shuffle`
+mode that picks the next track by similarity to the currently playing track
+rather than uniformly at random. Pure random shuffle remains the default and
+must stay available; smart shuffle is an opt-in alternative selectable from the
+shuffle control.
+
+The goal is a coherent listening session that drifts within a stylistic
+neighborhood without becoming repetitive. The feature is local-only: no cloud
+service, no recommendation API, no telemetry. All scoring runs against the
+local library and local listening statistics.
+
+Candidate similarity features to score against the seed (current) track:
+
+- release year proximity (e.g. within a small window of the seed's year)
+- date-added proximity (e.g. within roughly +/- 2 months of the seed's date
+  added, capturing tracks ingested in the same listening era)
+- identical or related genre
+- shared artist or album-artist
+- BPM proximity
+- key/mode proximity if available from metadata
+- rating proximity, biased toward equal-or-higher-rated tracks
+- play-count band, to avoid pulling in tracks never listened to alongside the
+  seed's usual companions
+- co-occurrence in the same playlists as the seed
+- duration band, to avoid jarring length jumps
+
+Anti-repetition rules, applied as hard filters before scoring:
+
+- exclude tracks played within the last hour
+- exclude the seed track itself
+- exclude tracks already played earlier in the current shuffle session
+- exclude tracks marked as skipped recently (once skip tracking exists)
+
+Open design questions to resolve before implementation:
+
+- exact feature set and weighting; the list above is a starting point and needs
+  refinement against real listening behavior
+- whether to use a hand-tuned weighted scoring function or a learned model
+  (e.g. a small random forest, logistic regression, or gradient-boosted trees)
+  trained on the user's own play/skip history; a learned approach is only
+  acceptable if it stays fully local, deterministic enough to debug, and cheap
+  enough to retrain on-device
+- how training labels are derived (full plays as positives, skips as negatives,
+  with appropriate care for short tracks and intentional next-track presses)
+- where retraining runs (background task on idle, never blocking playback)
+- how the model and its inputs are persisted (alongside the library database,
+  with a clear invalidation rule when the library or statistics change)
+- how to explain the next-track choice to the user, at least in a debug surface,
+  so the behavior is inspectable rather than opaque
+
+Constraints if/when this is built:
+
+- scoring and selection must run off the UI thread and must never block
+  playback transitions
+- the algorithm must degrade gracefully on libraries that lack rich metadata
+  (missing year, missing genre, missing BPM); missing features reduce to a
+  neutral contribution rather than disqualifying tracks
+- pure random shuffle behavior must remain bit-for-bit unchanged when smart
+  shuffle is not selected
+- the implementation lives in the domain/app_runtime layer behind the existing
+  playback command path; GTK only exposes the mode toggle
+
+This feature is out of scope for the first vertical slice and should not be
+attempted before regular playback, ratings, play statistics, and playlist
+behavior are solid.
+
+## Developer Isolation (CLI Data Paths)
+
+Once xTunes is installed system-wide (e.g. via `.deb`), a developer working on
+a branch out of a checkout must not risk colliding with or corrupting the
+installed instance's data — in particular the user's real music library
+database, their settings, and any cached artwork. The current behavior, where
+both the installed binary and a `cargo run` build read and write the same
+on-disk locations, is unsafe: a single bad migration or schema change in a
+dev branch can trash years of curated library state.
+
+The fix is to make the data paths explicit and overridable from the command
+line. Two complementary flags:
+
+- `--config <path>`: use the given TOML settings file instead of the default
+  XDG config location. The file is created if it does not exist.
+- `--database <path>`: use the given SQLite database file instead of the
+  default XDG data location. The file is created if it does not exist.
+
+Both flags accept absolute or relative paths and operate independently; a
+developer can override one without the other.
+
+For the common case (run a dev build in an isolated sandbox without typing
+two paths every time), a single convenience flag:
+
+- `--local-scope` (alternatively `--dev`): place both the TOML config and the
+  SQLite database in the current working directory, under predictable names
+  (e.g. `xtunes.toml` and `xtunes.sqlite`). Cached artwork and any other
+  on-disk artefacts produced by the run go under a sibling directory in the
+  same working directory.
+
+Precedence rules:
+
+- explicit `--config` / `--database` always win over `--local-scope`
+- `--local-scope` wins over the default XDG locations
+- nothing reads from the default XDG paths if any override flag is active;
+  the dev instance must be fully self-contained in the overridden locations
+- the resolved paths are logged at startup so the developer can see
+  immediately which database and config the running instance is touching
+
+Non-goals:
+
+- no implicit "detect cargo run and switch modes" magic; the developer
+  opts in by passing a flag
+- no environment-variable equivalent in the first pass; flags are explicit
+  and visible in shell history
+
+Once this lands, the dev instructions in `README.md` must document the
+flags and recommend `--local-scope` (or the explicit pair) as the standard
+way to run xTunes against anything other than the installed user's real
+library. The recommendation should be prominent enough that a new
+contributor cannot miss it.
 
 ## Distribution
 

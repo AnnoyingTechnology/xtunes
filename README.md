@@ -4,31 +4,44 @@
 
 ![xTunes interface screenshot dark](screenshot-light.png)
 
-Open xTunes is a Linux music player for local music libraries.
+Open xTunes is a Linux music player heavily inspired by old iTunes builds.
 
 > I was an Apple fanboy during the iTunes golden era (2005-2015).
-> Each new release was a real treat, and this is the thing I missed most after switching to Linux.
+> Each new release was a real treat and what I miss most after switching to Linux.
 > Advent of solid LLM agents in late 2025 allowed me to get a substitute rolling.
 
-This player is not a true iTunes clone for three reasons :
-- with each versions good aspects came and went, I'm cherry picking what I believe to be tasteful,
-- lots of features that were added over time were pure bloat,
-- not to infringe on intellectual property.
+This player is not an iTunes clone for a few reasons :
+- each versions brought and took away good things, I'm cherry picking what I believe to be tasteful,
+- bloat has not been ported,
+- features for music lovers are added.
 
-This player is not designed by commity nor is it it's purpose. It's opinionated and autoritarian, as most of Apple's good products were.
+This player is not designed by commity. 
+It's autoritarian, as I believe was the case for most good Apple products.
 
-The interface is working natively in both Light and Dark modes. It also leverages natives aspects of Gnome to get the right blend of bespoke visual component without bending GTK or GNome excessively.
-It is an affair of compromise. Native _icons_ are used, native _accent color_ is used, etc.
+The interface is working natively in both light and dark modes. 
+It leverages natives features of Gnome to get the right blend of bespoke visual component without abusing GTK or bending Gnome.
+For example native _icons_ are used, so are native _accent color_.
 
-The target system is Debian on Wayland. The stack is Rust, GTK4, GStreamer, and
-SQLite. I'm striving for fast, safe and robust code.
+The library management has two modes, similar to what iTunes does :
+- "Don't touch my files" (default), which only scans a designated library folder. In this mode, your audio files can only be "enhanced" by populating more ID.3 tags. They are never moved or re-organized.
+- "Keep my library organized", which arranges and sorts the files cleanly by Artist and Album in the designated library folder. 
+
+The stack is Rust, GTK4, GStreamer, and SQLite. It should work on any linux distro. 
+I'm striving for fast, safe and maintainable code.
 
 Features that will _probably_ come later :
 - Import from iTunes/Apple Music (.xml)
 - Import from Rhythmbox
+- BPM detection [drift from iTunes features]
+- Key detection [drift from iTunes features]
+- "Smart shuffle", using a local machine learning model [drift from iTunes features]
+- Duplicates consolidation, to preserve the best audio version, but aggregate tags and attributes [drift from iTunes features]
+- Artwork and ID.3 backfill, to consolidate a library with holes. [drift from iTunes features]
+- Sync to Android [drift from iTunes features]
+- [Export to XDJ](https://github.com/AnnoyingTechnology/rhythmbox-to-pioneer-xdj-exporter) [drift from iTunes features]
 - Encode a CD
-- Convert a file to MP3 320 or Flac
-- Sync to Android
+- Convert an existing library file to MP3 320 or Flac
+
 
 ## Key locations
 
@@ -47,5 +60,5 @@ cargo clippy --workspace --all-targets
 
 ### Sidenote
 
-A longtime friend who stayed on macOS told me iTunes (now Apple Music) had "lost the plot" and that he'd love a version without all the junk. He also mentioned the latest Apple Music puts the player at the bottom of the window. I didn't believe him, turns out it's true.
-Apple has lost its way, but 2010-era Apple nailed music playback. So there's probably room for a deshitified iTunes on macOS too. That could come at a later stage.
+A longtime friend who stayed on macOS told me iTunes (now Apple Music) had "lost the plot" and that he'd love a version without all the junk. He told me the latest Apple Music puts the player at the bottom of the window. I didn't believe him, turns out it's true.
+Apple has lost its way, but 2010-era Apple nailed music playback and I know what would improve on that. So there's probably room for a deshitified iTunes on macOS too.

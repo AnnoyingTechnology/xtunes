@@ -9,6 +9,7 @@ use gtk::{gdk, glib};
 use xtunes_app_runtime::{PlaylistId, TrackId};
 
 pub(crate) type TrackActionCallback = Rc<dyn Fn(Vec<TrackId>)>;
+pub(crate) type TrackActionVisibility = Rc<dyn Fn() -> bool>;
 pub(crate) type AddToPlaylistProvider = Rc<dyn Fn() -> Vec<AddToPlaylistEntry>>;
 pub(crate) type AddToPlaylistCallback = Rc<dyn Fn(PlaylistId, Vec<TrackId>)>;
 type PendingConfirmCallback = Rc<RefCell<Option<Box<dyn FnOnce(Vec<TrackId>)>>>>;
@@ -29,6 +30,7 @@ struct AddToPlaylistAction {
 pub(crate) enum TrackContextActionId {
     RemoveFromLibrary,
     MoveToTrash,
+    RemoveFromPlaylist,
 }
 
 impl TrackContextActionId {
@@ -36,6 +38,7 @@ impl TrackContextActionId {
         match self {
             Self::RemoveFromLibrary => "track-context-remove-from-library",
             Self::MoveToTrash => "track-context-move-to-trash",
+            Self::RemoveFromPlaylist => "track-context-remove-from-playlist",
         }
     }
 }
@@ -70,9 +73,13 @@ enum TrackActionConfirmation {
 pub(crate) struct TrackContextAction {
     id: TrackContextActionId,
     label: &'static str,
-    destructive: bool,
     selection: TrackSelectionRequirement,
     confirmation: TrackActionConfirmation,
+    /// When `Some`, the predicate is evaluated each time the menu is popped
+    /// and the action is hidden if it returns `false`. Used for actions that
+    /// only make sense in a specific view (e.g. Remove from Playlist only
+    /// when a regular playlist is currently selected in the sidebar).
+    visibility: Option<TrackActionVisibility>,
     callback: TrackActionCallback,
 }
 
@@ -81,9 +88,9 @@ impl TrackContextAction {
         Self {
             id: TrackContextActionId::RemoveFromLibrary,
             label: "Remove from Library",
-            destructive: false,
             selection: TrackSelectionRequirement::AtLeastOne,
             confirmation: TrackActionConfirmation::None,
+            visibility: None,
             callback,
         }
     }
@@ -92,15 +99,37 @@ impl TrackContextAction {
         Self {
             id: TrackContextActionId::MoveToTrash,
             label: "Move to Trash",
-            destructive: true,
             selection: TrackSelectionRequirement::AtLeastOne,
             confirmation: TrackActionConfirmation::MoveToTrash,
+            visibility: None,
+            callback,
+        }
+    }
+
+    pub(crate) fn remove_from_playlist(
+        callback: TrackActionCallback,
+        visibility: TrackActionVisibility,
+    ) -> Self {
+        Self {
+            id: TrackContextActionId::RemoveFromPlaylist,
+            label: "Remove from Playlist",
+            selection: TrackSelectionRequirement::AtLeastOne,
+            confirmation: TrackActionConfirmation::None,
+            visibility: Some(visibility),
             callback,
         }
     }
 
     fn is_available(&self, selected_count: usize) -> bool {
-        self.selection.accepts(selected_count)
+        if !self.selection.accepts(selected_count) {
+            return false;
+        }
+        if let Some(predicate) = &self.visibility
+            && !predicate()
+        {
+            return false;
+        }
+        true
     }
 }
 
@@ -195,6 +224,7 @@ impl TrackRowContextMenu {
 
         let popover = gtk::Popover::new();
         popover.set_has_arrow(false);
+        popover.add_css_class("compact-context-menu");
         popover.set_parent(popover_parent.as_ref());
         popover.set_child(Some(&self.menu_content(&popover, track_ids)));
 
@@ -396,9 +426,6 @@ fn context_menu_button(action: &TrackContextAction) -> gtk::Button {
     button.add_css_class("flat");
     button.add_css_class("track-context-menu-item");
     button.add_css_class(action.id.css_class());
-    if action.destructive {
-        button.add_css_class("destructive-action");
-    }
     button.set_child(Some(&text));
     button.set_halign(gtk::Align::Fill);
     button.set_hexpand(true);
@@ -532,10 +559,8 @@ mod tests {
 
         assert_eq!(actions[0].id, TrackContextActionId::RemoveFromLibrary);
         assert_eq!(actions[0].label, "Remove from Library");
-        assert!(!actions[0].destructive);
         assert_eq!(actions[1].id, TrackContextActionId::MoveToTrash);
         assert_eq!(actions[1].label, "Move to Trash");
-        assert!(actions[1].destructive);
     }
 
     #[test]

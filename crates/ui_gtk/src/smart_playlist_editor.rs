@@ -12,7 +12,7 @@ use gtk::prelude::*;
 use gtk::{gdk, glib};
 
 use xtunes_app_runtime::{
-    ApplicationCommand, Rating, SmartPlaylistDateField, SmartPlaylistLimit,
+    ApplicationCommand, Rating, SmartPlaylistDateField, SmartPlaylistId, SmartPlaylistLimit,
     SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistNumberField,
     SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField,
     SmartPlaylistTextOperator,
@@ -315,7 +315,16 @@ struct RuleRow {
 }
 
 impl RuleRow {
-    fn new() -> Self {
+    fn from_initial(initial: Option<&SmartPlaylistRule>) -> Self {
+        let (initial_field, initial_operator, initial_value) = match initial {
+            Some(rule) => decompose_rule(rule),
+            None => (
+                EDITOR_FIELDS[0].0,
+                operators_for_field(EDITOR_FIELDS[0].0)[0],
+                ValueInput::None,
+            ),
+        };
+
         let container = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         container.add_css_class("smart-playlist-rule-row");
 
@@ -326,16 +335,13 @@ impl RuleRow {
                 .collect::<Vec<_>>(),
         );
         let field_combo = gtk::DropDown::new(Some(field_model), gtk::Expression::NONE);
-        field_combo.set_selected(0);
-
-        let initial_field = EDITOR_FIELDS[0].0;
-        let initial_operator = operators_for_field(initial_field)[0];
+        field_combo.set_selected(index_of_field(initial_field));
 
         let operator_combo = gtk::DropDown::new(
             Some(operator_model_for_field(initial_field)),
             gtk::Expression::NONE,
         );
-        operator_combo.set_selected(0);
+        operator_combo.set_selected(index_of_operator(initial_field, initial_operator));
 
         let value_container = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         value_container.set_hexpand(true);
@@ -354,6 +360,7 @@ impl RuleRow {
             initial_field,
             initial_operator,
         );
+        apply_initial_value(&current_value.borrow(), &initial_value);
 
         container.append(&field_combo);
         container.append(&operator_combo);
@@ -635,6 +642,17 @@ fn text_operator(operator: EditorOperator) -> Option<SmartPlaylistTextOperator> 
     })
 }
 
+fn editor_operator_from_text(operator: SmartPlaylistTextOperator) -> EditorOperator {
+    match operator {
+        SmartPlaylistTextOperator::Contains => EditorOperator::TextContains,
+        SmartPlaylistTextOperator::DoesNotContain => EditorOperator::TextDoesNotContain,
+        SmartPlaylistTextOperator::Is => EditorOperator::TextIs,
+        SmartPlaylistTextOperator::IsNot => EditorOperator::TextIsNot,
+        SmartPlaylistTextOperator::StartsWith => EditorOperator::TextStartsWith,
+        SmartPlaylistTextOperator::EndsWith => EditorOperator::TextEndsWith,
+    }
+}
+
 fn number_operator(operator: EditorOperator) -> Option<SmartPlaylistNumberOperator> {
     Some(match operator {
         EditorOperator::NumberEqual => SmartPlaylistNumberOperator::Equal,
@@ -645,6 +663,156 @@ fn number_operator(operator: EditorOperator) -> Option<SmartPlaylistNumberOperat
         EditorOperator::NumberLessThanOrEqual => SmartPlaylistNumberOperator::LessThanOrEqual,
         _ => return None,
     })
+}
+
+fn editor_operator_from_number(operator: SmartPlaylistNumberOperator) -> EditorOperator {
+    match operator {
+        SmartPlaylistNumberOperator::Equal => EditorOperator::NumberEqual,
+        SmartPlaylistNumberOperator::NotEqual => EditorOperator::NumberNotEqual,
+        SmartPlaylistNumberOperator::GreaterThan => EditorOperator::NumberGreaterThan,
+        SmartPlaylistNumberOperator::GreaterThanOrEqual => EditorOperator::NumberGreaterThanOrEqual,
+        SmartPlaylistNumberOperator::LessThan => EditorOperator::NumberLessThan,
+        SmartPlaylistNumberOperator::LessThanOrEqual => EditorOperator::NumberLessThanOrEqual,
+    }
+}
+
+fn decompose_rule(rule: &SmartPlaylistRule) -> (EditorField, EditorOperator, ValueInput) {
+    match rule {
+        SmartPlaylistRule::Text {
+            field,
+            operator,
+            value,
+        } => (
+            EditorField::Text(*field),
+            editor_operator_from_text(*operator),
+            ValueInput::Text(value.clone()),
+        ),
+        SmartPlaylistRule::TextIsEmpty { field } => (
+            EditorField::Text(*field),
+            EditorOperator::TextIsEmpty,
+            ValueInput::None,
+        ),
+        SmartPlaylistRule::TextIsPresent { field } => (
+            EditorField::Text(*field),
+            EditorOperator::TextIsPresent,
+            ValueInput::None,
+        ),
+        SmartPlaylistRule::Number {
+            field,
+            operator,
+            value,
+        } => (
+            EditorField::Number(*field),
+            editor_operator_from_number(*operator),
+            ValueInput::Number(*value),
+        ),
+        SmartPlaylistRule::Rating { operator, value } => (
+            EditorField::Rating,
+            editor_operator_from_number(*operator),
+            ValueInput::Rating(u32::from(value.stars())),
+        ),
+        SmartPlaylistRule::DateBefore { field, date } => (
+            EditorField::Date(*field),
+            EditorOperator::DateBefore,
+            ValueInput::Date(format_iso_date(*date)),
+        ),
+        SmartPlaylistRule::DateAfter { field, date } => (
+            EditorField::Date(*field),
+            EditorOperator::DateAfter,
+            ValueInput::Date(format_iso_date(*date)),
+        ),
+        SmartPlaylistRule::DateInLast { field, days } => (
+            EditorField::Date(*field),
+            EditorOperator::DateInLast,
+            ValueInput::Days(days.get()),
+        ),
+        SmartPlaylistRule::DateNotInLast { field, days } => (
+            EditorField::Date(*field),
+            EditorOperator::DateNotInLast,
+            ValueInput::Days(days.get()),
+        ),
+        SmartPlaylistRule::DateIsEmpty { field } => (
+            EditorField::Date(*field),
+            EditorOperator::DateIsEmpty,
+            ValueInput::None,
+        ),
+        SmartPlaylistRule::DateIsPresent { field } => (
+            EditorField::Date(*field),
+            EditorOperator::DateIsPresent,
+            ValueInput::None,
+        ),
+    }
+}
+
+fn index_of_field(field: EditorField) -> u32 {
+    EDITOR_FIELDS
+        .iter()
+        .position(|(f, _)| *f == field)
+        .map(|i| i as u32)
+        .unwrap_or(0)
+}
+
+fn index_of_operator(field: EditorField, op: EditorOperator) -> u32 {
+    operators_for_field(field)
+        .iter()
+        .position(|o| *o == op)
+        .map(|i| i as u32)
+        .unwrap_or(0)
+}
+
+fn index_of_match_kind(kind: SmartPlaylistMatchKind) -> u32 {
+    MATCH_KINDS
+        .iter()
+        .position(|(k, _)| *k == kind)
+        .map(|i| i as u32)
+        .unwrap_or(0)
+}
+
+fn index_of_limit_selection(selection: SmartPlaylistLimitSelection) -> u32 {
+    LIMIT_SELECTIONS
+        .iter()
+        .position(|(s, _)| *s == selection)
+        .map(|i| i as u32)
+        .unwrap_or(0)
+}
+
+fn apply_initial_value(widget: &ValueWidget, input: &ValueInput) {
+    match (widget, input) {
+        (ValueWidget::Text(entry), ValueInput::Text(text)) => entry.set_text(text),
+        (ValueWidget::Number(spin), ValueInput::Number(number)) => spin.set_value(*number as f64),
+        (ValueWidget::Rating(spin), ValueInput::Rating(stars)) => spin.set_value(*stars as f64),
+        (ValueWidget::Date(entry), ValueInput::Date(text)) => entry.set_text(text),
+        (ValueWidget::Days(spin), ValueInput::Days(days)) => spin.set_value(*days as f64),
+        _ => {}
+    }
+}
+
+fn format_iso_date(date: SystemTime) -> String {
+    let seconds = date
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let mut remaining_days = seconds / 86_400;
+    let mut year: i32 = 1970;
+    loop {
+        let year_days = if is_leap_year(year) { 366 } else { 365 } as u64;
+        if remaining_days < year_days {
+            break;
+        }
+        remaining_days -= year_days;
+        year += 1;
+    }
+    let mut month: u32 = 1;
+    while month <= 12 {
+        let month_days = u64::from(days_in_month(year, month));
+        if remaining_days < month_days {
+            break;
+        }
+        remaining_days -= month_days;
+        month += 1;
+    }
+    let day = (remaining_days + 1) as u32;
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 fn parse_iso_date(text: &str) -> Option<SystemTime> {
@@ -700,11 +868,22 @@ fn days_since_unix_epoch(year: i32, month: u32, day: u32) -> Option<u64> {
     Some(days)
 }
 
+pub(crate) enum SmartPlaylistEditorMode {
+    Create {
+        name: String,
+    },
+    Edit {
+        smart_playlist_id: SmartPlaylistId,
+        name: String,
+        rules: SmartPlaylistRuleSet,
+    },
+}
+
 pub(crate) fn open_smart_playlist_editor(
     parent: &gtk::ApplicationWindow,
     command_controller: SharedCommandController,
-    on_created: Rc<dyn Fn()>,
-    default_name: String,
+    on_saved: Rc<dyn Fn()>,
+    mode: SmartPlaylistEditorMode,
 ) {
     let window = gtk::Window::builder()
         .title("Smart Playlist")
@@ -741,6 +920,11 @@ pub(crate) fn open_smart_playlist_editor(
     content.set_margin_bottom(24);
     content.set_margin_start(24);
 
+    let initial_rules: Option<&SmartPlaylistRuleSet> = match &mode {
+        SmartPlaylistEditorMode::Create { .. } => None,
+        SmartPlaylistEditorMode::Edit { rules, .. } => Some(rules),
+    };
+
     let match_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let match_prefix = gtk::Label::new(Some("Match"));
     let match_combo = gtk::DropDown::new(
@@ -752,7 +936,11 @@ pub(crate) fn open_smart_playlist_editor(
         )),
         gtk::Expression::NONE,
     );
-    match_combo.set_selected(0);
+    match_combo.set_selected(
+        initial_rules
+            .map(|rules| index_of_match_kind(rules.match_kind))
+            .unwrap_or(0),
+    );
     let match_suffix = gtk::Label::new(Some("of the following rules:"));
     match_row.append(&match_prefix);
     match_row.append(&match_combo);
@@ -764,7 +952,14 @@ pub(crate) fn open_smart_playlist_editor(
     content.append(&rules_container);
 
     let rule_rows: Rc<RefCell<Vec<RuleRow>>> = Rc::new(RefCell::new(Vec::new()));
-    append_rule_row(&rules_container, &rule_rows);
+    match initial_rules {
+        Some(rule_set) if !rule_set.rules.is_empty() => {
+            for rule in &rule_set.rules {
+                append_rule_row_with(&rules_container, &rule_rows, Some(rule));
+            }
+        }
+        _ => append_rule_row(&rules_container, &rule_rows),
+    }
 
     let limit_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     limit_row.add_css_class("smart-playlist-limit-row");
@@ -785,6 +980,16 @@ pub(crate) fn open_smart_playlist_editor(
     );
     limit_selection_combo.set_selected(0);
     limit_selection_combo.set_sensitive(false);
+
+    if let Some(SmartPlaylistLimit { count, selection }) =
+        initial_rules.and_then(|rules| rules.limit)
+    {
+        limit_check.set_active(true);
+        limit_count.set_value(f64::from(count.get()));
+        limit_selection_combo.set_selected(index_of_limit_selection(selection));
+        limit_count.set_sensitive(true);
+        limit_selection_combo.set_sensitive(true);
+    }
 
     let limit_count_for_toggle = limit_count.clone();
     let limit_selection_for_toggle = limit_selection_combo.clone();
@@ -830,9 +1035,8 @@ pub(crate) fn open_smart_playlist_editor(
     let limit_check_for_ok = limit_check.clone();
     let limit_count_for_ok = limit_count.clone();
     let limit_selection_for_ok = limit_selection_combo.clone();
-    let on_created_for_ok = on_created.clone();
+    let on_saved_for_ok = on_saved.clone();
     let error_label_for_ok = error_label.clone();
-    let default_name_for_ok = default_name.clone();
     ok_button.connect_clicked(move |_| {
         let extraction = extract_rule_set(
             &rule_rows_for_ok.borrow(),
@@ -843,15 +1047,27 @@ pub(crate) fn open_smart_playlist_editor(
         );
         match extraction {
             Ok(rule_set) => {
-                let dispatched = command_controller_for_ok.dispatch_succeeded(
-                    ApplicationCommand::CreateSmartPlaylist {
-                        name: default_name_for_ok.clone(),
-                        parent_folder_id: None,
+                let command = match &mode {
+                    SmartPlaylistEditorMode::Create { name } => {
+                        ApplicationCommand::CreateSmartPlaylist {
+                            name: name.clone(),
+                            parent_folder_id: None,
+                            rules: rule_set,
+                        }
+                    }
+                    SmartPlaylistEditorMode::Edit {
+                        smart_playlist_id,
+                        name,
+                        ..
+                    } => ApplicationCommand::UpdateSmartPlaylist {
+                        smart_playlist_id: *smart_playlist_id,
+                        name: name.clone(),
                         rules: rule_set,
                     },
-                );
+                };
+                let dispatched = command_controller_for_ok.dispatch_succeeded(command);
                 if dispatched {
-                    on_created_for_ok();
+                    on_saved_for_ok();
                     window_for_ok.close();
                 }
             }
@@ -888,7 +1104,15 @@ pub(crate) fn open_smart_playlist_editor(
 }
 
 fn append_rule_row(rules_container: &gtk::Box, rule_rows: &Rc<RefCell<Vec<RuleRow>>>) {
-    let row = RuleRow::new();
+    append_rule_row_with(rules_container, rule_rows, None);
+}
+
+fn append_rule_row_with(
+    rules_container: &gtk::Box,
+    rule_rows: &Rc<RefCell<Vec<RuleRow>>>,
+    initial: Option<&SmartPlaylistRule>,
+) {
+    let row = RuleRow::from_initial(initial);
     let row_widget = row.container.clone();
     let row_buttons = rule_row_buttons();
     row_widget.append(&row_buttons.container);

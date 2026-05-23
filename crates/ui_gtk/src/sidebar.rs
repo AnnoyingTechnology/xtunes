@@ -25,6 +25,7 @@ pub(crate) type SidebarMoveCallback = Rc<dyn Fn(PlaylistItem, PlaylistItem, Drop
 pub(crate) type SidebarRenameCallback = Rc<dyn Fn(PlaylistItem, String)>;
 pub(crate) type SidebarDeleteCallback = Rc<dyn Fn(PlaylistItem)>;
 pub(crate) type SidebarTracksDropCallback = Rc<dyn Fn(PlaylistItem, Vec<TrackId>)>;
+pub(crate) type SidebarEditSmartPlaylistCallback = Rc<dyn Fn(SmartPlaylistId)>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SidebarSelection {
@@ -165,6 +166,7 @@ type MoveCallbackHolder = Rc<RefCell<Option<SidebarMoveCallback>>>;
 type RenameCallbackHolder = Rc<RefCell<Option<SidebarRenameCallback>>>;
 type DeleteCallbackHolder = Rc<RefCell<Option<SidebarDeleteCallback>>>;
 type TracksDropCallbackHolder = Rc<RefCell<Option<SidebarTracksDropCallback>>>;
+type EditSmartPlaylistCallbackHolder = Rc<RefCell<Option<SidebarEditSmartPlaylistCallback>>>;
 
 /// Tracks which sidebar row currently displays a drop indicator. Only one row
 /// may show an indicator at a time; switching rows clears the previous one.
@@ -184,6 +186,7 @@ pub(crate) struct PlaylistSidebar {
     on_rename: RenameCallbackHolder,
     on_delete: DeleteCallbackHolder,
     on_tracks_drop: TracksDropCallbackHolder,
+    on_edit_smart_playlist: EditSmartPlaylistCallbackHolder,
     pending_rename: Rc<RefCell<Option<PlaylistItem>>>,
 }
 
@@ -218,6 +221,8 @@ impl PlaylistSidebar {
         let on_rename: RenameCallbackHolder = Rc::new(RefCell::new(None));
         let on_delete: DeleteCallbackHolder = Rc::new(RefCell::new(None));
         let on_tracks_drop: TracksDropCallbackHolder = Rc::new(RefCell::new(None));
+        let on_edit_smart_playlist: EditSmartPlaylistCallbackHolder =
+            Rc::new(RefCell::new(None));
         let pending_rename: Rc<RefCell<Option<PlaylistItem>>> = Rc::new(RefCell::new(None));
         let list_view = gtk::ListView::new(
             Some(selection.clone()),
@@ -226,6 +231,7 @@ impl PlaylistSidebar {
                 on_rename.clone(),
                 on_delete.clone(),
                 on_tracks_drop.clone(),
+                on_edit_smart_playlist.clone(),
                 pending_rename.clone(),
             )),
         );
@@ -274,6 +280,7 @@ impl PlaylistSidebar {
             on_rename,
             on_delete,
             on_tracks_drop,
+            on_edit_smart_playlist,
             pending_rename,
         }
     }
@@ -302,6 +309,13 @@ impl PlaylistSidebar {
 
     pub(crate) fn set_tracks_drop_callback(&self, callback: SidebarTracksDropCallback) {
         self.on_tracks_drop.replace(Some(callback));
+    }
+
+    pub(crate) fn set_edit_smart_playlist_callback(
+        &self,
+        callback: SidebarEditSmartPlaylistCallback,
+    ) {
+        self.on_edit_smart_playlist.replace(Some(callback));
     }
 
     /// Arm an inline rename for `item` on the next bind that matches it.
@@ -489,6 +503,7 @@ fn build_row_factory(
     on_rename: RenameCallbackHolder,
     on_delete: DeleteCallbackHolder,
     on_tracks_drop: TracksDropCallbackHolder,
+    on_edit_smart_playlist: EditSmartPlaylistCallbackHolder,
     pending_rename: Rc<RefCell<Option<PlaylistItem>>>,
 ) -> gtk::SignalListItemFactory {
     let current_indicator: SharedDropIndicator = Rc::new(RefCell::new(None));
@@ -620,6 +635,7 @@ fn build_row_factory(
             label.clone(),
             entry.clone(),
             on_delete.clone(),
+            on_edit_smart_playlist.clone(),
         );
         attach_rename_entry_signals(
             &entry,
@@ -648,6 +664,7 @@ fn build_row_factory(
     factory
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attach_row_context_menu(
     row: &gtk::Widget,
     item: PlaylistItem,
@@ -656,6 +673,7 @@ fn attach_row_context_menu(
     label: gtk::Label,
     entry: gtk::Entry,
     on_delete: DeleteCallbackHolder,
+    on_edit_smart_playlist: EditSmartPlaylistCallbackHolder,
 ) {
     remove_secondary_gestures(row);
 
@@ -672,6 +690,7 @@ fn attach_row_context_menu(
             label.clone(),
             entry.clone(),
             on_delete.clone(),
+            on_edit_smart_playlist.clone(),
             x,
             y,
         );
@@ -710,15 +729,30 @@ fn popup_row_context_menu(
     label: gtk::Label,
     entry: gtk::Entry,
     on_delete: DeleteCallbackHolder,
+    on_edit_smart_playlist: EditSmartPlaylistCallbackHolder,
     x: f64,
     y: f64,
 ) {
     let popover = gtk::Popover::new();
     popover.set_has_arrow(false);
+    popover.add_css_class("compact-context-menu");
     popover.set_parent(anchor);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.add_css_class("sidebar-context-menu");
+
+    if let PlaylistItem::SmartPlaylist(smart_playlist_id) = item {
+        let edit_button = row_action_button("Edit\u{2026}");
+        let popover_for_edit = popover.clone();
+        let on_edit = on_edit_smart_playlist.clone();
+        edit_button.connect_clicked(move |_| {
+            popover_for_edit.popdown();
+            if let Some(callback) = on_edit.borrow().as_ref() {
+                callback(smart_playlist_id);
+            }
+        });
+        content.append(&edit_button);
+    }
 
     let rename_button = row_action_button("Rename");
     let popover_for_rename = popover.clone();
@@ -732,7 +766,6 @@ fn popup_row_context_menu(
     content.append(&rename_button);
 
     let delete_button = row_action_button(delete_label_for(item));
-    delete_button.add_css_class("destructive-action");
     let popover_for_delete = popover.clone();
     let anchor_for_delete = anchor.clone();
     delete_button.connect_clicked(move |_| {

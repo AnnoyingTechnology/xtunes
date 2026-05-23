@@ -3,13 +3,19 @@
 
 #![forbid(unsafe_code)]
 
-use std::{cell::RefCell, time::Duration};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
+use gst::glib;
 use gst::prelude::*;
 use gstreamer as gst;
 pub use xtunes_domain::{PlaybackCommand, PlaybackState, TrackPlaybackSource, VolumePercent};
 
 pub type PlaybackResult<T> = Result<T, PlaybackError>;
+
+/// Invoked when the currently playing track finishes naturally (end-of-stream).
+/// Not invoked for manual stops, pauses, seeks, or `play_track` replacements —
+/// only when the audio runs to its end.
+pub type TrackEndedCallback = Box<dyn Fn()>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlaybackError {
@@ -28,12 +34,14 @@ pub trait PlaybackService {
     fn set_volume(&self, volume: VolumePercent) -> PlaybackResult<()>;
     fn volume(&self) -> VolumePercent;
     fn state(&self) -> PlaybackState;
+    fn set_on_track_ended(&self, callback: TrackEndedCallback);
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct NullPlaybackService {
     state: RefCell<PlaybackState>,
     volume: RefCell<VolumePercent>,
+    on_track_ended: RefCell<Option<TrackEndedCallback>>,
 }
 
 impl NullPlaybackService {
@@ -102,13 +110,20 @@ impl PlaybackService for NullPlaybackService {
     fn state(&self) -> PlaybackState {
         self.state.borrow().clone()
     }
+
+    fn set_on_track_ended(&self, callback: TrackEndedCallback) {
+        self.on_track_ended.replace(Some(callback));
+    }
 }
 
-#[derive(Debug)]
 pub struct GStreamerPlaybackService {
     playbin: gst::Element,
     state: RefCell<PlaybackState>,
     volume: RefCell<VolumePercent>,
+    on_track_ended: Rc<RefCell<Option<TrackEndedCallback>>>,
+    // Bus watch is removed when the guard drops; keep it alive for the
+    // lifetime of the service so EOS messages keep reaching us.
+    _bus_watch: gst::bus::BusWatchGuard,
 }
 
 impl GStreamerPlaybackService {
@@ -118,10 +133,30 @@ impl GStreamerPlaybackService {
             .build()
             .map_err(|_| PlaybackError::BackendUnavailable)?;
 
+        let on_track_ended: Rc<RefCell<Option<TrackEndedCallback>>> =
+            Rc::new(RefCell::new(None));
+
+        let bus = playbin
+            .bus()
+            .ok_or(PlaybackError::BackendUnavailable)?;
+        let on_eos = on_track_ended.clone();
+        let bus_watch = bus
+            .add_watch_local(move |_bus, message| {
+                if matches!(message.view(), gst::MessageView::Eos(_))
+                    && let Some(callback) = on_eos.borrow().as_ref()
+                {
+                    callback();
+                }
+                glib::ControlFlow::Continue
+            })
+            .map_err(|_| PlaybackError::BackendUnavailable)?;
+
         Ok(Self {
             playbin,
             state: RefCell::new(PlaybackState::Stopped),
             volume: RefCell::new(VolumePercent::default()),
+            on_track_ended,
+            _bus_watch: bus_watch,
         })
     }
 }
@@ -227,6 +262,10 @@ impl PlaybackService for GStreamerPlaybackService {
             },
             state => state,
         }
+    }
+
+    fn set_on_track_ended(&self, callback: TrackEndedCallback) {
+        self.on_track_ended.replace(Some(callback));
     }
 }
 
