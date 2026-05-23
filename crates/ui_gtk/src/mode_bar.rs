@@ -19,6 +19,12 @@ enum MainViewMode {
 }
 
 pub(crate) type ViewModeChangedCallback = Rc<dyn Fn()>;
+pub(crate) type ShowAlbumsViewCallback = Rc<dyn Fn()>;
+
+pub(crate) struct ModeBar {
+    pub(crate) widget: gtk::CenterBox,
+    pub(crate) show_albums: ShowAlbumsViewCallback,
+}
 
 pub(crate) fn build_mode_bar(
     window: &gtk::ApplicationWindow,
@@ -27,7 +33,7 @@ pub(crate) fn build_mode_bar(
     command_controller: SharedCommandController,
     scan_requested: LibraryScanRequestedCallback,
     on_view_mode_changed: ViewModeChangedCallback,
-) -> gtk::CenterBox {
+) -> ModeBar {
     let mode_bar = gtk::CenterBox::new();
     mode_bar.add_css_class("mode-bar");
     mode_bar.set_height_request(MODE_BAR_HEIGHT);
@@ -74,7 +80,16 @@ pub(crate) fn build_mode_bar(
 
     let settings = settings_button(window, command_controller, scan_requested);
     mode_bar.set_end_widget(Some(&settings));
-    mode_bar
+
+    let albums_for_callback = albums.clone();
+    let show_albums: ShowAlbumsViewCallback = Rc::new(move || {
+        albums_for_callback.set_active(true);
+    });
+
+    ModeBar {
+        widget: mode_bar,
+        show_albums,
+    }
 }
 
 fn connect_mode_button(

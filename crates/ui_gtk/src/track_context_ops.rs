@@ -8,7 +8,10 @@ use gtk::prelude::*;
 use gtk::{FileLauncher, gdk, gio};
 use xtunes_app_runtime::TrackId;
 
-use super::{SharedRuntime, track_context::TrackActionCallback};
+use super::{
+    SharedRuntime, ShowAlbumHolder,
+    track_context::{TrackActionCallback, TrackActionVisibility},
+};
 
 pub(crate) fn copy_files_callback(
     runtime: &SharedRuntime,
@@ -22,6 +25,36 @@ pub(crate) fn copy_files_callback(
             return;
         }
         copy_paths_to_clipboard(&window, &paths);
+    })
+}
+
+pub(crate) fn show_album_callback(holder: &ShowAlbumHolder) -> TrackActionCallback {
+    let holder = holder.clone();
+    Rc::new(move |track_ids: Vec<TrackId>| {
+        let Some(&track_id) = track_ids.first() else {
+            return;
+        };
+        let action = holder.borrow().clone();
+        if let Some(action) = action {
+            action(track_id);
+        }
+    })
+}
+
+pub(crate) fn track_has_album_visibility(runtime: &SharedRuntime) -> TrackActionVisibility {
+    let runtime = runtime.clone();
+    Rc::new(move |track_ids: &[TrackId]| {
+        let Some(&track_id) = track_ids.first() else {
+            return false;
+        };
+        let runtime_borrow = runtime.borrow();
+        runtime_borrow
+            .library_tracks()
+            .iter()
+            .find(|track| track.id == track_id)
+            .and_then(|track| track.metadata.album.as_deref())
+            .map(|album| !album.trim().is_empty())
+            .unwrap_or(false)
     })
 }
 

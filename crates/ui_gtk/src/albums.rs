@@ -35,6 +35,7 @@ pub(crate) struct AlbumsView {
     context_menu: TrackRowContextMenu,
     albums: Rc<RefCell<Vec<AlbumViewModel>>>,
     selected_album: Rc<Cell<Option<usize>>>,
+    selected_tile: Rc<RefCell<Option<gtk::Button>>>,
     visible_columns: Rc<Cell<usize>>,
     last_width: Rc<Cell<i32>>,
     artwork_cache: Rc<RefCell<BTreeMap<PathBuf, CachedArtwork>>>,
@@ -106,6 +107,7 @@ impl AlbumsView {
             context_menu,
             albums: Rc::new(RefCell::new(Vec::new())),
             selected_album: Rc::new(Cell::new(None)),
+            selected_tile: Rc::new(RefCell::new(None)),
             visible_columns: Rc::new(Cell::new(1)),
             last_width: Rc::new(Cell::new(0)),
             artwork_cache: Rc::new(RefCell::new(BTreeMap::new())),
@@ -128,6 +130,32 @@ impl AlbumsView {
         self.rebuild(false);
     }
 
+    /// Selects the album containing the given track, expands its detail panel,
+    /// and brings the tile into view. Returns `false` when no album in the
+    /// current grouping holds the track.
+    pub(crate) fn reveal_album_for_track(&self, track_id: TrackId) -> bool {
+        let album_index = {
+            let albums = self.albums.borrow();
+            albums
+                .iter()
+                .position(|album| album.tracks.iter().any(|track| track.id == track_id))
+        };
+        let Some(album_index) = album_index else {
+            return false;
+        };
+        self.selected_album.set(Some(album_index));
+        self.rebuild(true);
+        // GTK assigns layout/allocation on the next frame, so defer the focus
+        // grab. GtkScrolledWindow auto-scrolls to keep the focused descendant
+        // visible.
+        if let Some(tile) = self.selected_tile.borrow().clone() {
+            glib::idle_add_local_once(move || {
+                tile.grab_focus();
+            });
+        }
+        true
+    }
+
     fn install_width_watcher(&self) {
         let view = self.clone();
         self.scroller.add_tick_callback(move |scroller, _clock| {
@@ -144,6 +172,7 @@ impl AlbumsView {
     }
 
     fn rebuild(&self, animate_detail: bool) {
+        self.selected_tile.replace(None);
         clear_container(&self.container);
 
         let albums = self.albums.borrow().clone();
@@ -246,6 +275,7 @@ impl AlbumsView {
         button.add_css_class("album-tile");
         if is_selected {
             button.add_css_class("album-tile-selected");
+            self.selected_tile.replace(Some(button.clone()));
         }
         button.set_child(Some(&content));
         button.set_halign(gtk::Align::Fill);

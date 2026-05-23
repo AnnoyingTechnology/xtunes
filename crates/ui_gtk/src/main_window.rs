@@ -17,7 +17,7 @@ use xtunes_app_runtime::{
 
 use super::{
     APP_ID, ApplicationCommand, ApplicationRuntime, LibraryChangedCallback, LibraryChangedHolder,
-    PLAYLISTS_VIEW, PlaybackChangedCallback, SharedRuntime,
+    PLAYLISTS_VIEW, PlaybackChangedCallback, SharedRuntime, ShowAlbumAction, ShowAlbumHolder,
     accent::install_accent_css,
     albums::AlbumsView,
     app_css::install_app_css,
@@ -42,7 +42,10 @@ use super::{
         AddToPlaylistCallback, AddToPlaylistEntry, AddToPlaylistProvider, TrackActionCallback,
         TrackActionVisibility, TrackContextAction, TrackContextActionSet, TrackRowContextMenu,
     },
-    track_context_ops::{copy_files_callback, show_in_folder_callback},
+    track_context_ops::{
+        copy_files_callback, show_album_callback, show_in_folder_callback,
+        track_has_album_visibility,
+    },
     track_table::{
         RatingChangedCallback, TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table,
     },
@@ -109,9 +112,11 @@ pub(crate) fn build_main_window(
     let track_activated = track_activated_callback(&command_controller, playback_changed.clone());
     let library_changed_holder: LibraryChangedHolder = Rc::new(RefCell::new(None));
     let parent_window = window.clone().upcast::<gtk::Window>();
+    let show_album_holder: ShowAlbumHolder = Rc::new(RefCell::new(None));
     let context_actions = track_context_actions(
         &runtime,
         &parent_window,
+        &show_album_holder,
         &command_controller,
         playback_changed.clone(),
         library_changed_holder.clone(),
@@ -127,6 +132,7 @@ pub(crate) fn build_main_window(
     let playlist_context_actions = playlist_track_context_actions(
         &runtime,
         &parent_window,
+        &show_album_holder,
         &command_controller,
         playback_changed.clone(),
         library_changed_holder.clone(),
@@ -220,14 +226,22 @@ pub(crate) fn build_main_window(
     let main_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     main_content.set_hexpand(true);
     main_content.set_vexpand(true);
-    main_content.append(&build_mode_bar(
+    let mode_bar = build_mode_bar(
         &window,
         &sidebar_widget,
         &content_stack,
         command_controller,
         scan_requested,
         visible_summary_refresh,
-    ));
+    );
+    let albums_view_for_reveal = albums_view.clone();
+    let show_albums_view = mode_bar.show_albums.clone();
+    let show_album_action: ShowAlbumAction = Rc::new(move |track_id| {
+        show_albums_view();
+        albums_view_for_reveal.reveal_album_for_track(track_id);
+    });
+    show_album_holder.replace(Some(show_album_action));
+    main_content.append(&mode_bar.widget);
     main_content.append(&content_stack);
 
     let content_area = build_content_area(&sidebar_widget, &main_content);
@@ -830,6 +844,7 @@ fn rating_changed_callback(
 fn track_context_actions(
     runtime: &SharedRuntime,
     window: &gtk::Window,
+    show_album_holder: &ShowAlbumHolder,
     command_controller: &SharedCommandController,
     playback_changed: PlaybackChangedCallback,
     library_changed_holder: LibraryChangedHolder,
@@ -837,6 +852,10 @@ fn track_context_actions(
     TrackContextActionSet::new(vec![
         TrackContextAction::copy_files(copy_files_callback(runtime, window)),
         TrackContextAction::show_in_folder(show_in_folder_callback(runtime, window)),
+        TrackContextAction::show_album(
+            show_album_callback(show_album_holder),
+            track_has_album_visibility(runtime),
+        ),
         TrackContextAction::remove_from_library(track_mutation_callback(
             command_controller,
             playback_changed.clone(),
@@ -855,6 +874,7 @@ fn track_context_actions(
 fn playlist_track_context_actions(
     runtime: &SharedRuntime,
     window: &gtk::Window,
+    show_album_holder: &ShowAlbumHolder,
     command_controller: &SharedCommandController,
     playback_changed: PlaybackChangedCallback,
     library_changed_holder: LibraryChangedHolder,
@@ -863,6 +883,10 @@ fn playlist_track_context_actions(
     TrackContextActionSet::new(vec![
         TrackContextAction::copy_files(copy_files_callback(runtime, window)),
         TrackContextAction::show_in_folder(show_in_folder_callback(runtime, window)),
+        TrackContextAction::show_album(
+            show_album_callback(show_album_holder),
+            track_has_album_visibility(runtime),
+        ),
         TrackContextAction::remove_from_playlist(
             remove_from_playlist_callback(
                 command_controller,
@@ -912,7 +936,7 @@ fn remove_from_playlist_callback(
 
 fn current_selection_is_regular_playlist(sidebar: &PlaylistSidebar) -> TrackActionVisibility {
     let sidebar = sidebar.clone();
-    Rc::new(move || {
+    Rc::new(move |_track_ids| {
         matches!(
             sidebar.current_selection(),
             Some(SidebarSelection::Item(PlaylistItem::Playlist(_)))

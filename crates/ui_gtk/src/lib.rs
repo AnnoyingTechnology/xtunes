@@ -70,6 +70,8 @@ pub(crate) type SharedRuntime = Rc<RefCell<ApplicationRuntime>>;
 pub(crate) type LibraryChangedCallback = Rc<dyn Fn()>;
 pub(crate) type LibraryChangedHolder = Rc<RefCell<Option<LibraryChangedCallback>>>;
 pub(crate) type PlaybackChangedCallback = Rc<dyn Fn()>;
+pub(crate) type ShowAlbumAction = Rc<dyn Fn(xtunes_app_runtime::TrackId)>;
+pub(crate) type ShowAlbumHolder = Rc<RefCell<Option<ShowAlbumAction>>>;
 
 pub fn run(runtime: ApplicationRuntime) {
     let app = gtk::Application::builder().application_id(APP_ID).build();

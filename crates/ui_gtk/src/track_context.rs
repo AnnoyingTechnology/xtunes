@@ -9,7 +9,7 @@ use gtk::{gdk, glib};
 use xtunes_app_runtime::{PlaylistId, TrackId};
 
 pub(crate) type TrackActionCallback = Rc<dyn Fn(Vec<TrackId>)>;
-pub(crate) type TrackActionVisibility = Rc<dyn Fn() -> bool>;
+pub(crate) type TrackActionVisibility = Rc<dyn Fn(&[TrackId]) -> bool>;
 pub(crate) type AddToPlaylistProvider = Rc<dyn Fn() -> Vec<AddToPlaylistEntry>>;
 pub(crate) type AddToPlaylistCallback = Rc<dyn Fn(PlaylistId, Vec<TrackId>)>;
 type PendingConfirmCallback = Rc<RefCell<Option<Box<dyn FnOnce(Vec<TrackId>)>>>>;
@@ -30,6 +30,7 @@ struct AddToPlaylistAction {
 pub(crate) enum TrackContextActionId {
     CopyFiles,
     ShowInFolder,
+    ShowAlbum,
     RemoveFromLibrary,
     MoveToTrash,
     RemoveFromPlaylist,
@@ -40,6 +41,7 @@ impl TrackContextActionId {
         match self {
             Self::CopyFiles => "track-context-copy-files",
             Self::ShowInFolder => "track-context-show-in-folder",
+            Self::ShowAlbum => "track-context-show-album",
             Self::RemoveFromLibrary => "track-context-remove-from-library",
             Self::MoveToTrash => "track-context-move-to-trash",
             Self::RemoveFromPlaylist => "track-context-remove-from-playlist",
@@ -121,6 +123,21 @@ impl TrackContextAction {
         }
     }
 
+    pub(crate) fn show_album(
+        callback: TrackActionCallback,
+        visibility: TrackActionVisibility,
+    ) -> Self {
+        Self {
+            id: TrackContextActionId::ShowAlbum,
+            label: "Show Album",
+            section: TrackContextActionSection::Safe,
+            selection: TrackSelectionRequirement::Single,
+            confirmation: TrackActionConfirmation::None,
+            visibility: Some(visibility),
+            callback,
+        }
+    }
+
     pub(crate) fn remove_from_library(callback: TrackActionCallback) -> Self {
         Self {
             id: TrackContextActionId::RemoveFromLibrary,
@@ -160,12 +177,12 @@ impl TrackContextAction {
         }
     }
 
-    fn is_available(&self, selected_count: usize) -> bool {
-        if !self.selection.accepts(selected_count) {
+    fn is_available(&self, track_ids: &[TrackId]) -> bool {
+        if !self.selection.accepts(track_ids.len()) {
             return false;
         }
         if let Some(predicate) = &self.visibility
-            && !predicate()
+            && !predicate(track_ids)
         {
             return false;
         }
@@ -188,13 +205,13 @@ impl TrackContextActionSet {
         Self { actions }
     }
 
-    fn available_actions(
-        &self,
-        selected_count: usize,
-    ) -> impl Iterator<Item = &TrackContextAction> {
+    fn available_actions<'a>(
+        &'a self,
+        track_ids: &'a [TrackId],
+    ) -> impl Iterator<Item = &'a TrackContextAction> {
         self.actions
             .iter()
-            .filter(move |action| action.is_available(selected_count))
+            .filter(move |action| action.is_available(track_ids))
     }
 }
 
@@ -322,7 +339,7 @@ impl TrackRowContextMenu {
         }
 
         let available: Vec<&TrackContextAction> =
-            self.actions.available_actions(track_ids.len()).collect();
+            self.actions.available_actions(&track_ids).collect();
         let (safe, destructive): (Vec<&TrackContextAction>, Vec<&TrackContextAction>) = available
             .into_iter()
             .partition(|action| action.section == TrackContextActionSection::Safe);
@@ -590,9 +607,11 @@ fn trash_confirmation_detail(count: usize) -> String {
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
+    use xtunes_app_runtime::TrackId;
+
     use super::{
-        TrackActionCallback, TrackContextAction, TrackContextActionId, TrackContextActionSection,
-        TrackSelectionRequirement, trash_confirmation_detail,
+        TrackActionCallback, TrackActionVisibility, TrackContextAction, TrackContextActionId,
+        TrackContextActionSection, TrackSelectionRequirement, trash_confirmation_detail,
     };
 
     #[test]
@@ -610,9 +629,11 @@ mod tests {
     #[test]
     fn declared_actions_have_stable_identity_and_labels() {
         let callback = no_op_callback();
+        let visibility = always_visible();
         let actions = [
             TrackContextAction::copy_files(callback.clone()),
             TrackContextAction::show_in_folder(callback.clone()),
+            TrackContextAction::show_album(callback.clone(), visibility),
             TrackContextAction::remove_from_library(callback.clone()),
             TrackContextAction::move_to_trash(callback),
         ];
@@ -621,21 +642,28 @@ mod tests {
         assert_eq!(actions[0].label, "Copy");
         assert_eq!(actions[1].id, TrackContextActionId::ShowInFolder);
         assert_eq!(actions[1].label, "Show in Folder");
-        assert_eq!(actions[2].id, TrackContextActionId::RemoveFromLibrary);
-        assert_eq!(actions[2].label, "Remove from Library");
-        assert_eq!(actions[3].id, TrackContextActionId::MoveToTrash);
-        assert_eq!(actions[3].label, "Move to Trash");
+        assert_eq!(actions[2].id, TrackContextActionId::ShowAlbum);
+        assert_eq!(actions[2].label, "Show Album");
+        assert_eq!(actions[3].id, TrackContextActionId::RemoveFromLibrary);
+        assert_eq!(actions[3].label, "Remove from Library");
+        assert_eq!(actions[4].id, TrackContextActionId::MoveToTrash);
+        assert_eq!(actions[4].label, "Move to Trash");
     }
 
     #[test]
     fn safe_actions_render_above_destructive_ones() {
         let callback = no_op_callback();
+        let visibility = always_visible();
         assert_eq!(
             TrackContextAction::copy_files(callback.clone()).section,
             TrackContextActionSection::Safe,
         );
         assert_eq!(
             TrackContextAction::show_in_folder(callback.clone()).section,
+            TrackContextActionSection::Safe,
+        );
+        assert_eq!(
+            TrackContextAction::show_album(callback.clone(), visibility).section,
             TrackContextActionSection::Safe,
         );
         assert_eq!(
@@ -646,6 +674,29 @@ mod tests {
             TrackContextAction::move_to_trash(callback).section,
             TrackContextActionSection::Destructive,
         );
+    }
+
+    #[test]
+    fn show_album_is_hidden_when_visibility_predicate_returns_false() {
+        let callback = no_op_callback();
+        let track_id = TrackId::new(1).expect("positive track id");
+
+        let visible = TrackContextAction::show_album(callback.clone(), always_visible());
+        assert!(visible.is_available(&[track_id]));
+
+        let hidden = TrackContextAction::show_album(callback, never_visible());
+        assert!(!hidden.is_available(&[track_id]));
+    }
+
+    #[test]
+    fn show_album_requires_single_selection() {
+        let action = TrackContextAction::show_album(no_op_callback(), always_visible());
+        let one = TrackId::new(1).expect("positive track id");
+        let two = TrackId::new(2).expect("positive track id");
+
+        assert!(!action.is_available(&[]));
+        assert!(action.is_available(&[one]));
+        assert!(!action.is_available(&[one, two]));
     }
 
     #[test]
@@ -663,5 +714,13 @@ mod tests {
                 *calls.borrow_mut() += 1;
             }
         })
+    }
+
+    fn always_visible() -> TrackActionVisibility {
+        Rc::new(|_track_ids| true)
+    }
+
+    fn never_visible() -> TrackActionVisibility {
+        Rc::new(|_track_ids| false)
     }
 }
