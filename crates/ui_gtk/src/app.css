@@ -333,7 +333,7 @@ button.album-detail-icon-button:focus {
 }
 
 .playlist-sidebar-library {
-    padding: 6px 10px;
+    padding: 4px 8px;
     border-radius: 4px;
 }
 
@@ -347,8 +347,40 @@ button.album-detail-icon-button:focus {
 }
 
 .playlist-sidebar-row {
-    padding: 6px 10px;
+    padding: 4px 8px;
     border-radius: 4px;
+}
+
+/* Adwaita gives every `listview > row` ~8px vertical padding and a 32px
+   minimum height, which pads our sidebar rows well past anything we set on
+   the inner Box. Strip both so the row's geometry is driven purely by
+   .playlist-sidebar-row and the icon/label inside. */
+.playlist-sidebar-list,
+.playlist-sidebar-list > row {
+    padding: 0;
+    min-height: 0;
+}
+
+/* The rename Entry inherits Adwaita's standard ~32px entry chrome. Even
+   with the Stack set to non-homogeneous, the entry briefly expands the
+   row while the user is renaming; shrink it so the row barely shifts. */
+.playlist-sidebar-rename-entry,
+.playlist-sidebar-rename-entry > text {
+    min-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+/* Above/below drop indicators are a 2px horizontal bar drawn via an inset
+   box-shadow; the row's own border-radius would clip the bar's ends into
+   curves, producing the "rounded extremities" look the user saw. Squaring
+   the row only while an above/below indicator is active keeps the bar a
+   clean rectangle without affecting the resting visual. The "into"
+   indicator deliberately keeps the rounded corners — the box-shadow border
+   follows them, giving a tidy outlined drop target. */
+.playlist-sidebar-row.sidebar-drop-above,
+.playlist-sidebar-row.sidebar-drop-below {
+    border-radius: 0;
 }
 
 button.track-context-menu-item,
@@ -357,6 +389,12 @@ button.sidebar-context-menu-item {
     min-width: 160px;
     padding-left: 8px;
     padding-right: 8px;
+}
+
+.track-context-menu-separator {
+    margin-top: 4px;
+    margin-bottom: 4px;
+    opacity: 0.5;
 }
 
 .track-table header {

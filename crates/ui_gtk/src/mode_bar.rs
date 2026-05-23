@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
+use std::rc::Rc;
+
 use gtk::prelude::*;
 
 use super::{
@@ -16,12 +18,15 @@ enum MainViewMode {
     Playlists,
 }
 
+pub(crate) type ViewModeChangedCallback = Rc<dyn Fn()>;
+
 pub(crate) fn build_mode_bar(
     window: &gtk::ApplicationWindow,
     sidebar: &gtk::Box,
     content_stack: &gtk::Stack,
     command_controller: SharedCommandController,
     scan_requested: LibraryScanRequestedCallback,
+    on_view_mode_changed: ViewModeChangedCallback,
 ) -> gtk::CenterBox {
     let mode_bar = gtk::CenterBox::new();
     mode_bar.add_css_class("mode-bar");
@@ -38,9 +43,27 @@ pub(crate) fn build_mode_bar(
     playlists.set_group(Some(&songs));
     songs.set_active(true);
 
-    connect_mode_button(&songs, MainViewMode::Songs, sidebar, content_stack);
-    connect_mode_button(&albums, MainViewMode::Albums, sidebar, content_stack);
-    connect_mode_button(&playlists, MainViewMode::Playlists, sidebar, content_stack);
+    connect_mode_button(
+        &songs,
+        MainViewMode::Songs,
+        sidebar,
+        content_stack,
+        on_view_mode_changed.clone(),
+    );
+    connect_mode_button(
+        &albums,
+        MainViewMode::Albums,
+        sidebar,
+        content_stack,
+        on_view_mode_changed.clone(),
+    );
+    connect_mode_button(
+        &playlists,
+        MainViewMode::Playlists,
+        sidebar,
+        content_stack,
+        on_view_mode_changed,
+    );
 
     let mode_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     mode_buttons.set_valign(gtk::Align::Center);
@@ -59,12 +82,14 @@ fn connect_mode_button(
     mode: MainViewMode,
     sidebar: &gtk::Box,
     content_stack: &gtk::Stack,
+    on_view_mode_changed: ViewModeChangedCallback,
 ) {
     let sidebar = sidebar.clone();
     let content_stack = content_stack.clone();
     button.connect_toggled(move |button| {
         if button.is_active() {
             apply_view_mode(mode, &sidebar, &content_stack);
+            on_view_mode_changed();
         }
     });
 }

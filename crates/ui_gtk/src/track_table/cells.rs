@@ -7,7 +7,7 @@ use std::{
 };
 
 use gtk::prelude::*;
-use gtk::{gdk, glib};
+use gtk::{gdk, glib, graphene};
 use xtunes_app_runtime::{Rating, TrackId};
 
 use super::{RatingChangedCallback, columns::TrackTableColumn, row::TrackTableRow};
@@ -375,7 +375,8 @@ fn install_cell_drag_source(
 
     let list_item = list_item.clone();
     let selection = selection.clone();
-    drag_source.connect_prepare(move |_source, _x, _y| {
+    let cell_for_prepare = cell.clone();
+    drag_source.connect_prepare(move |source, _x, _y| {
         let position = list_item.position();
         let row_track_id = row_track_id(list_item.item())?;
 
@@ -394,11 +395,157 @@ fn install_cell_drag_source(
         if track_ids.is_empty() {
             return None;
         }
+
+        if let Some(paintable) = build_drag_paintable(&cell_for_prepare, position, &selection) {
+            source.set_icon(Some(&paintable), 0, 0);
+        }
+
         Some(gdk::ContentProvider::for_value(
             &tracks_drag_payload(&track_ids).to_value(),
         ))
     });
     cell.add_controller(drag_source);
+}
+
+/// Build the drag image. Single-track drags use a [`gtk::WidgetPaintable`] of
+/// the originating row so the row image follows the cursor. Multi-track drags
+/// composite the visible selected rows into a stacked snapshot via
+/// [`gtk::Snapshot::to_paintable`].
+///
+/// The multi-row composite leans on three implicit GTK4 invariants. If any of
+/// them ever stops holding, the originating row's plain [`gtk::WidgetPaintable`]
+/// is returned as a graceful fallback (the icon will still follow the cursor;
+/// it just won't show the stack).
+///
+/// 1. [`find_listview_row`] assumes the ColumnView's row container has the CSS
+///    node name `row`. Stable in GTK4 today but not a contract — if a future
+///    GTK reworks the listview hierarchy, `find_listview_row` would return
+///    `None` and we fall straight back to a missing-icon `None` here.
+/// 2. [`visible_selected_row_widgets`] assumes sibling order in the row
+///    container matches position order. True for `ListBase` virtualization in
+///    GTK4, but there is no public per-widget position API to verify it; if
+///    GTK ever recycles widgets out of order, we may stack the wrong rows.
+/// 3. The composite calls [`gdk::Paintable::snapshot`] on a
+///    [`gtk::WidgetPaintable`] wrapping a widget still parented inside the
+///    live listview. WidgetPaintable is designed for this, but if a future
+///    GTK refuses to paint widgets mid-virtualization, the composite returns
+///    `None` and we fall back to the single-row paintable below.
+fn build_drag_paintable(
+    cell: &gtk::Box,
+    originating_position: u32,
+    selection: &gtk::MultiSelection,
+) -> Option<gdk::Paintable> {
+    let origin_row = find_listview_row(cell)?;
+
+    if originating_position == gtk::INVALID_LIST_POSITION
+        || !selection.is_selected(originating_position)
+    {
+        return Some(gtk::WidgetPaintable::new(Some(&origin_row)).upcast());
+    }
+
+    let selected_rows = visible_selected_row_widgets(&origin_row, originating_position, selection);
+
+    if selected_rows.len() <= 1 {
+        return Some(gtk::WidgetPaintable::new(Some(&origin_row)).upcast());
+    }
+
+    compose_stacked_row_paintable(&selected_rows)
+        .or_else(|| Some(gtk::WidgetPaintable::new(Some(&origin_row)).upcast()))
+}
+
+/// Walk up the cell's parent chain to the ColumnView row container.
+///
+/// Risk: this depends on GTK4's convention that the row container has CSS
+/// node name `row`. If a future GTK renames or restructures the listview
+/// hierarchy this returns `None` and the drag falls back to no icon (cursor
+/// without preview). Caller is responsible for the fallback.
+fn find_listview_row(cell: &gtk::Box) -> Option<gtk::Widget> {
+    let mut current: Option<gtk::Widget> = cell.parent();
+    while let Some(widget) = current {
+        if widget.css_name() == "row" {
+            return Some(widget);
+        }
+        current = widget.parent();
+    }
+    None
+}
+
+/// Walk the row container's children in both directions from `origin`, gathering
+/// row widgets whose positions belong to the current selection. Sibling order
+/// matches position order in GTK4 `ListBase`, so we infer each sibling's position
+/// from its offset relative to the originating row instead of asking the
+/// widget — there's no public per-widget position API today.
+///
+/// Risk: if GTK ever recycles row widgets out of position order (e.g. as part
+/// of an aggressive virtualization rework), our computed positions would be
+/// wrong and we'd stack the wrong rows in the drag icon. The drag payload
+/// (which is built independently from the selection model) is unaffected.
+fn visible_selected_row_widgets(
+    origin: &gtk::Widget,
+    origin_position: u32,
+    selection: &gtk::MultiSelection,
+) -> Vec<gtk::Widget> {
+    let mut collected: Vec<(u32, gtk::Widget)> = vec![(origin_position, origin.clone())];
+
+    let mut position = origin_position;
+    let mut current = origin.next_sibling();
+    while let Some(sibling) = current {
+        position = position.saturating_add(1);
+        if selection.is_selected(position) {
+            collected.push((position, sibling.clone()));
+        }
+        current = sibling.next_sibling();
+    }
+
+    let mut position = origin_position;
+    let mut current = origin.prev_sibling();
+    while let Some(sibling) = current {
+        if position == 0 {
+            break;
+        }
+        position -= 1;
+        if selection.is_selected(position) {
+            collected.push((position, sibling.clone()));
+        }
+        current = sibling.prev_sibling();
+    }
+
+    collected.sort_by_key(|(p, _)| *p);
+    collected.into_iter().map(|(_, widget)| widget).collect()
+}
+
+/// Compose `rows` into a single vertically stacked paintable.
+///
+/// Risk: each row is painted via a [`gtk::WidgetPaintable`] that still
+/// references the live row widget inside the listview. WidgetPaintable is
+/// designed for exactly this use, but if a future GTK refuses to paint
+/// widgets mid-virtualization the call quietly produces a blank or `None`
+/// paintable. `build_drag_paintable` falls back to the originating row's
+/// single paintable in that case, so the drag still shows *something*.
+///
+/// Returns `None` if any dimension is zero (rows weren't laid out yet) so
+/// the caller can fall back instead of producing an invalid icon.
+fn compose_stacked_row_paintable(rows: &[gtk::Widget]) -> Option<gdk::Paintable> {
+    let widths: Vec<f32> = rows.iter().map(|row| row.width() as f32).collect();
+    let heights: Vec<f32> = rows.iter().map(|row| row.height() as f32).collect();
+    let total_width = widths.iter().copied().fold(0.0_f32, f32::max);
+    let total_height: f32 = heights.iter().sum();
+    if total_width <= 0.0 || total_height <= 0.0 {
+        return None;
+    }
+
+    let snapshot = gtk::Snapshot::new();
+    let mut y_offset = 0.0_f32;
+    for (row, height) in rows.iter().zip(heights.iter().copied()) {
+        let width = row.width() as f64;
+        let paintable = gtk::WidgetPaintable::new(Some(row));
+        snapshot.translate(&graphene::Point::new(0.0, y_offset));
+        paintable.snapshot(snapshot.upcast_ref::<gdk::Snapshot>(), width, height as f64);
+        snapshot.translate(&graphene::Point::new(0.0, -y_offset));
+        y_offset += height;
+    }
+
+    snapshot.to_paintable(Some(&graphene::Size::new(total_width, total_height)))
 }
 
 fn install_cell_context_menu(

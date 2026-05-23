@@ -240,7 +240,27 @@ impl TrackRowContextMenu {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.add_css_class("track-context-menu");
 
-        for action in self.actions.available_actions(track_ids.len()) {
+        let mut has_safe_section = false;
+        if self.add_to_playlist.is_some() {
+            let add_button = submenu_button("Add to Playlist\u{2026}");
+            let stack_for_add = stack.clone();
+            add_button.connect_clicked(move |_| {
+                stack_for_add.set_visible_child_name("playlists");
+            });
+            content.append(&add_button);
+            has_safe_section = true;
+        }
+
+        let dangerous: Vec<&TrackContextAction> =
+            self.actions.available_actions(track_ids.len()).collect();
+
+        if has_safe_section && !dangerous.is_empty() {
+            let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+            separator.add_css_class("track-context-menu-separator");
+            content.append(&separator);
+        }
+
+        for action in dangerous {
             let button = context_menu_button(action);
             let action = action.clone();
             let parent = self.parent_window.clone();
@@ -251,15 +271,6 @@ impl TrackRowContextMenu {
                 run_context_action(&action, &parent, track_ids.clone());
             });
             content.append(&button);
-        }
-
-        if self.add_to_playlist.is_some() {
-            let add_button = submenu_button("Add to Playlist\u{2026}");
-            let stack_for_add = stack.clone();
-            add_button.connect_clicked(move |_| {
-                stack_for_add.set_visible_child_name("playlists");
-            });
-            content.append(&add_button);
         }
 
         content
@@ -276,35 +287,16 @@ fn build_add_to_playlist_page(
     content.add_css_class("track-context-menu");
     content.add_css_class("track-context-submenu");
 
-    let header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    let back_button = gtk::Button::new();
-    back_button.add_css_class("flat");
-    back_button.add_css_class("track-context-submenu-back");
-    let back_image = gtk::Image::from_icon_name("go-previous-symbolic");
-    back_image.set_pixel_size(14);
-    back_button.set_child(Some(&back_image));
-    back_button.set_tooltip_text(Some("Back"));
+    let back_button = submenu_back_button("Back");
     let stack_for_back = stack.clone();
     back_button.connect_clicked(move |_| {
         stack_for_back.set_visible_child_name("main");
     });
-    header.append(&back_button);
-
-    let header_label = gtk::Label::new(Some("Add to Playlist"));
-    header_label.set_xalign(0.0);
-    header_label.set_halign(gtk::Align::Start);
-    header_label.set_hexpand(true);
-    header_label.add_css_class("track-context-submenu-title");
-    header_label.set_margin_start(4);
-    header.append(&header_label);
-    content.append(&header);
+    content.append(&back_button);
 
     let entries = (action.provider)();
     if entries.is_empty() {
-        let empty_label = gtk::Label::new(Some(
-            "No playlists yet — create one from the sidebar's right-click menu.",
-        ));
-        empty_label.set_wrap(true);
+        let empty_label = gtk::Label::new(Some("No playlists."));
         empty_label.set_xalign(0.0);
         empty_label.add_css_class("dim-label");
         empty_label.set_margin_top(6);
@@ -348,6 +340,31 @@ fn submenu_button(label_text: &str) -> gtk::Button {
     button.add_css_class("flat");
     button.add_css_class("track-context-menu-item");
     button.set_child(Some(&box_widget));
+    button.set_halign(gtk::Align::Fill);
+    button.set_hexpand(true);
+    button
+}
+
+fn submenu_back_button(label_text: &str) -> gtk::Button {
+    let caret = gtk::Image::from_icon_name("go-previous-symbolic");
+    caret.set_pixel_size(12);
+    caret.add_css_class("track-context-submenu-back-caret");
+
+    let label = gtk::Label::new(Some(label_text));
+    label.set_xalign(0.0);
+    label.set_halign(gtk::Align::Start);
+    label.set_hexpand(true);
+    label.set_margin_start(6);
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    row.append(&caret);
+    row.append(&label);
+
+    let button = gtk::Button::new();
+    button.add_css_class("flat");
+    button.add_css_class("track-context-menu-item");
+    button.add_css_class("track-context-submenu-back");
+    button.set_child(Some(&row));
     button.set_halign(gtk::Align::Fill);
     button.set_hexpand(true);
     button

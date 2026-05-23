@@ -166,6 +166,12 @@ type RenameCallbackHolder = Rc<RefCell<Option<SidebarRenameCallback>>>;
 type DeleteCallbackHolder = Rc<RefCell<Option<SidebarDeleteCallback>>>;
 type TracksDropCallbackHolder = Rc<RefCell<Option<SidebarTracksDropCallback>>>;
 
+/// Tracks which sidebar row currently displays a drop indicator. Only one row
+/// may show an indicator at a time; switching rows clears the previous one.
+/// Holds the outer TreeExpander (not the inner Box) so the indicator can
+/// span the full row width, including the disclosure arrow area.
+type SharedDropIndicator = Rc<RefCell<Option<gtk::Widget>>>;
+
 #[derive(Clone)]
 pub(crate) struct PlaylistSidebar {
     root: gtk::Box,
@@ -178,6 +184,7 @@ pub(crate) struct PlaylistSidebar {
     on_rename: RenameCallbackHolder,
     on_delete: DeleteCallbackHolder,
     on_tracks_drop: TracksDropCallbackHolder,
+    pending_rename: Rc<RefCell<Option<PlaylistItem>>>,
 }
 
 impl PlaylistSidebar {
@@ -211,6 +218,7 @@ impl PlaylistSidebar {
         let on_rename: RenameCallbackHolder = Rc::new(RefCell::new(None));
         let on_delete: DeleteCallbackHolder = Rc::new(RefCell::new(None));
         let on_tracks_drop: TracksDropCallbackHolder = Rc::new(RefCell::new(None));
+        let pending_rename: Rc<RefCell<Option<PlaylistItem>>> = Rc::new(RefCell::new(None));
         let list_view = gtk::ListView::new(
             Some(selection.clone()),
             Some(build_row_factory(
@@ -218,6 +226,7 @@ impl PlaylistSidebar {
                 on_rename.clone(),
                 on_delete.clone(),
                 on_tracks_drop.clone(),
+                pending_rename.clone(),
             )),
         );
         list_view.add_css_class("playlist-sidebar-list");
@@ -265,6 +274,7 @@ impl PlaylistSidebar {
             on_rename,
             on_delete,
             on_tracks_drop,
+            pending_rename,
         }
     }
 
@@ -292,6 +302,14 @@ impl PlaylistSidebar {
 
     pub(crate) fn set_tracks_drop_callback(&self, callback: SidebarTracksDropCallback) {
         self.on_tracks_drop.replace(Some(callback));
+    }
+
+    /// Arm an inline rename for `item` on the next bind that matches it.
+    /// Designed for the "create then immediately name" flow: callers set this
+    /// before calling [`refresh`], so the new row enters edit mode the moment
+    /// it is bound.
+    pub(crate) fn arm_pending_rename(&self, item: PlaylistItem) {
+        *self.pending_rename.borrow_mut() = Some(item);
     }
 
     pub(crate) fn current_selection(&self) -> Option<SidebarSelection> {
@@ -471,14 +489,18 @@ fn build_row_factory(
     on_rename: RenameCallbackHolder,
     on_delete: DeleteCallbackHolder,
     on_tracks_drop: TracksDropCallbackHolder,
+    pending_rename: Rc<RefCell<Option<PlaylistItem>>>,
 ) -> gtk::SignalListItemFactory {
+    let current_indicator: SharedDropIndicator = Rc::new(RefCell::new(None));
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_factory, list_item| {
         let Some(list_item) = list_item.downcast_ref::<gtk::ListItem>() else {
             return;
         };
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        row.add_css_class("playlist-sidebar-row");
+        // Inner Box no longer carries the visual frame class; the frame
+        // (padding, border-radius, drop indicators) lives on the TreeExpander
+        // below so it spans the full row width.
 
         let icon = gtk::Image::new();
         icon.add_css_class("playlist-sidebar-icon");
@@ -486,6 +508,12 @@ fn build_row_factory(
         let name_stack = gtk::Stack::new();
         name_stack.set_hexpand(true);
         name_stack.set_transition_type(gtk::StackTransitionType::None);
+        // Without this, the Stack reserves the tall rename Entry's natural
+        // height even when the compact Label is the visible child, padding
+        // every sidebar row to ~32px. Sizing to the visible child keeps the
+        // row tight in display mode and lets the entry briefly grow when
+        // rename starts.
+        name_stack.set_vhomogeneous(false);
 
         let label = gtk::Label::new(None);
         label.set_xalign(0.0);
@@ -504,6 +532,7 @@ fn build_row_factory(
         row.append(&name_stack);
 
         let expander = gtk::TreeExpander::new();
+        expander.add_css_class("playlist-sidebar-row");
         expander.set_child(Some(&row));
         list_item.set_child(Some(&expander));
     });
@@ -577,13 +606,14 @@ fn build_row_factory(
         name_stack.set_visible_child_name("label");
 
         attach_drag_and_drop(
-            &row,
+            expander.upcast_ref::<gtk::Widget>(),
             playlist_item,
             on_move.clone(),
             on_tracks_drop.clone(),
+            current_indicator.clone(),
         );
         attach_row_context_menu(
-            &row,
+            expander.upcast_ref::<gtk::Widget>(),
             playlist_item,
             label_text.clone(),
             name_stack.clone(),
@@ -598,13 +628,28 @@ fn build_row_factory(
             playlist_item,
             on_rename.clone(),
         );
+
+        // If a caller armed `arm_pending_rename` for this item, immediately
+        // enter rename mode now that the row is bound and its widgets exist.
+        let should_rename = {
+            let mut pending = pending_rename.borrow_mut();
+            if pending.as_ref() == Some(&playlist_item) {
+                *pending = None;
+                true
+            } else {
+                false
+            }
+        };
+        if should_rename {
+            begin_rename(&name_stack, &label, &entry);
+        }
     });
 
     factory
 }
 
 fn attach_row_context_menu(
-    row: &gtk::Box,
+    row: &gtk::Widget,
     item: PlaylistItem,
     current_name: String,
     name_stack: gtk::Stack,
@@ -634,7 +679,7 @@ fn attach_row_context_menu(
     row.add_controller(gesture);
 }
 
-fn remove_secondary_gestures(widget: &gtk::Box) {
+fn remove_secondary_gestures(widget: &gtk::Widget) {
     let controllers = widget.observe_controllers();
     let mut to_remove: Vec<gtk::EventController> = Vec::new();
     for index in 0..controllers.n_items() {
@@ -658,7 +703,7 @@ fn remove_secondary_gestures(widget: &gtk::Box) {
 
 #[allow(clippy::too_many_arguments)]
 fn popup_row_context_menu(
-    anchor: &gtk::Box,
+    anchor: &gtk::Widget,
     item: PlaylistItem,
     current_name: String,
     name_stack: gtk::Stack,
@@ -693,7 +738,7 @@ fn popup_row_context_menu(
     delete_button.connect_clicked(move |_| {
         popover_for_delete.popdown();
         confirm_and_delete(
-            anchor_for_delete.upcast_ref::<gtk::Widget>(),
+            &anchor_for_delete,
             item,
             current_name.clone(),
             on_delete.clone(),
@@ -739,8 +784,16 @@ fn delete_label_for(item: PlaylistItem) -> &'static str {
 fn begin_rename(name_stack: &gtk::Stack, label: &gtk::Label, entry: &gtk::Entry) {
     entry.set_text(&label.text());
     name_stack.set_visible_child_name("entry");
-    entry.grab_focus();
-    entry.select_region(0, -1);
+
+    // When begin_rename is called from a closing popover (right-click "Rename")
+    // or from connect_bind after a refresh, focus is still in flight and a
+    // synchronous grab_focus loses the race. Defer to the next idle so the
+    // entry actually receives the cursor.
+    let entry = entry.clone();
+    glib::idle_add_local_once(move || {
+        entry.grab_focus();
+        entry.select_region(0, -1);
+    });
 }
 
 fn cancel_rename(name_stack: &gtk::Stack, label: &gtk::Label, entry: &gtk::Entry) {
@@ -938,10 +991,11 @@ fn confirm_and_delete(
 }
 
 fn attach_drag_and_drop(
-    row: &gtk::Box,
+    row: &gtk::Widget,
     item: PlaylistItem,
     on_move: MoveCallbackHolder,
     on_tracks_drop: TracksDropCallbackHolder,
+    current_indicator: SharedDropIndicator,
 ) {
     remove_drag_and_drop_controllers(row);
 
@@ -970,6 +1024,7 @@ fn attach_drag_and_drop(
 
     let row_for_motion = row.clone();
     let current_position_for_motion = current_position.clone();
+    let current_indicator_for_motion = current_indicator.clone();
     drop_target.connect_motion(move |target, _x, y| {
         let kind = peek_drag_kind(target);
         match kind {
@@ -978,10 +1033,14 @@ fn attach_drag_and_drop(
                     if current_position_for_motion.get() != DropPosition::Into {
                         current_position_for_motion.set(DropPosition::Into);
                     }
-                    set_drop_indicator(&row_for_motion, DropPosition::Into);
+                    set_drop_indicator(
+                        &row_for_motion,
+                        DropPosition::Into,
+                        &current_indicator_for_motion,
+                    );
                     gdk::DragAction::COPY
                 } else {
-                    clear_drop_indicator(&row_for_motion);
+                    clear_drop_indicator(&row_for_motion, &current_indicator_for_motion);
                     gdk::DragAction::empty()
                 }
             }
@@ -991,25 +1050,27 @@ fn attach_drag_and_drop(
                 if current_position_for_motion.get() != position {
                     current_position_for_motion.set(position);
                 }
-                set_drop_indicator(&row_for_motion, position);
+                set_drop_indicator(&row_for_motion, position, &current_indicator_for_motion);
                 gdk::DragAction::MOVE
             }
             None => {
-                clear_drop_indicator(&row_for_motion);
+                clear_drop_indicator(&row_for_motion, &current_indicator_for_motion);
                 gdk::DragAction::empty()
             }
         }
     });
 
     let row_for_leave = row.clone();
+    let current_indicator_for_leave = current_indicator.clone();
     drop_target.connect_leave(move |_target| {
-        clear_drop_indicator(&row_for_leave);
+        clear_drop_indicator(&row_for_leave, &current_indicator_for_leave);
     });
 
     let row_for_drop = row.clone();
     let current_position_for_drop = current_position.clone();
+    let current_indicator_for_drop = current_indicator;
     drop_target.connect_drop(move |_target, value, _x, _y| {
-        clear_drop_indicator(&row_for_drop);
+        clear_drop_indicator(&row_for_drop, &current_indicator_for_drop);
         let position = current_position_for_drop.get();
         let Ok(text) = value.get::<String>() else {
             return false;
@@ -1058,22 +1119,41 @@ fn classify_drag_payload(text: &str) -> Option<DragKind> {
     }
 }
 
-fn set_drop_indicator(row: &gtk::Box, position: DropPosition) {
-    clear_drop_indicator(row);
+fn set_drop_indicator(
+    row: &gtk::Widget,
+    position: DropPosition,
+    current_indicator: &SharedDropIndicator,
+) {
+    let mut current = current_indicator.borrow_mut();
+    if let Some(previous) = current.as_ref()
+        && previous != row
+    {
+        clear_indicator_classes(previous);
+    }
+    clear_indicator_classes(row);
     match position {
         DropPosition::Above => row.add_css_class("sidebar-drop-above"),
         DropPosition::Below => row.add_css_class("sidebar-drop-below"),
         DropPosition::Into => row.add_css_class("sidebar-drop-into"),
     }
+    *current = Some(row.clone());
 }
 
-fn clear_drop_indicator(row: &gtk::Box) {
+fn clear_drop_indicator(row: &gtk::Widget, current_indicator: &SharedDropIndicator) {
+    clear_indicator_classes(row);
+    let mut current = current_indicator.borrow_mut();
+    if current.as_ref() == Some(row) {
+        *current = None;
+    }
+}
+
+fn clear_indicator_classes(row: &gtk::Widget) {
     row.remove_css_class("sidebar-drop-above");
     row.remove_css_class("sidebar-drop-below");
     row.remove_css_class("sidebar-drop-into");
 }
 
-fn remove_drag_and_drop_controllers(widget: &gtk::Box) {
+fn remove_drag_and_drop_controllers(widget: &gtk::Widget) {
     let controllers = widget.observe_controllers();
     let mut to_remove: Vec<gtk::EventController> = Vec::new();
     for index in 0..controllers.n_items() {

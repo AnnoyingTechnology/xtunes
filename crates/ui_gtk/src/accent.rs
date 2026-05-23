@@ -160,16 +160,23 @@ fn accent_css(palette: AccentPalette) -> String {
             color: {foreground};
         }}
 
-        .sidebar-drop-above {{
+        .playlist-sidebar-row:drop(active) {{
+            background-color: transparent;
+            background-image: none;
+        }}
+
+        .playlist-sidebar-row.sidebar-drop-above {{
             box-shadow: inset 0 2px 0 0 {background};
         }}
 
-        .sidebar-drop-below {{
+        .playlist-sidebar-row.sidebar-drop-below {{
             box-shadow: inset 0 -2px 0 0 {background};
         }}
 
-        .sidebar-drop-into {{
-            background-color: alpha({background}, 0.22);
+        .playlist-sidebar-row.sidebar-drop-into {{
+            background-color: transparent;
+            background-image: none;
+            box-shadow: inset 0 0 0 2px {background};
         }}
         "#,
         background = palette.background,
