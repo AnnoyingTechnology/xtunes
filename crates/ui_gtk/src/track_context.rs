@@ -6,10 +6,24 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
-use xtunes_app_runtime::TrackId;
+use xtunes_app_runtime::{PlaylistId, TrackId};
 
 pub(crate) type TrackActionCallback = Rc<dyn Fn(Vec<TrackId>)>;
+pub(crate) type AddToPlaylistProvider = Rc<dyn Fn() -> Vec<AddToPlaylistEntry>>;
+pub(crate) type AddToPlaylistCallback = Rc<dyn Fn(PlaylistId, Vec<TrackId>)>;
 type PendingConfirmCallback = Rc<RefCell<Option<Box<dyn FnOnce(Vec<TrackId>)>>>>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct AddToPlaylistEntry {
+    pub playlist_id: PlaylistId,
+    pub display_path: String,
+}
+
+#[derive(Clone)]
+struct AddToPlaylistAction {
+    provider: AddToPlaylistProvider,
+    callback: AddToPlaylistCallback,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrackContextActionId {
@@ -119,6 +133,7 @@ impl TrackContextActionSet {
 pub(crate) struct TrackRowContextMenu {
     actions: TrackContextActionSet,
     parent_window: gtk::Window,
+    add_to_playlist: Option<AddToPlaylistAction>,
 }
 
 impl TrackRowContextMenu {
@@ -126,7 +141,17 @@ impl TrackRowContextMenu {
         Self {
             actions,
             parent_window,
+            add_to_playlist: None,
         }
+    }
+
+    pub(crate) fn with_add_to_playlist(
+        mut self,
+        provider: AddToPlaylistProvider,
+        callback: AddToPlaylistCallback,
+    ) -> Self {
+        self.add_to_playlist = Some(AddToPlaylistAction { provider, callback });
+        self
     }
 
     pub(crate) fn popup_at(
@@ -184,6 +209,34 @@ impl TrackRowContextMenu {
     }
 
     fn menu_content(&self, popover: &gtk::Popover, track_ids: Vec<TrackId>) -> gtk::Box {
+        let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+
+        let stack = gtk::Stack::new();
+        stack.set_transition_type(gtk::StackTransitionType::SlideLeftRight);
+        stack.set_transition_duration(140);
+
+        stack.add_named(
+            &self.build_main_page(popover, &stack, track_ids.clone()),
+            Some("main"),
+        );
+        if let Some(add) = &self.add_to_playlist {
+            stack.add_named(
+                &build_add_to_playlist_page(add, popover, &stack, track_ids.clone()),
+                Some("playlists"),
+            );
+        }
+        stack.set_visible_child_name("main");
+
+        outer.append(&stack);
+        outer
+    }
+
+    fn build_main_page(
+        &self,
+        popover: &gtk::Popover,
+        stack: &gtk::Stack,
+        track_ids: Vec<TrackId>,
+    ) -> gtk::Box {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.add_css_class("track-context-menu");
 
@@ -200,8 +253,120 @@ impl TrackRowContextMenu {
             content.append(&button);
         }
 
+        if self.add_to_playlist.is_some() {
+            let add_button = submenu_button("Add to Playlist\u{2026}");
+            let stack_for_add = stack.clone();
+            add_button.connect_clicked(move |_| {
+                stack_for_add.set_visible_child_name("playlists");
+            });
+            content.append(&add_button);
+        }
+
         content
     }
+}
+
+fn build_add_to_playlist_page(
+    action: &AddToPlaylistAction,
+    popover: &gtk::Popover,
+    stack: &gtk::Stack,
+    track_ids: Vec<TrackId>,
+) -> gtk::Box {
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.add_css_class("track-context-menu");
+    content.add_css_class("track-context-submenu");
+
+    let header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let back_button = gtk::Button::new();
+    back_button.add_css_class("flat");
+    back_button.add_css_class("track-context-submenu-back");
+    let back_image = gtk::Image::from_icon_name("go-previous-symbolic");
+    back_image.set_pixel_size(14);
+    back_button.set_child(Some(&back_image));
+    back_button.set_tooltip_text(Some("Back"));
+    let stack_for_back = stack.clone();
+    back_button.connect_clicked(move |_| {
+        stack_for_back.set_visible_child_name("main");
+    });
+    header.append(&back_button);
+
+    let header_label = gtk::Label::new(Some("Add to Playlist"));
+    header_label.set_xalign(0.0);
+    header_label.set_halign(gtk::Align::Start);
+    header_label.set_hexpand(true);
+    header_label.add_css_class("track-context-submenu-title");
+    header_label.set_margin_start(4);
+    header.append(&header_label);
+    content.append(&header);
+
+    let entries = (action.provider)();
+    if entries.is_empty() {
+        let empty_label = gtk::Label::new(Some(
+            "No playlists yet — create one from the sidebar's right-click menu.",
+        ));
+        empty_label.set_wrap(true);
+        empty_label.set_xalign(0.0);
+        empty_label.add_css_class("dim-label");
+        empty_label.set_margin_top(6);
+        empty_label.set_margin_bottom(6);
+        empty_label.set_margin_start(8);
+        empty_label.set_margin_end(8);
+        content.append(&empty_label);
+    } else {
+        for entry in entries {
+            let button = context_menu_button_with_label(&entry.display_path);
+            let callback = action.callback.clone();
+            let popover_for_pick = popover.clone();
+            let track_ids = track_ids.clone();
+            let playlist_id = entry.playlist_id;
+            button.connect_clicked(move |_| {
+                popover_for_pick.popdown();
+                callback(playlist_id, track_ids.clone());
+            });
+            content.append(&button);
+        }
+    }
+
+    content
+}
+
+fn submenu_button(label_text: &str) -> gtk::Button {
+    let label = gtk::Label::new(Some(label_text));
+    label.set_xalign(0.0);
+    label.set_halign(gtk::Align::Start);
+    label.set_hexpand(true);
+
+    let chevron = gtk::Image::from_icon_name("go-next-symbolic");
+    chevron.set_pixel_size(12);
+    chevron.add_css_class("track-context-submenu-chevron");
+
+    let box_widget = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    box_widget.append(&label);
+    box_widget.append(&chevron);
+
+    let button = gtk::Button::new();
+    button.add_css_class("flat");
+    button.add_css_class("track-context-menu-item");
+    button.set_child(Some(&box_widget));
+    button.set_halign(gtk::Align::Fill);
+    button.set_hexpand(true);
+    button
+}
+
+fn context_menu_button_with_label(label_text: &str) -> gtk::Button {
+    let label = gtk::Label::new(Some(label_text));
+    label.set_xalign(0.0);
+    label.set_halign(gtk::Align::Fill);
+    label.set_hexpand(true);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+
+    let button = gtk::Button::new();
+    button.add_css_class("flat");
+    button.add_css_class("track-context-menu-item");
+    button.set_child(Some(&label));
+    button.set_halign(gtk::Align::Fill);
+    button.set_hexpand(true);
+    button
 }
 
 fn context_menu_button(action: &TrackContextAction) -> gtk::Button {

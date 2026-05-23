@@ -5,7 +5,10 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, time::SystemTime};
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
-use xtunes_app_runtime::{PlaybackCommand, Playlist, PlaylistEntry, PlaylistItem, Rating, Track, TrackId};
+use xtunes_app_runtime::{
+    PlaybackCommand, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistItem,
+    Rating, Track, TrackId,
+};
 
 use super::{
     APP_ID, ApplicationCommand, ApplicationRuntime, LibraryChangedCallback, LibraryChangedHolder,
@@ -31,7 +34,8 @@ use super::{
         Titlebar, build_titlebar, connect_titlebar_playback_controls, sync_play_pause_icon,
     },
     track_context::{
-        TrackActionCallback, TrackContextAction, TrackContextActionSet, TrackRowContextMenu,
+        AddToPlaylistCallback, AddToPlaylistEntry, AddToPlaylistProvider, TrackActionCallback,
+        TrackContextAction, TrackContextActionSet, TrackRowContextMenu,
     },
     track_table::{
         RatingChangedCallback, TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table,
@@ -102,8 +106,14 @@ pub(crate) fn build_main_window(
         playback_changed.clone(),
         library_changed_holder.clone(),
     );
-    let context_menu =
-        TrackRowContextMenu::new(context_actions, window.clone().upcast::<gtk::Window>());
+    let context_menu = TrackRowContextMenu::new(
+        context_actions,
+        window.clone().upcast::<gtk::Window>(),
+    )
+    .with_add_to_playlist(
+        add_to_playlist_provider(&runtime),
+        add_to_playlist_callback(&command_controller, &runtime, &library_changed_holder),
+    );
     let rating_changed =
         rating_changed_callback(&command_controller, library_changed_holder.clone());
     let songs_table = build_track_table(
@@ -515,6 +525,81 @@ fn playlist_entries_in_order(playlist: &Playlist) -> impl Iterator<Item = TrackI
     let mut ordered: Vec<&PlaylistEntry> = playlist.entries.iter().collect();
     ordered.sort_by_key(|entry| entry.position);
     ordered.into_iter().map(|entry| entry.track_id)
+}
+
+fn add_to_playlist_provider(runtime: &SharedRuntime) -> AddToPlaylistProvider {
+    let runtime = runtime.clone();
+    Rc::new(move || {
+        let runtime = runtime.borrow();
+        let folders: HashMap<PlaylistFolderId, &PlaylistFolder> = runtime
+            .playlist_folders()
+            .iter()
+            .map(|folder| (folder.id, folder))
+            .collect();
+        let mut entries: Vec<AddToPlaylistEntry> = runtime
+            .playlists()
+            .iter()
+            .map(|playlist| AddToPlaylistEntry {
+                playlist_id: playlist.id,
+                display_path: playlist_display_path(playlist, &folders),
+            })
+            .collect();
+        entries.sort_by(|left, right| {
+            left.display_path
+                .to_lowercase()
+                .cmp(&right.display_path.to_lowercase())
+        });
+        entries
+    })
+}
+
+fn add_to_playlist_callback(
+    command_controller: &SharedCommandController,
+    runtime: &SharedRuntime,
+    library_changed_holder: &LibraryChangedHolder,
+) -> AddToPlaylistCallback {
+    let command_controller = command_controller.clone();
+    let runtime = runtime.clone();
+    let library_changed_holder = library_changed_holder.clone();
+
+    Rc::new(move |playlist_id, track_ids| {
+        if track_ids.is_empty() {
+            return;
+        }
+        let dispatched = command_controller
+            .dispatch_succeeded(ApplicationCommand::AddTracksToPlaylist {
+                playlist_id,
+                track_ids,
+            });
+        if !dispatched {
+            return;
+        }
+        // Library state itself is unchanged, but the currently-displayed
+        // playlist may now be longer — re-fire library_changed so the table
+        // and sidebar refresh.
+        let _ = runtime.borrow();
+        if let Some(callback) = library_changed_holder.borrow().as_ref() {
+            callback();
+        }
+    })
+}
+
+fn playlist_display_path(
+    playlist: &Playlist,
+    folders: &HashMap<PlaylistFolderId, &PlaylistFolder>,
+) -> String {
+    let mut segments: Vec<String> = Vec::new();
+    let mut current = playlist.parent_folder_id;
+    while let Some(folder_id) = current {
+        let Some(folder) = folders.get(&folder_id) else {
+            break;
+        };
+        segments.push(folder.name.clone());
+        current = folder.parent_folder_id;
+    }
+    segments.reverse();
+    segments.push(playlist.name.clone());
+    segments.join(" / ")
 }
 
 fn playback_changed_callback(
