@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::BTreeMap,
+    rc::Rc,
+};
 
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -17,7 +21,42 @@ use super::{
 };
 
 pub(crate) type SidebarSelectionChangedCallback = Rc<dyn Fn(Option<PlaylistItem>)>;
-pub(crate) type SidebarMoveCallback = Rc<dyn Fn(PlaylistItem, PlaylistItem)>;
+pub(crate) type SidebarMoveCallback = Rc<dyn Fn(PlaylistItem, PlaylistItem, DropPosition)>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DropPosition {
+    Above,
+    Below,
+    Into,
+}
+
+pub(crate) fn drop_position_from_motion(
+    y: f64,
+    row_height: f64,
+    target_is_folder: bool,
+) -> DropPosition {
+    if row_height <= 0.0 {
+        return if target_is_folder {
+            DropPosition::Into
+        } else {
+            DropPosition::Above
+        };
+    }
+    let ratio = (y / row_height).clamp(0.0, 1.0);
+    if target_is_folder {
+        if ratio < 0.25 {
+            DropPosition::Above
+        } else if ratio > 0.75 {
+            DropPosition::Below
+        } else {
+            DropPosition::Into
+        }
+    } else if ratio < 0.5 {
+        DropPosition::Above
+    } else {
+        DropPosition::Below
+    }
+}
 
 #[derive(Clone, Debug)]
 struct SidebarItem {
@@ -381,8 +420,37 @@ fn attach_drag_and_drop(row: &gtk::Box, item: PlaylistItem, on_move: MoveCallbac
     });
     row.add_controller(drag_source);
 
+    let target_is_folder = matches!(item, PlaylistItem::Folder(_));
+    let current_position: Rc<Cell<DropPosition>> = Rc::new(Cell::new(if target_is_folder {
+        DropPosition::Into
+    } else {
+        DropPosition::Above
+    }));
+
     let drop_target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
+
+    let row_for_motion = row.clone();
+    let current_position_for_motion = current_position.clone();
+    drop_target.connect_motion(move |_target, _x, y| {
+        let row_height = row_for_motion.height() as f64;
+        let position = drop_position_from_motion(y, row_height, target_is_folder);
+        if current_position_for_motion.get() != position {
+            current_position_for_motion.set(position);
+            set_drop_indicator(&row_for_motion, position);
+        }
+        gdk::DragAction::MOVE
+    });
+
+    let row_for_leave = row.clone();
+    drop_target.connect_leave(move |_target| {
+        clear_drop_indicator(&row_for_leave);
+    });
+
+    let row_for_drop = row.clone();
+    let current_position_for_drop = current_position.clone();
     drop_target.connect_drop(move |_target, value, _x, _y| {
+        clear_drop_indicator(&row_for_drop);
+        let position = current_position_for_drop.get();
         let Ok(text) = value.get::<String>() else {
             return false;
         };
@@ -393,11 +461,26 @@ fn attach_drag_and_drop(row: &gtk::Box, item: PlaylistItem, on_move: MoveCallbac
             return false;
         }
         if let Some(callback) = on_move.borrow().as_ref() {
-            callback(source_item, item);
+            callback(source_item, item, position);
         }
         true
     });
     row.add_controller(drop_target);
+}
+
+fn set_drop_indicator(row: &gtk::Box, position: DropPosition) {
+    clear_drop_indicator(row);
+    match position {
+        DropPosition::Above => row.add_css_class("sidebar-drop-above"),
+        DropPosition::Below => row.add_css_class("sidebar-drop-below"),
+        DropPosition::Into => row.add_css_class("sidebar-drop-into"),
+    }
+}
+
+fn clear_drop_indicator(row: &gtk::Box) {
+    row.remove_css_class("sidebar-drop-above");
+    row.remove_css_class("sidebar-drop-below");
+    row.remove_css_class("sidebar-drop-into");
 }
 
 fn remove_drag_and_drop_controllers(widget: &gtk::Box) {
@@ -579,5 +662,45 @@ mod tests {
         assert_eq!(parse_drag_payload("folder:not-a-number"), None);
         assert_eq!(parse_drag_payload("folder:-3"), None);
         assert_eq!(parse_drag_payload("no-colon"), None);
+    }
+
+    #[test]
+    fn drop_position_splits_non_folder_in_half() {
+        assert_eq!(
+            drop_position_from_motion(4.0, 20.0, false),
+            DropPosition::Above
+        );
+        assert_eq!(
+            drop_position_from_motion(15.0, 20.0, false),
+            DropPosition::Below
+        );
+    }
+
+    #[test]
+    fn drop_position_uses_three_zones_for_folders() {
+        assert_eq!(
+            drop_position_from_motion(2.0, 20.0, true),
+            DropPosition::Above
+        );
+        assert_eq!(
+            drop_position_from_motion(10.0, 20.0, true),
+            DropPosition::Into
+        );
+        assert_eq!(
+            drop_position_from_motion(18.0, 20.0, true),
+            DropPosition::Below
+        );
+    }
+
+    #[test]
+    fn drop_position_handles_zero_height_gracefully() {
+        assert_eq!(
+            drop_position_from_motion(0.0, 0.0, false),
+            DropPosition::Above
+        );
+        assert_eq!(
+            drop_position_from_motion(0.0, 0.0, true),
+            DropPosition::Into
+        );
     }
 }

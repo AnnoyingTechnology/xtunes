@@ -159,6 +159,18 @@ fn accent_css(palette: AccentPalette) -> String {
         .track-table-cell.track-table-row-selected .track-table-status-playing {{
             color: {foreground};
         }}
+
+        .sidebar-drop-above {{
+            box-shadow: inset 0 2px 0 0 {background};
+        }}
+
+        .sidebar-drop-below {{
+            box-shadow: inset 0 -2px 0 0 {background};
+        }}
+
+        .sidebar-drop-into {{
+            background-color: alpha({background}, 0.22);
+        }}
         "#,
         background = palette.background,
         foreground = palette.foreground,
