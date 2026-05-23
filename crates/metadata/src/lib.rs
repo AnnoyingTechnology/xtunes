@@ -180,12 +180,29 @@ impl MetadataService for LoftyMetadataService {
             composer: tag
                 .and_then(|tag| tag.get_string(ItemKey::Composer))
                 .map(ToOwned::to_owned),
+            grouping: tag
+                .and_then(|tag| tag.get_string(ItemKey::ContentGroup))
+                .map(ToOwned::to_owned),
             genre: tag.and_then(|tag| tag.genre().map(|value| value.into_owned())),
             track_number: tag.and_then(Accessor::track),
+            track_total: tag.and_then(Accessor::track_total),
             disc_number: tag.and_then(Accessor::disk),
+            disc_total: tag.and_then(Accessor::disk_total),
             year: tag.and_then(|tag| tag.date().map(|date| i32::from(date.year))),
+            compilation: tag
+                .and_then(|tag| tag.get_string(ItemKey::FlagCompilation))
+                .and_then(parse_flag),
+            bpm: tag
+                .and_then(|tag| tag.get_string(ItemKey::Bpm))
+                .and_then(|value| value.trim().parse::<u32>().ok()),
+            key: tag
+                .and_then(|tag| tag.get_string(ItemKey::InitialKey))
+                .map(ToOwned::to_owned),
+            comments: tag.and_then(|tag| tag.comment().map(|value| value.into_owned())),
             duration: Some(properties.duration()),
             bitrate_kbps: properties.audio_bitrate().or(properties.overall_bitrate()),
+            sample_rate_hz: properties.sample_rate(),
+            channels: properties.channels(),
         })
     }
 
@@ -202,10 +219,17 @@ impl MetadataService for LoftyMetadataService {
         apply_text_change(tag, ItemKey::AlbumTitle, change.album);
         apply_text_change(tag, ItemKey::AlbumArtist, change.album_artist);
         apply_text_change(tag, ItemKey::Composer, change.composer);
+        apply_text_change(tag, ItemKey::ContentGroup, change.grouping);
         apply_text_change(tag, ItemKey::Genre, change.genre);
         apply_number_change(tag, ItemKey::TrackNumber, change.track_number);
+        apply_number_change(tag, ItemKey::TrackTotal, change.track_total);
         apply_number_change(tag, ItemKey::DiscNumber, change.disc_number);
+        apply_number_change(tag, ItemKey::DiscTotal, change.disc_total);
         apply_number_change(tag, ItemKey::Year, change.year);
+        apply_bool_change(tag, ItemKey::FlagCompilation, change.compilation);
+        apply_number_change(tag, ItemKey::Bpm, change.bpm);
+        apply_text_change(tag, ItemKey::InitialKey, change.key);
+        apply_text_change(tag, ItemKey::Comment, change.comments);
 
         tagged_file
             .save_to_path(path, WriteOptions::default())
@@ -310,6 +334,26 @@ where
         FieldChange::Clear => {
             let _removed = tag.take(item_key).count();
         }
+    }
+}
+
+fn apply_bool_change(tag: &mut Tag, item_key: ItemKey, change: FieldChange<bool>) {
+    match change {
+        FieldChange::Unchanged => {}
+        FieldChange::Set(value) => {
+            tag.insert_text(item_key, if value { "1" } else { "0" }.to_owned());
+        }
+        FieldChange::Clear => {
+            let _removed = tag.take(item_key).count();
+        }
+    }
+}
+
+fn parse_flag(value: &str) -> Option<bool> {
+    match value.trim() {
+        "1" | "true" | "TRUE" | "True" | "yes" => Some(true),
+        "0" | "false" | "FALSE" | "False" | "no" => Some(false),
+        _ => None,
     }
 }
 

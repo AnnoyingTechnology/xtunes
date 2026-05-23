@@ -162,7 +162,16 @@ impl SqliteLibraryStore {
                     last_played_at_unix INTEGER,
                     last_skipped_at_unix INTEGER,
                     date_added_at_unix INTEGER,
-                    is_missing INTEGER NOT NULL DEFAULT 0
+                    is_missing INTEGER NOT NULL DEFAULT 0,
+                    grouping TEXT,
+                    track_total INTEGER,
+                    disc_total INTEGER,
+                    compilation INTEGER,
+                    bpm INTEGER,
+                    musical_key TEXT,
+                    comments TEXT,
+                    sample_rate_hz INTEGER,
+                    channels INTEGER
                 );
 
                 CREATE TABLE IF NOT EXISTS playlist_folders (
@@ -338,9 +347,22 @@ impl LibraryStore for SqliteLibraryStore {
                     last_played_at_unix,
                     last_skipped_at_unix,
                     date_added_at_unix,
-                    is_missing
+                    is_missing,
+                    grouping,
+                    track_total,
+                    disc_total,
+                    compilation,
+                    bpm,
+                    musical_key,
+                    comments,
+                    sample_rate_hz,
+                    channels
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+                    ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29
+                )
                 ON CONFLICT(id) DO UPDATE SET
                     relative_path = excluded.relative_path,
                     title = excluded.title,
@@ -360,7 +382,16 @@ impl LibraryStore for SqliteLibraryStore {
                     last_played_at_unix = excluded.last_played_at_unix,
                     last_skipped_at_unix = excluded.last_skipped_at_unix,
                     date_added_at_unix = excluded.date_added_at_unix,
-                    is_missing = excluded.is_missing
+                    is_missing = excluded.is_missing,
+                    grouping = excluded.grouping,
+                    track_total = excluded.track_total,
+                    disc_total = excluded.disc_total,
+                    compilation = excluded.compilation,
+                    bpm = excluded.bpm,
+                    musical_key = excluded.musical_key,
+                    comments = excluded.comments,
+                    sample_rate_hz = excluded.sample_rate_hz,
+                    channels = excluded.channels
                 "#,
                 params![
                     track.id.get(),
@@ -383,6 +414,15 @@ impl LibraryStore for SqliteLibraryStore {
                     statistics.last_skipped_at.and_then(system_time_to_unix),
                     statistics.date_added_at.and_then(system_time_to_unix),
                     track.location.is_missing(),
+                    metadata.grouping,
+                    metadata.track_total.map(i64::from),
+                    metadata.disc_total.map(i64::from),
+                    metadata.compilation,
+                    metadata.bpm.map(i64::from),
+                    metadata.key,
+                    metadata.comments,
+                    metadata.sample_rate_hz.map(i64::from),
+                    metadata.channels.map(i64::from),
                 ],
             )
             .map(|_| ())
@@ -421,7 +461,16 @@ impl LibraryStore for SqliteLibraryStore {
                     last_played_at_unix,
                     last_skipped_at_unix,
                     date_added_at_unix,
-                    is_missing
+                    is_missing,
+                    grouping,
+                    track_total,
+                    disc_total,
+                    compilation,
+                    bpm,
+                    musical_key,
+                    comments,
+                    sample_rate_hz,
+                    channels
                 FROM tracks
                 WHERE id = ?1
                 "#,
@@ -462,7 +511,16 @@ impl LibraryStore for SqliteLibraryStore {
                     last_played_at_unix,
                     last_skipped_at_unix,
                     date_added_at_unix,
-                    is_missing
+                    is_missing,
+                    grouping,
+                    track_total,
+                    disc_total,
+                    compilation,
+                    bpm,
+                    musical_key,
+                    comments,
+                    sample_rate_hz,
+                    channels
                 FROM tracks
                 ORDER BY id
                 "#,
@@ -845,12 +903,21 @@ fn track_from_row(row: &Row<'_>) -> StoreResult<Track> {
             album: row.get(4).map_err(StoreError::from)?,
             album_artist: row.get(5).map_err(StoreError::from)?,
             composer: row.get(6).map_err(StoreError::from)?,
+            grouping: row.get(20).map_err(StoreError::from)?,
             genre: row.get(7).map_err(StoreError::from)?,
             track_number: optional_u32(row, 8)?,
+            track_total: optional_u32(row, 21)?,
             disc_number: optional_u32(row, 9)?,
+            disc_total: optional_u32(row, 22)?,
             year: optional_i64(row, 10)?.map(|value| value as i32),
+            compilation: row.get(23).map_err(StoreError::from)?,
+            bpm: optional_u32(row, 24)?,
+            key: row.get(25).map_err(StoreError::from)?,
+            comments: row.get(26).map_err(StoreError::from)?,
             duration: duration_seconds.map(seconds_to_duration),
             bitrate_kbps: optional_u32(row, 12)?,
+            sample_rate_hz: optional_u32(row, 27)?,
+            channels: optional_u8(row, 28)?,
         },
         rating: Rating::new(rating_value as u8).unwrap_or_else(Rating::unrated),
         statistics: PlayStatistics {
@@ -912,6 +979,11 @@ fn optional_i64(row: &Row<'_>, index: usize) -> StoreResult<Option<i64>> {
 
 fn optional_u32(row: &Row<'_>, index: usize) -> StoreResult<Option<u32>> {
     optional_i64(row, index).map(|value| value.map(|value| value as u32))
+}
+
+fn optional_u8(row: &Row<'_>, index: usize) -> StoreResult<Option<u8>> {
+    optional_i64(row, index)
+        .map(|value| value.map(|value| value.clamp(0, i64::from(u8::MAX)) as u8))
 }
 
 fn optional_string(row: &Row<'_>, index: usize) -> StoreResult<Option<String>> {

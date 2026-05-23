@@ -277,14 +277,11 @@ mod tests {
                 title: Some(format!("Title {id}")),
                 artist: Some("Artist".to_owned()),
                 album: Some("Album".to_owned()),
-                album_artist: None,
-                composer: None,
                 genre: genre.map(str::to_owned),
-                track_number: None,
-                disc_number: None,
                 year,
                 duration: Some(Duration::from_secs(200)),
                 bitrate_kbps: Some(320),
+                ..TrackMetadata::default()
             },
             rating: Rating::unrated(),
             statistics: PlayStatistics {
