@@ -1,40 +1,345 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+
 use gtk::prelude::*;
+use gtk::{gio, glib};
 
-use super::{SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH};
+use xtunes_app_runtime::{
+    ApplicationRuntime, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistItem, SmartPlaylist,
+};
 
-pub(crate) fn build_sidebar() -> gtk::Box {
-    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    sidebar.add_css_class("playlist-sidebar");
-    sidebar.set_vexpand(true);
-    sidebar.set_size_request(SIDEBAR_MIN_WIDTH, -1);
+use super::{SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SharedRuntime};
 
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    content.set_vexpand(true);
+pub(crate) type SidebarSelectionChangedCallback = Rc<dyn Fn(Option<PlaylistItem>)>;
 
-    let title = gtk::Label::new(Some("Playlists"));
-    title.set_margin_top(8);
-    title.set_margin_end(8);
-    title.set_margin_bottom(4);
-    title.set_margin_start(8);
-    title.set_xalign(0.0);
-    content.append(&title);
+#[derive(Clone, Debug)]
+struct SidebarItem {
+    name: String,
+    item: PlaylistItem,
+}
 
-    content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+impl SidebarItem {
+    fn icon_name(&self) -> &'static str {
+        match self.item {
+            PlaylistItem::Folder(_) => "folder-symbolic",
+            PlaylistItem::Playlist(_) => "view-list-symbolic",
+            PlaylistItem::SmartPlaylist(_) => "emblem-system-symbolic",
+        }
+    }
+}
 
-    let empty_state = gtk::Label::new(Some("No playlists imported yet"));
-    empty_state.set_margin_top(8);
-    empty_state.set_margin_end(8);
-    empty_state.set_margin_bottom(8);
-    empty_state.set_margin_start(8);
-    empty_state.set_xalign(0.0);
-    content.append(&empty_state);
+#[derive(Default)]
+struct SidebarSnapshot {
+    items_by_parent: BTreeMap<Option<PlaylistFolderId>, Vec<SidebarItem>>,
+}
 
-    sidebar.append(&content);
+impl SidebarSnapshot {
+    fn from_runtime(runtime: &ApplicationRuntime) -> Self {
+        Self::build(
+            runtime.playlist_folders(),
+            runtime.playlists(),
+            runtime.smart_playlists(),
+        )
+    }
 
-    sidebar
+    fn build(
+        folders: &[PlaylistFolder],
+        playlists: &[Playlist],
+        smart_playlists: &[SmartPlaylist],
+    ) -> Self {
+        let mut items_by_parent: BTreeMap<Option<PlaylistFolderId>, Vec<(u32, SidebarItem)>> =
+            BTreeMap::new();
+
+        for folder in folders {
+            items_by_parent
+                .entry(folder.parent_folder_id)
+                .or_default()
+                .push((
+                    folder.position,
+                    SidebarItem {
+                        name: folder.name.clone(),
+                        item: PlaylistItem::Folder(folder.id),
+                    },
+                ));
+        }
+        for playlist in playlists {
+            items_by_parent
+                .entry(playlist.parent_folder_id)
+                .or_default()
+                .push((
+                    playlist.position,
+                    SidebarItem {
+                        name: playlist.name.clone(),
+                        item: PlaylistItem::Playlist(playlist.id),
+                    },
+                ));
+        }
+        for smart in smart_playlists {
+            items_by_parent
+                .entry(smart.parent_folder_id)
+                .or_default()
+                .push((
+                    smart.position,
+                    SidebarItem {
+                        name: smart.name.clone(),
+                        item: PlaylistItem::SmartPlaylist(smart.id),
+                    },
+                ));
+        }
+
+        let items_by_parent = items_by_parent
+            .into_iter()
+            .map(|(parent, mut bucket)| {
+                bucket.sort_by_key(|(position, _)| *position);
+                (parent, bucket.into_iter().map(|(_, item)| item).collect())
+            })
+            .collect();
+
+        Self { items_by_parent }
+    }
+
+    fn items_under(&self, parent: Option<PlaylistFolderId>) -> &[SidebarItem] {
+        self.items_by_parent
+            .get(&parent)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct PlaylistSidebar {
+    root: gtk::Box,
+    selection: gtk::SingleSelection,
+    runtime: SharedRuntime,
+    on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>>,
+}
+
+impl PlaylistSidebar {
+    pub(crate) fn new(runtime: SharedRuntime) -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.add_css_class("playlist-sidebar");
+        root.set_vexpand(true);
+        root.set_size_request(SIDEBAR_MIN_WIDTH, -1);
+
+        let title = gtk::Label::new(Some("Playlists"));
+        title.set_margin_top(8);
+        title.set_margin_end(8);
+        title.set_margin_bottom(4);
+        title.set_margin_start(8);
+        title.set_xalign(0.0);
+        root.append(&title);
+
+        root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+        let tree_model = build_tree_model(&runtime.borrow());
+        let selection = gtk::SingleSelection::new(Some(tree_model));
+        selection.set_autoselect(false);
+        selection.set_can_unselect(true);
+
+        let list_view = gtk::ListView::new(Some(selection.clone()), Some(build_row_factory()));
+        list_view.add_css_class("playlist-sidebar-list");
+        list_view.set_vexpand(true);
+        list_view.set_single_click_activate(false);
+
+        let scroller = gtk::ScrolledWindow::new();
+        scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        scroller.set_vexpand(true);
+        scroller.set_hexpand(true);
+        scroller.set_child(Some(&list_view));
+        root.append(&scroller);
+
+        let on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>> =
+            Rc::new(RefCell::new(None));
+        connect_selection_signal(&selection, on_selection_changed.clone());
+
+        Self {
+            root,
+            selection,
+            runtime,
+            on_selection_changed,
+        }
+    }
+
+    pub(crate) fn widget(&self) -> gtk::Box {
+        self.root.clone()
+    }
+
+    pub(crate) fn set_selection_changed(&self, callback: SidebarSelectionChangedCallback) {
+        self.on_selection_changed.replace(Some(callback));
+    }
+
+    pub(crate) fn current_selection(&self) -> Option<PlaylistItem> {
+        selected_item(&self.selection)
+    }
+
+    pub(crate) fn refresh(&self) {
+        let previous = self.current_selection();
+        let tree_model = build_tree_model(&self.runtime.borrow());
+        self.selection.set_model(Some(&tree_model));
+        if let Some(previous) = previous {
+            select_item(&self.selection, previous);
+        }
+        if let Some(callback) = self.on_selection_changed.borrow().as_ref() {
+            callback(self.current_selection());
+        }
+    }
+}
+
+fn connect_selection_signal(
+    selection: &gtk::SingleSelection,
+    on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>>,
+) {
+    let selection_clone = selection.clone();
+    selection.connect_selected_notify(move |_selection| {
+        let value = selected_item(&selection_clone);
+        if let Some(callback) = on_selection_changed.borrow().as_ref() {
+            callback(value);
+        }
+    });
+}
+
+fn selected_item(selection: &gtk::SingleSelection) -> Option<PlaylistItem> {
+    let object = selection.selected_item()?;
+    let tree_row = object.downcast_ref::<gtk::TreeListRow>()?;
+    let inner = tree_row.item()?;
+    let boxed = inner.downcast_ref::<glib::BoxedAnyObject>()?;
+    let sidebar_item = boxed.try_borrow::<SidebarItem>().ok()?;
+    Some(sidebar_item.item)
+}
+
+fn select_item(selection: &gtk::SingleSelection, target: PlaylistItem) {
+    let n = selection.n_items();
+    for index in 0..n {
+        let Some(object) = selection.item(index) else {
+            continue;
+        };
+        let Some(tree_row) = object.downcast_ref::<gtk::TreeListRow>() else {
+            continue;
+        };
+        let Some(inner) = tree_row.item() else {
+            continue;
+        };
+        let Some(boxed) = inner.downcast_ref::<glib::BoxedAnyObject>() else {
+            continue;
+        };
+        let Ok(sidebar_item) = boxed.try_borrow::<SidebarItem>() else {
+            continue;
+        };
+        if sidebar_item.item == target {
+            selection.set_selected(index);
+            return;
+        }
+    }
+    selection.set_selected(gtk::INVALID_LIST_POSITION);
+}
+
+fn build_tree_model(runtime: &ApplicationRuntime) -> gtk::TreeListModel {
+    let snapshot = Rc::new(SidebarSnapshot::from_runtime(runtime));
+    let root_store = list_store_for(snapshot.items_under(None));
+
+    let snapshot_for_children = snapshot.clone();
+    gtk::TreeListModel::new(
+        root_store,
+        false,
+        true,
+        move |object| children_for(object, &snapshot_for_children),
+    )
+}
+
+fn children_for(object: &glib::Object, snapshot: &SidebarSnapshot) -> Option<gio::ListModel> {
+    let boxed = object.downcast_ref::<glib::BoxedAnyObject>()?;
+    let sidebar_item = boxed.try_borrow::<SidebarItem>().ok()?;
+    let PlaylistItem::Folder(folder_id) = sidebar_item.item else {
+        return None;
+    };
+    Some(list_store_for(snapshot.items_under(Some(folder_id))).upcast())
+}
+
+fn list_store_for(items: &[SidebarItem]) -> gio::ListStore {
+    let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+    for item in items {
+        store.append(&glib::BoxedAnyObject::new(item.clone()));
+    }
+    store
+}
+
+fn build_row_factory() -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_factory, list_item| {
+        let Some(list_item) = list_item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.set_margin_top(2);
+        row.set_margin_bottom(2);
+        let icon = gtk::Image::new();
+        icon.add_css_class("playlist-sidebar-icon");
+        let label = gtk::Label::new(None);
+        label.set_xalign(0.0);
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        label.set_hexpand(true);
+        row.append(&icon);
+        row.append(&label);
+
+        let expander = gtk::TreeExpander::new();
+        expander.set_child(Some(&row));
+        list_item.set_child(Some(&expander));
+    });
+
+    factory.connect_bind(|_factory, list_item| {
+        let Some(list_item) = list_item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let Some(expander_widget) = list_item.child() else {
+            return;
+        };
+        let Ok(expander) = expander_widget.downcast::<gtk::TreeExpander>() else {
+            return;
+        };
+        let Some(item_object) = list_item.item() else {
+            return;
+        };
+        let Ok(tree_row) = item_object.downcast::<gtk::TreeListRow>() else {
+            return;
+        };
+        expander.set_list_row(Some(&tree_row));
+
+        let Some(inner_object) = tree_row.item() else {
+            return;
+        };
+        let Some(boxed) = inner_object.downcast_ref::<glib::BoxedAnyObject>() else {
+            return;
+        };
+        let Ok(sidebar_item) = boxed.try_borrow::<SidebarItem>() else {
+            return;
+        };
+
+        let Some(row_widget) = expander.child() else {
+            return;
+        };
+        let Ok(row) = row_widget.downcast::<gtk::Box>() else {
+            return;
+        };
+        let Some(icon_widget) = row.first_child() else {
+            return;
+        };
+        let Ok(icon) = icon_widget.downcast::<gtk::Image>() else {
+            return;
+        };
+        let Some(label_widget) = icon.next_sibling() else {
+            return;
+        };
+        let Ok(label) = label_widget.downcast::<gtk::Label>() else {
+            return;
+        };
+
+        icon.set_icon_name(Some(sidebar_item.icon_name()));
+        label.set_text(&sidebar_item.name);
+    });
+
+    factory
 }
 
 pub(crate) fn build_content_area(sidebar: &gtk::Box, main_content: &gtk::Box) -> gtk::Paned {
@@ -60,3 +365,97 @@ fn clamp_sidebar_width(content_area: &gtk::Paned) {
         content_area.set_position(clamped_width);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use xtunes_app_runtime::{
+        PlaylistId, SmartPlaylistId, SmartPlaylistMatchKind, SmartPlaylistRule,
+        SmartPlaylistRuleSet, SmartPlaylistTextField, SmartPlaylistTextOperator,
+    };
+
+    use super::*;
+
+    fn folder(id: i64, name: &str, parent: Option<PlaylistFolderId>, position: u32) -> PlaylistFolder {
+        PlaylistFolder {
+            id: PlaylistFolderId::new(id).expect("positive folder id"),
+            name: name.to_owned(),
+            parent_folder_id: parent,
+            position,
+        }
+    }
+
+    fn playlist(id: i64, name: &str, parent: Option<PlaylistFolderId>, position: u32) -> Playlist {
+        Playlist {
+            id: PlaylistId::new(id).expect("positive playlist id"),
+            name: name.to_owned(),
+            parent_folder_id: parent,
+            position,
+            entries: Vec::new(),
+        }
+    }
+
+    fn smart_playlist(
+        id: i64,
+        name: &str,
+        parent: Option<PlaylistFolderId>,
+        position: u32,
+    ) -> SmartPlaylist {
+        SmartPlaylist {
+            id: SmartPlaylistId::new(id).expect("positive smart playlist id"),
+            name: name.to_owned(),
+            parent_folder_id: parent,
+            position,
+            rules: SmartPlaylistRuleSet {
+                match_kind: SmartPlaylistMatchKind::All,
+                rules: vec![SmartPlaylistRule::Text {
+                    field: SmartPlaylistTextField::Genre,
+                    operator: SmartPlaylistTextOperator::Is,
+                    value: "Trip-Hop".to_owned(),
+                }],
+                limit: None,
+            },
+        }
+    }
+
+    #[test]
+    fn snapshot_groups_items_by_parent_and_orders_them_by_position() {
+        let root_folder = folder(1, "Mixes", None, 1);
+        let root_playlist = playlist(1, "Drive", None, 0);
+        let root_smart = smart_playlist(1, "Recent", None, 2);
+        let nested_playlist = playlist(2, "Inside", Some(root_folder.id), 0);
+
+        let snapshot = SidebarSnapshot::build(
+            &[root_folder.clone()],
+            &[root_playlist.clone(), nested_playlist.clone()],
+            &[root_smart.clone()],
+        );
+
+        let root_items: Vec<PlaylistItem> = snapshot
+            .items_under(None)
+            .iter()
+            .map(|item| item.item)
+            .collect();
+        assert_eq!(
+            root_items,
+            vec![
+                PlaylistItem::Playlist(root_playlist.id),
+                PlaylistItem::Folder(root_folder.id),
+                PlaylistItem::SmartPlaylist(root_smart.id),
+            ]
+        );
+
+        let nested_items: Vec<PlaylistItem> = snapshot
+            .items_under(Some(root_folder.id))
+            .iter()
+            .map(|item| item.item)
+            .collect();
+        assert_eq!(nested_items, vec![PlaylistItem::Playlist(nested_playlist.id)]);
+
+        assert!(
+            snapshot
+                .items_under(Some(PlaylistFolderId::new(999).expect("positive id")))
+                .is_empty()
+        );
+    }
+}
+

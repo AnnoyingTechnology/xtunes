@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
-use xtunes_app_runtime::{PlaybackCommand, Rating, TrackId};
+use xtunes_app_runtime::{PlaybackCommand, Playlist, PlaylistEntry, PlaylistItem, Rating, Track, TrackId};
 
 use super::{
     APP_ID, ApplicationCommand, ApplicationRuntime, LibraryChangedCallback, LibraryChangedHolder,
@@ -19,7 +19,7 @@ use super::{
     mode_bar::build_mode_bar,
     now_playing::NowPlayingView,
     preferences::install_preferences_action,
-    sidebar::{build_content_area, build_sidebar},
+    sidebar::{PlaylistSidebar, build_content_area},
     status_bar::StatusBar,
     titlebar::{
         Titlebar, build_titlebar, connect_titlebar_playback_controls, sync_play_pause_icon,
@@ -85,8 +85,9 @@ pub(crate) fn build_main_window(
     root.set_vexpand(true);
     root.set_overflow(gtk::Overflow::Hidden);
 
-    let sidebar = build_sidebar();
-    sidebar.set_visible(false);
+    let sidebar = PlaylistSidebar::new(runtime.clone());
+    let sidebar_widget = sidebar.widget();
+    sidebar_widget.set_visible(false);
 
     let track_activated = track_activated_callback(&command_controller, playback_changed.clone());
     let library_changed_holder: LibraryChangedHolder = Rc::new(RefCell::new(None));
@@ -112,15 +113,30 @@ pub(crate) fn build_main_window(
         playback_changed.clone(),
         context_menu.clone(),
     );
+    let playlists_table = build_track_table(
+        Vec::new(),
+        Some(track_activated.clone()),
+        Some(context_menu.clone()),
+        None,
+    );
     playback_changed();
     let content_stack = build_content_stack(
         songs_table.widget(),
         albums_view.widget(),
-        track_activated,
-        context_menu,
+        playlists_table.widget(),
     );
-    let library_changed =
-        library_changed_callback(&runtime, &songs_table, &albums_view, &status_bar);
+    let library_changed = library_changed_callback(
+        &runtime,
+        &songs_table,
+        &albums_view,
+        &playlists_table,
+        &sidebar,
+        &status_bar,
+    );
+    sidebar.set_selection_changed(sidebar_selection_changed_callback(
+        &runtime,
+        &playlists_table,
+    ));
     library_changed_holder.replace(Some(library_changed.clone()));
     let scan_requested =
         library_scan_requested_callback(&runtime, library_changed.clone(), &status_bar);
@@ -136,14 +152,14 @@ pub(crate) fn build_main_window(
     main_content.set_vexpand(true);
     main_content.append(&build_mode_bar(
         &window,
-        &sidebar,
+        &sidebar_widget,
         &content_stack,
         command_controller,
         scan_requested,
     ));
     main_content.append(&content_stack);
 
-    let content_area = build_content_area(&sidebar, &main_content);
+    let content_area = build_content_area(&sidebar_widget, &main_content);
 
     root.append(&titlebar.widget);
     root.append(&content_area);
@@ -168,11 +184,15 @@ fn library_changed_callback(
     runtime: &SharedRuntime,
     songs_table: &TrackTable,
     albums_view: &AlbumsView,
+    playlists_table: &TrackTable,
+    sidebar: &PlaylistSidebar,
     status_bar: &StatusBar,
 ) -> LibraryChangedCallback {
     let runtime = runtime.clone();
     let songs_table = songs_table.clone();
     let albums_view = albums_view.clone();
+    let playlists_table = playlists_table.clone();
+    let sidebar = sidebar.clone();
     let status_bar = status_bar.clone();
 
     Rc::new(move || {
@@ -180,6 +200,23 @@ fn library_changed_callback(
         songs_table.replace_rows(rows.clone());
         albums_view.replace_tracks(runtime.borrow().library_tracks().to_vec());
         status_bar.update_summary(&rows);
+        sidebar.refresh();
+        let playlist_rows =
+            playlist_table_rows_for(&runtime.borrow(), sidebar.current_selection());
+        playlists_table.replace_rows(playlist_rows);
+    })
+}
+
+fn sidebar_selection_changed_callback(
+    runtime: &SharedRuntime,
+    playlists_table: &TrackTable,
+) -> super::sidebar::SidebarSelectionChangedCallback {
+    let runtime = runtime.clone();
+    let playlists_table = playlists_table.clone();
+
+    Rc::new(move |selection| {
+        let rows = playlist_table_rows_for(&runtime.borrow(), selection);
+        playlists_table.replace_rows(rows);
     })
 }
 
@@ -190,6 +227,38 @@ fn runtime_library_table_rows(runtime: &ApplicationRuntime) -> Vec<TrackTableRow
         .iter()
         .map(|track| TrackTableRow::from_track(track, library_root))
         .collect()
+}
+
+fn playlist_table_rows_for(
+    runtime: &ApplicationRuntime,
+    selection: Option<PlaylistItem>,
+) -> Vec<TrackTableRow> {
+    let Some(PlaylistItem::Playlist(playlist_id)) = selection else {
+        return Vec::new();
+    };
+    let Some(playlist) = runtime
+        .playlists()
+        .iter()
+        .find(|playlist| playlist.id == playlist_id)
+    else {
+        return Vec::new();
+    };
+    let library_root = runtime.settings().library_path();
+    let tracks_by_id: HashMap<TrackId, &Track> = runtime
+        .library_tracks()
+        .iter()
+        .map(|track| (track.id, track))
+        .collect();
+    playlist_entries_in_order(playlist)
+        .filter_map(|track_id| tracks_by_id.get(&track_id).copied())
+        .map(|track| TrackTableRow::from_track(track, library_root))
+        .collect()
+}
+
+fn playlist_entries_in_order(playlist: &Playlist) -> impl Iterator<Item = TrackId> + '_ {
+    let mut ordered: Vec<&PlaylistEntry> = playlist.entries.iter().collect();
+    ordered.sort_by_key(|entry| entry.position);
+    ordered.into_iter().map(|entry| entry.track_id)
 }
 
 fn playback_changed_callback(
