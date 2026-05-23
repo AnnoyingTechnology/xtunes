@@ -3,7 +3,7 @@
 This is a prioritized refactor list for the next feature wave: real shuffle and
 repeat behavior, richer preferences, larger track context menus, regular
 playlists, smart playlists, a tabbed File Info panel/window for richer metadata
-editing, and the remaining items in `PLAN.md`.
+editing, managed library organization, and the remaining items in `PLAN.md`.
 
 The current codebase does not need a rewrite. The core crate boundaries are
 still sound: domain, runtime, store, metadata, playback, settings, and GTK UI are
@@ -212,8 +212,8 @@ Acceptance criteria:
 
 Regular playlist commands now run through app-runtime and `LibraryStore`, with
 tests for create, rename, delete, add, remove, move, and playlist query
-ordering. Smart playlists still need their domain/store rule model before UI is
-added.
+ordering. Smart playlist domain scaffolding now exists; store persistence, rule
+evaluation, runtime commands, and UI remain future work.
 
 Scope:
 
@@ -229,6 +229,8 @@ Acceptance criteria:
 
 - Playlist sidebar and context-menu "add to playlist" actions are backed by real
   runtime commands and tests.
+- Dragging tracks to playlist sidebar rows dispatches playlist commands instead
+  of mutating GTK-only row state.
 - Smart playlist rules can be saved, loaded, and evaluated without UI-specific
   logic.
 
@@ -322,7 +324,35 @@ These are valuable, but they should follow the command, playback, rating,
 playlist, and UI-controller work unless a touched feature naturally requires
 them.
 
-### 12. Extract and centralize app CSS - Done
+### 12. Prepare library organization mode
+
+Settings will need a "Keep my library organized" checkbox. This is not just UI
+state: it means newly added tracks become managed by xTunes and are moved into a
+clean metadata-derived path under the library root, such as
+artist/album/track.ext.
+
+Scope:
+
+- Add an explicit library management setting under grouped library settings.
+- Introduce a tested path planner for managed files before adding the checkbox.
+- Decide the exact path contract with maintainer validation: fallbacks for
+  missing artist/album/title, track/disc numbering, extension preservation,
+  Unicode/forbidden-character handling, max filename length, and collision
+  resolution.
+- Move files through one application command path shared by file chooser,
+  file-manager drops, and future import flows.
+- Perform filesystem movement before updating SQLite/runtime cache state.
+- Do not reorganize the existing library just because the setting is toggled;
+  that belongs to a later explicit consolidate/reorganize command.
+
+Acceptance criteria:
+
+- Managed-add tests cover path planning, collision resolution, successful moves,
+  failed moves, and missing metadata fallbacks.
+- A failed move leaves the store/runtime pointing at the original valid file.
+- The preferences checkbox is not surfaced until the behavior behind it exists.
+
+### 13. Extract and centralize app CSS - Done
 
 Custom CSS is currently installed from a large string in `ui_gtk/src/lib.rs`.
 Theme behavior is important for xTunes, and this will become harder to audit as
@@ -343,7 +373,7 @@ Acceptance criteria:
 - Theme CSS can be reviewed without reading window construction code.
 - New custom surfaces have explicit light/dark behavior.
 
-### 13. Share artwork and palette caching
+### 14. Share artwork and palette caching
 
 Album view and now-playing both read artwork. `PLAN.md` calls for shared
 dominant-color detection so album detail surfaces and now-playing artwork use
@@ -353,6 +383,9 @@ Scope:
 
 - Add an artwork cache/service at runtime or a dedicated UI data layer.
 - Store decoded texture/palette results per track or path.
+- Extract two artwork-derived colors: a primary artwork color and a contrasting
+  secondary artwork color for album accents. Keep readable text/icon foreground
+  as a separate derived value, not as the secondary artwork color.
 - Keep metadata reading off the hot UI path where possible.
 
 Acceptance criteria:
@@ -360,9 +393,9 @@ Acceptance criteria:
 - Album view and now-playing do not duplicate artwork decoding or palette
   calculation.
 - Non-square artwork gutter coloring and album detail palettes consume the same
-  palette data.
+  palette data, including secondary artwork accents where needed.
 
-### 14. Split now-playing internals - Started
+### 15. Split now-playing internals - Started
 
 `now_playing.rs` contains playback controls, progress seeking, artwork loading,
 marquee text, option buttons, and layout. It can support the current UI, but
@@ -384,7 +417,7 @@ Acceptance criteria:
 - Player behavior changes do not require editing marquee rendering code.
 - Future artwork zoom/lyrics work has a clear home.
 
-### 15. Split album view when album work resumes
+### 16. Split album view when album work resumes
 
 `albums.rs` is sizable, but album view is explicitly secondary to the Songs
 table right now. It should be split when album features are next touched.
@@ -423,6 +456,14 @@ Acceptance criteria:
 10. Runtime foundation done: metadata updates share the durable command path.
 11. Remaining feature foundation: add smart playlist domain/store/query support.
 12. Core done: reshape settings/preferences for multiple sections.
-13. Done: extract CSS. Remaining: shared artwork/palette caching.
-14. Started: split now-playing pure model behavior; split rendering/control
+13. Remaining feature foundation: prepare managed library organization mode.
+14. Done: extract CSS. Remaining: shared artwork/palette caching.
+15. Started: split now-playing pure model behavior; split rendering/control
     submodules further as touched.
+
+## Next-Agent Handoff
+
+`FEATURE_HANDOFF.md` contains the concise implementation map for the remaining
+feature skeletons: smart playlists, playlist UI completion, library
+organization mode, File Info, shared artwork/palette caching, and the follow-up
+GTK splits.
