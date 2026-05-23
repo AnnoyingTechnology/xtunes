@@ -171,7 +171,8 @@ impl SqliteLibraryStore {
                     musical_key TEXT,
                     comments TEXT,
                     sample_rate_hz INTEGER,
-                    channels INTEGER
+                    channels INTEGER,
+                    lyrics TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS playlist_folders (
@@ -356,12 +357,13 @@ impl LibraryStore for SqliteLibraryStore {
                     musical_key,
                     comments,
                     sample_rate_hz,
-                    channels
+                    channels,
+                    lyrics
                 )
                 VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                     ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-                    ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29
+                    ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     relative_path = excluded.relative_path,
@@ -391,7 +393,8 @@ impl LibraryStore for SqliteLibraryStore {
                     musical_key = excluded.musical_key,
                     comments = excluded.comments,
                     sample_rate_hz = excluded.sample_rate_hz,
-                    channels = excluded.channels
+                    channels = excluded.channels,
+                    lyrics = excluded.lyrics
                 "#,
                 params![
                     track.id.get(),
@@ -423,6 +426,7 @@ impl LibraryStore for SqliteLibraryStore {
                     metadata.comments,
                     metadata.sample_rate_hz.map(i64::from),
                     metadata.channels.map(i64::from),
+                    metadata.lyrics,
                 ],
             )
             .map(|_| ())
@@ -470,7 +474,8 @@ impl LibraryStore for SqliteLibraryStore {
                     musical_key,
                     comments,
                     sample_rate_hz,
-                    channels
+                    channels,
+                    lyrics
                 FROM tracks
                 WHERE id = ?1
                 "#,
@@ -520,7 +525,8 @@ impl LibraryStore for SqliteLibraryStore {
                     musical_key,
                     comments,
                     sample_rate_hz,
-                    channels
+                    channels,
+                    lyrics
                 FROM tracks
                 ORDER BY id
                 "#,
@@ -918,6 +924,7 @@ fn track_from_row(row: &Row<'_>) -> StoreResult<Track> {
             bitrate_kbps: optional_u32(row, 12)?,
             sample_rate_hz: optional_u32(row, 27)?,
             channels: optional_u8(row, 28)?,
+            lyrics: row.get(29).map_err(StoreError::from)?,
         },
         rating: Rating::new(rating_value as u8).unwrap_or_else(Rating::unrated),
         statistics: PlayStatistics {

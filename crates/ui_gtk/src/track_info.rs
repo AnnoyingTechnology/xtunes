@@ -84,6 +84,9 @@ pub(crate) fn open_track_info_dialog(
     let artwork = build_artwork_page(&artwork_bytes);
     stack.add_titled(&artwork, Some("artwork"), "Artwork");
 
+    let lyrics = LyricsPage::new(&initial_metadata);
+    stack.add_titled(&lyrics.widget, Some("lyrics"), "Lyrics");
+
     let file_page = build_file_page(&track, absolute_path.as_deref());
     stack.add_titled(&file_page, Some("file"), "File");
 
@@ -126,8 +129,10 @@ pub(crate) fn open_track_info_dialog(
     let library_changed_holder = library_changed_holder.clone();
     let window_for_ok = window.clone();
     let details_for_ok = details.clone();
+    let lyrics_for_ok = lyrics.clone();
     ok.connect_clicked(move |_| {
-        let change = details_for_ok.metadata_diff(&initial_metadata);
+        let mut change = details_for_ok.metadata_diff(&initial_metadata);
+        change.lyrics = lyrics_for_ok.lyrics_diff(&initial_metadata);
         let new_rating = details_for_ok.current_rating();
         let reset_clicked = details_for_ok.play_count_reset_requested();
 
@@ -407,6 +412,7 @@ impl DetailsPage {
                 initial.comments.as_deref(),
                 &self.text_view_text(&self.comments),
             ),
+            lyrics: FieldChange::Unchanged,
         }
     }
 
@@ -421,6 +427,46 @@ impl DetailsPage {
     fn text_view_text(&self, view: &gtk::TextView) -> glib::GString {
         let buffer = view.buffer();
         buffer.text(&buffer.start_iter(), &buffer.end_iter(), false)
+    }
+}
+
+#[derive(Clone)]
+struct LyricsPage {
+    widget: gtk::ScrolledWindow,
+    view: gtk::TextView,
+}
+
+impl LyricsPage {
+    fn new(initial: &TrackMetadata) -> Self {
+        let view = gtk::TextView::new();
+        view.add_css_class("track-info-lyrics-view");
+        view.set_wrap_mode(gtk::WrapMode::WordChar);
+        view.set_accepts_tab(false);
+        view.set_top_margin(8);
+        view.set_bottom_margin(8);
+        view.set_left_margin(8);
+        view.set_right_margin(8);
+        if let Some(text) = initial.lyrics.as_deref() {
+            view.buffer().set_text(text);
+        }
+
+        let widget = gtk::ScrolledWindow::new();
+        widget.add_css_class("track-info-lyrics");
+        widget.set_margin_top(10);
+        widget.set_hexpand(true);
+        widget.set_vexpand(true);
+        widget.set_min_content_height(280);
+        widget.set_propagate_natural_height(false);
+        widget.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        widget.set_child(Some(&view));
+
+        Self { widget, view }
+    }
+
+    fn lyrics_diff(&self, initial: &TrackMetadata) -> FieldChange<String> {
+        let buffer = self.view.buffer();
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+        text_diff_preserve_newlines(initial.lyrics.as_deref(), &text)
     }
 }
 
@@ -643,6 +689,19 @@ fn text_diff(initial: Option<&str>, current: &str) -> FieldChange<String> {
     }
 }
 
+/// Like `text_diff` but preserves internal whitespace (newlines, indentation).
+/// Used for free-form prose fields like lyrics where formatting matters.
+/// Empty/whitespace-only buffers still clear the tag.
+fn text_diff_preserve_newlines(initial: Option<&str>, current: &str) -> FieldChange<String> {
+    let trimmed = current.trim();
+    match (initial, trimmed) {
+        (None, "") => FieldChange::Unchanged,
+        (_, "") => FieldChange::Clear,
+        (Some(value), _) if value == current => FieldChange::Unchanged,
+        _ => FieldChange::Set(current.to_owned()),
+    }
+}
+
 fn number_diff(initial: Option<u32>, current: &str) -> FieldChange<u32> {
     let trimmed = current.trim();
     if trimmed.is_empty() {
@@ -822,7 +881,7 @@ mod tests {
     use super::{
         bool_diff, format_channels, format_duration_label, format_kind, format_sample_rate,
         format_size_label, next_rating, number_diff, signed_number_diff, text_diff,
-        unix_seconds_to_ymdhm,
+        text_diff_preserve_newlines, unix_seconds_to_ymdhm,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -918,6 +977,26 @@ mod tests {
         assert_eq!(format_channels(Some(2)), "Stereo");
         assert_eq!(format_channels(Some(6)), "6 channels");
         assert_eq!(format_channels(None), "\u{2014}");
+    }
+
+    #[test]
+    fn text_diff_preserve_newlines_keeps_internal_whitespace() {
+        assert_eq!(
+            text_diff_preserve_newlines(None, "line one\n\nline two"),
+            FieldChange::Set("line one\n\nline two".to_owned())
+        );
+        assert_eq!(
+            text_diff_preserve_newlines(Some("a\nb"), "a\nb"),
+            FieldChange::Unchanged
+        );
+        assert_eq!(
+            text_diff_preserve_newlines(Some("a\nb"), "  \n  \n"),
+            FieldChange::Clear
+        );
+        assert_eq!(
+            text_diff_preserve_newlines(None, ""),
+            FieldChange::Unchanged
+        );
     }
 
     #[test]

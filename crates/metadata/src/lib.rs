@@ -199,6 +199,9 @@ impl MetadataService for LoftyMetadataService {
                 .and_then(|tag| tag.get_string(ItemKey::InitialKey))
                 .map(ToOwned::to_owned),
             comments: tag.and_then(|tag| tag.comment().map(|value| value.into_owned())),
+            lyrics: tag
+                .and_then(|tag| tag.get_string(ItemKey::Lyrics))
+                .map(ToOwned::to_owned),
             duration: Some(properties.duration()),
             bitrate_kbps: properties.audio_bitrate().or(properties.overall_bitrate()),
             sample_rate_hz: properties.sample_rate(),
@@ -230,6 +233,7 @@ impl MetadataService for LoftyMetadataService {
         apply_number_change(tag, ItemKey::Bpm, change.bpm);
         apply_text_change(tag, ItemKey::InitialKey, change.key);
         apply_text_change(tag, ItemKey::Comment, change.comments);
+        apply_text_change(tag, ItemKey::Lyrics, change.lyrics);
 
         tagged_file
             .save_to_path(path, WriteOptions::default())

@@ -21,6 +21,7 @@ pub struct TrackMetadata {
     pub bpm: Option<u32>,
     pub key: Option<String>,
     pub comments: Option<String>,
+    pub lyrics: Option<String>,
     pub duration: Option<Duration>,
     pub bitrate_kbps: Option<u32>,
     pub sample_rate_hz: Option<u32>,
@@ -45,6 +46,7 @@ impl TrackMetadata {
         apply_field_change(&mut self.bpm, &change.bpm);
         apply_field_change(&mut self.key, &change.key);
         apply_field_change(&mut self.comments, &change.comments);
+        apply_field_change(&mut self.lyrics, &change.lyrics);
     }
 }
 
@@ -74,6 +76,7 @@ pub struct MetadataChange {
     pub bpm: FieldChange<u32>,
     pub key: FieldChange<String>,
     pub comments: FieldChange<String>,
+    pub lyrics: FieldChange<String>,
 }
 
 fn apply_field_change<T: Clone>(target: &mut Option<T>, change: &FieldChange<T>) {
