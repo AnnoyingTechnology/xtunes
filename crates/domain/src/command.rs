@@ -4,7 +4,8 @@
 use std::{path::PathBuf, time::Duration};
 
 use crate::{
-    LibraryQuery, MetadataChange, PlaybackCommand, PlaylistId, Rating, TrackId, UserSettings,
+    LibraryQuery, MetadataChange, PlaybackCommand, PlaylistFolderId, PlaylistId, PlaylistItem,
+    Rating, SmartPlaylistId, SmartPlaylistRuleSet, TrackId, UserSettings,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -16,6 +17,7 @@ pub enum ApplicationCommand {
     },
     CreatePlaylist {
         name: String,
+        parent_folder_id: Option<PlaylistFolderId>,
     },
     RenamePlaylist {
         playlist_id: PlaylistId,
@@ -36,6 +38,35 @@ pub enum ApplicationCommand {
         playlist_id: PlaylistId,
         track_id: TrackId,
         new_position: u32,
+    },
+    CreatePlaylistFolder {
+        name: String,
+        parent_folder_id: Option<PlaylistFolderId>,
+    },
+    RenamePlaylistFolder {
+        folder_id: PlaylistFolderId,
+        name: String,
+    },
+    DeletePlaylistFolder {
+        folder_id: PlaylistFolderId,
+    },
+    CreateSmartPlaylist {
+        name: String,
+        parent_folder_id: Option<PlaylistFolderId>,
+        rules: SmartPlaylistRuleSet,
+    },
+    UpdateSmartPlaylist {
+        smart_playlist_id: SmartPlaylistId,
+        name: String,
+        rules: SmartPlaylistRuleSet,
+    },
+    DeleteSmartPlaylist {
+        smart_playlist_id: SmartPlaylistId,
+    },
+    MovePlaylistItem {
+        item: PlaylistItem,
+        target_parent_folder_id: Option<PlaylistFolderId>,
+        position: u32,
     },
     UpdateMetadata {
         track_id: TrackId,

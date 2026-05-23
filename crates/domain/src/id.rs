@@ -40,9 +40,22 @@ impl SmartPlaylistId {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PlaylistFolderId(i64);
+
+impl PlaylistFolderId {
+    pub const fn new(value: i64) -> Option<Self> {
+        if value > 0 { Some(Self(value)) } else { None }
+    }
+
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PlaylistId, SmartPlaylistId, TrackId};
+    use super::{PlaylistFolderId, PlaylistId, SmartPlaylistId, TrackId};
 
     #[test]
     fn track_ids_must_be_positive() {
@@ -63,5 +76,12 @@ mod tests {
         assert_eq!(SmartPlaylistId::new(-1), None);
         assert_eq!(SmartPlaylistId::new(0), None);
         assert_eq!(SmartPlaylistId::new(1).map(SmartPlaylistId::get), Some(1));
+    }
+
+    #[test]
+    fn playlist_folder_ids_must_be_positive() {
+        assert_eq!(PlaylistFolderId::new(-1), None);
+        assert_eq!(PlaylistFolderId::new(0), None);
+        assert_eq!(PlaylistFolderId::new(1).map(PlaylistFolderId::get), Some(1));
     }
 }

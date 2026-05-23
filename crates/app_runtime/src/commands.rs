@@ -41,8 +41,11 @@ impl ApplicationRuntime {
             ApplicationCommand::SetRating { track_id, rating } => {
                 self.set_rating(track_id, rating)?;
             }
-            ApplicationCommand::CreatePlaylist { name } => {
-                self.create_playlist(name)?;
+            ApplicationCommand::CreatePlaylist {
+                name,
+                parent_folder_id,
+            } => {
+                self.create_playlist(name, parent_folder_id)?;
             }
             ApplicationCommand::RenamePlaylist { playlist_id, name } => {
                 self.rename_playlist(playlist_id, name)?;
@@ -68,6 +71,42 @@ impl ApplicationRuntime {
                 new_position,
             } => {
                 self.move_playlist_entry(playlist_id, track_id, new_position)?;
+            }
+            ApplicationCommand::CreatePlaylistFolder {
+                name,
+                parent_folder_id,
+            } => {
+                self.create_playlist_folder(name, parent_folder_id)?;
+            }
+            ApplicationCommand::RenamePlaylistFolder { folder_id, name } => {
+                self.rename_playlist_folder(folder_id, name)?;
+            }
+            ApplicationCommand::DeletePlaylistFolder { folder_id } => {
+                self.delete_playlist_folder(folder_id)?;
+            }
+            ApplicationCommand::CreateSmartPlaylist {
+                name,
+                parent_folder_id,
+                rules,
+            } => {
+                self.create_smart_playlist(name, parent_folder_id, rules)?;
+            }
+            ApplicationCommand::UpdateSmartPlaylist {
+                smart_playlist_id,
+                name,
+                rules,
+            } => {
+                self.update_smart_playlist(smart_playlist_id, name, rules)?;
+            }
+            ApplicationCommand::DeleteSmartPlaylist { smart_playlist_id } => {
+                self.delete_smart_playlist(smart_playlist_id)?;
+            }
+            ApplicationCommand::MovePlaylistItem {
+                item,
+                target_parent_folder_id,
+                position,
+            } => {
+                self.move_playlist_item(item, target_parent_folder_id, position)?;
             }
             ApplicationCommand::UpdateMetadata { track_id, change } => {
                 self.update_metadata(track_id, change)?;

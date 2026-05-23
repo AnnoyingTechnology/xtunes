@@ -130,8 +130,24 @@ pub(crate) fn runtime_error_text(error: &ApplicationRuntimeError) -> &'static st
         ApplicationRuntimeError::LibraryStoreFailed => "The library database could not be updated.",
         ApplicationRuntimeError::MetadataWriteFailed => "The track metadata could not be updated.",
         ApplicationRuntimeError::InvalidPlaylistName => "The playlist name is not valid.",
+        ApplicationRuntimeError::InvalidPlaylistFolderName => "The folder name is not valid.",
+        ApplicationRuntimeError::InvalidSmartPlaylistName => {
+            "The smart playlist name is not valid."
+        }
+        ApplicationRuntimeError::InvalidSmartPlaylistRules => {
+            "A smart playlist needs at least one rule."
+        }
         ApplicationRuntimeError::PlaylistEntryNotFound
         | ApplicationRuntimeError::PlaylistNotFound => "The playlist could not be updated.",
+        ApplicationRuntimeError::PlaylistFolderNotFound => {
+            "The playlist folder could not be updated."
+        }
+        ApplicationRuntimeError::PlaylistFolderWouldCycle => {
+            "A folder cannot be moved inside itself."
+        }
+        ApplicationRuntimeError::SmartPlaylistNotFound => {
+            "The smart playlist could not be updated."
+        }
         ApplicationRuntimeError::SettingsLoadFailed
         | ApplicationRuntimeError::SettingsSaveFailed => "The library path could not be saved.",
         ApplicationRuntimeError::PlaybackFailed
@@ -236,6 +252,7 @@ mod tests {
             runtime_error_text(&ApplicationRuntimeError::UnsupportedCommand(
                 super::super::ApplicationCommand::CreatePlaylist {
                     name: "Test".to_owned(),
+                    parent_folder_id: None,
                 }
             )),
             "This action is not available yet."

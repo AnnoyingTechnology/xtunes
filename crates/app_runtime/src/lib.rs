@@ -11,8 +11,12 @@ use std::{
 pub use xtunes_domain::{
     ApplicationCommand, ApplicationQuery, LibrarySettings, PlayStatistics, PlaybackCommand,
     PlaybackOptions, PlaybackQueue, PlaybackQueueSource, PlaybackState, Playlist, PlaylistEntry,
-    PlaylistId, Rating, RepeatMode, Track, TrackAvailability, TrackId, TrackLocation,
-    TrackMetadata, TrackPlaybackSource, TrackRelativePath, UserSettings, VolumePercent,
+    PlaylistFolder, PlaylistFolderId, PlaylistId, PlaylistItem, Rating, RepeatMode, SmartPlaylist,
+    SmartPlaylistDateField, SmartPlaylistId, SmartPlaylistLimit, SmartPlaylistLimitSelection,
+    SmartPlaylistMatchKind, SmartPlaylistNumberField, SmartPlaylistNumberOperator,
+    SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField, SmartPlaylistTextOperator,
+    Track, TrackAvailability, TrackId, TrackLocation, TrackMetadata, TrackPlaybackSource,
+    TrackRelativePath, UserSettings, VolumePercent,
 };
 use xtunes_library_store::LibraryStore;
 use xtunes_metadata::MetadataService;
@@ -23,7 +27,10 @@ mod commands;
 mod library_mutation;
 mod library_scan;
 mod playback;
+mod playlist_folders;
+mod playlist_items;
 mod playlists;
+mod smart_playlists;
 
 pub use library_scan::run_library_scan_task;
 
@@ -36,11 +43,17 @@ pub enum ApplicationRuntimeError {
     LibraryStoreFailed,
     MetadataWriteFailed,
     InvalidPlaylistName,
+    InvalidPlaylistFolderName,
+    InvalidSmartPlaylistName,
+    InvalidSmartPlaylistRules,
     BackgroundTaskRunning,
     PlaybackFailed,
     PlaybackServiceUnavailable,
     PlaylistEntryNotFound,
     PlaylistNotFound,
+    PlaylistFolderNotFound,
+    PlaylistFolderWouldCycle,
+    SmartPlaylistNotFound,
     SettingsLoadFailed,
     SettingsSaveFailed,
     TrackUnavailable,
@@ -102,6 +115,8 @@ pub struct ApplicationRuntime {
     playback_queue: PlaybackQueue,
     library_tracks: Vec<Track>,
     playlists: Vec<Playlist>,
+    playlist_folders: Vec<PlaylistFolder>,
+    smart_playlists: Vec<SmartPlaylist>,
     last_scan_library_path: Option<PathBuf>,
     last_scan_summary: Option<LibraryScanSummary>,
     background_task_status: BackgroundTaskStatus,
@@ -118,6 +133,8 @@ impl ApplicationRuntime {
             playback_queue: PlaybackQueue::default(),
             library_tracks: Vec::new(),
             playlists: Vec::new(),
+            playlist_folders: Vec::new(),
+            smart_playlists: Vec::new(),
             last_scan_library_path: None,
             last_scan_summary: None,
             background_task_status: BackgroundTaskStatus::Idle,
@@ -140,6 +157,8 @@ impl ApplicationRuntime {
             playback_queue: PlaybackQueue::default(),
             library_tracks: Vec::new(),
             playlists: Vec::new(),
+            playlist_folders: Vec::new(),
+            smart_playlists: Vec::new(),
             last_scan_library_path: None,
             last_scan_summary: None,
             background_task_status: BackgroundTaskStatus::Idle,
@@ -167,6 +186,12 @@ impl ApplicationRuntime {
         self.playlists = library_store
             .playlists()
             .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
+        self.playlist_folders = library_store
+            .playlist_folders()
+            .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
+        self.smart_playlists = library_store
+            .smart_playlists()
+            .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
         self.library_store = Some(library_store);
         self.metadata_service = Some(metadata_service);
         Ok(())
@@ -187,6 +212,14 @@ impl ApplicationRuntime {
 
     pub fn playlists(&self) -> &[Playlist] {
         &self.playlists
+    }
+
+    pub fn playlist_folders(&self) -> &[PlaylistFolder] {
+        &self.playlist_folders
+    }
+
+    pub fn smart_playlists(&self) -> &[SmartPlaylist] {
+        &self.smart_playlists
     }
 
     pub fn last_scan_library_path(&self) -> Option<&Path> {
@@ -257,7 +290,9 @@ mod tests {
 
     use xtunes_domain::{
         ApplicationCommand, FieldChange, PlayStatistics, PlaybackCommand, PlaybackOptions,
-        PlaybackState, Playlist, PlaylistId, Rating, RepeatMode, Track, TrackId, TrackLocation,
+        PlaybackState, Playlist, PlaylistFolderId, PlaylistId, PlaylistItem, Rating, RepeatMode,
+        SmartPlaylistId, SmartPlaylistMatchKind, SmartPlaylistRule, SmartPlaylistRuleSet,
+        SmartPlaylistTextField, SmartPlaylistTextOperator, Track, TrackId, TrackLocation,
         TrackMetadata, UserSettings, VolumePercent,
     };
     use xtunes_library_store::{InMemoryLibraryStore, LibraryStore, StoreResult};
@@ -350,6 +385,7 @@ mod tests {
             (
                 ApplicationCommand::CreatePlaylist {
                     name: "Favorites".to_owned(),
+                    parent_folder_id: None,
                 },
                 Err(ApplicationRuntimeError::LibraryServicesUnavailable),
             ),
@@ -383,6 +419,56 @@ mod tests {
                     playlist_id,
                     track_id,
                     new_position: 2,
+                },
+                Err(ApplicationRuntimeError::LibraryServicesUnavailable),
+            ),
+            (
+                ApplicationCommand::CreatePlaylistFolder {
+                    name: "Mixes".to_owned(),
+                    parent_folder_id: None,
+                },
+                Err(ApplicationRuntimeError::LibraryServicesUnavailable),
+            ),
+            (
+                ApplicationCommand::RenamePlaylistFolder {
+                    folder_id: folder_id(1),
+                    name: "Renamed".to_owned(),
+                },
+                Err(ApplicationRuntimeError::LibraryServicesUnavailable),
+            ),
+            (
+                ApplicationCommand::DeletePlaylistFolder {
+                    folder_id: folder_id(1),
+                },
+                Err(ApplicationRuntimeError::LibraryServicesUnavailable),
+            ),
+            (
+                ApplicationCommand::CreateSmartPlaylist {
+                    name: "Recent".to_owned(),
+                    parent_folder_id: None,
+                    rules: test_rule_set(),
+                },
+                Err(ApplicationRuntimeError::LibraryServicesUnavailable),
+            ),
+            (
+                ApplicationCommand::UpdateSmartPlaylist {
+                    smart_playlist_id: smart_id(1),
+                    name: "Updated".to_owned(),
+                    rules: test_rule_set(),
+                },
+                Err(ApplicationRuntimeError::LibraryServicesUnavailable),
+            ),
+            (
+                ApplicationCommand::DeleteSmartPlaylist {
+                    smart_playlist_id: smart_id(1),
+                },
+                Err(ApplicationRuntimeError::LibraryServicesUnavailable),
+            ),
+            (
+                ApplicationCommand::MovePlaylistItem {
+                    item: PlaylistItem::Playlist(playlist_id),
+                    target_parent_folder_id: None,
+                    position: 0,
                 },
                 Err(ApplicationRuntimeError::LibraryServicesUnavailable),
             ),
@@ -1128,6 +1214,7 @@ mod tests {
         assert_eq!(
             runtime.handle_command(ApplicationCommand::CreatePlaylist {
                 name: "  Favorites  ".to_owned(),
+                parent_folder_id: None,
             }),
             Ok(())
         );
@@ -1172,6 +1259,8 @@ mod tests {
             store.save_playlist(Playlist {
                 id: playlist_id,
                 name: "Favorites".to_owned(),
+                parent_folder_id: None,
+                position: 0,
                 entries: Vec::new(),
             }),
             Ok(())
@@ -1235,9 +1324,378 @@ mod tests {
         assert_eq!(
             runtime.handle_command(ApplicationCommand::CreatePlaylist {
                 name: "   ".to_owned(),
+                parent_folder_id: None,
             }),
             Err(ApplicationRuntimeError::InvalidPlaylistName)
         );
+    }
+
+    #[test]
+    fn runtime_creates_renames_and_deletes_playlist_folders() {
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store.clone(), Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::CreatePlaylistFolder {
+                name: "  Mixes  ".to_owned(),
+                parent_folder_id: None,
+            }),
+            Ok(())
+        );
+        let folder_id = folder_id(1);
+        assert_eq!(runtime.playlist_folders().len(), 1);
+        assert_eq!(runtime.playlist_folders()[0].name, "Mixes");
+        assert_eq!(runtime.playlist_folders()[0].position, 0);
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::RenamePlaylistFolder {
+                folder_id,
+                name: "Long Drives".to_owned(),
+            }),
+            Ok(())
+        );
+        assert_eq!(runtime.playlist_folders()[0].name, "Long Drives");
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::DeletePlaylistFolder { folder_id }),
+            Ok(())
+        );
+        assert!(runtime.playlist_folders().is_empty());
+        assert_eq!(store.playlist_folder(folder_id), Ok(None));
+    }
+
+    #[test]
+    fn runtime_rejects_blank_playlist_folder_names() {
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::CreatePlaylistFolder {
+                name: "  ".to_owned(),
+                parent_folder_id: None,
+            }),
+            Err(ApplicationRuntimeError::InvalidPlaylistFolderName)
+        );
+    }
+
+    #[test]
+    fn runtime_rejects_creating_folder_under_missing_parent() {
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::CreatePlaylistFolder {
+                name: "Inside".to_owned(),
+                parent_folder_id: Some(folder_id(999)),
+            }),
+            Err(ApplicationRuntimeError::PlaylistFolderNotFound)
+        );
+    }
+
+    #[test]
+    fn deleting_a_folder_cascades_and_reloads_runtime_state() {
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store.clone(), Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+        runtime
+            .handle_command(ApplicationCommand::CreatePlaylistFolder {
+                name: "Mixes".to_owned(),
+                parent_folder_id: None,
+            })
+            .expect("create folder");
+        let folder_id_value = folder_id(1);
+
+        runtime
+            .handle_command(ApplicationCommand::CreatePlaylist {
+                name: "Inside".to_owned(),
+                parent_folder_id: Some(folder_id_value),
+            })
+            .expect("create playlist inside folder");
+        runtime
+            .handle_command(ApplicationCommand::CreateSmartPlaylist {
+                name: "Smart Inside".to_owned(),
+                parent_folder_id: Some(folder_id_value),
+                rules: test_rule_set(),
+            })
+            .expect("create smart playlist inside folder");
+
+        assert_eq!(runtime.playlists().len(), 1);
+        assert_eq!(runtime.smart_playlists().len(), 1);
+
+        runtime
+            .handle_command(ApplicationCommand::DeletePlaylistFolder {
+                folder_id: folder_id_value,
+            })
+            .expect("delete folder cascades");
+
+        assert!(runtime.playlist_folders().is_empty());
+        assert!(runtime.playlists().is_empty());
+        assert!(runtime.smart_playlists().is_empty());
+    }
+
+    #[test]
+    fn runtime_creates_updates_and_deletes_smart_playlists() {
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store.clone(), Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+        runtime
+            .handle_command(ApplicationCommand::CreateSmartPlaylist {
+                name: "Recent".to_owned(),
+                parent_folder_id: None,
+                rules: test_rule_set(),
+            })
+            .expect("create smart playlist");
+        let smart_id_value = smart_id(1);
+        assert_eq!(runtime.smart_playlists().len(), 1);
+        assert_eq!(runtime.smart_playlists()[0].name, "Recent");
+
+        let new_rules = SmartPlaylistRuleSet {
+            match_kind: SmartPlaylistMatchKind::Any,
+            limit: None,
+            rules: vec![SmartPlaylistRule::Text {
+                field: SmartPlaylistTextField::Genre,
+                operator: SmartPlaylistTextOperator::Is,
+                value: "Trip-Hop".to_owned(),
+            }],
+        };
+        runtime
+            .handle_command(ApplicationCommand::UpdateSmartPlaylist {
+                smart_playlist_id: smart_id_value,
+                name: "Renamed".to_owned(),
+                rules: new_rules.clone(),
+            })
+            .expect("update smart playlist");
+        assert_eq!(runtime.smart_playlists()[0].name, "Renamed");
+        assert_eq!(runtime.smart_playlists()[0].rules, new_rules);
+
+        runtime
+            .handle_command(ApplicationCommand::DeleteSmartPlaylist {
+                smart_playlist_id: smart_id_value,
+            })
+            .expect("delete smart playlist");
+        assert!(runtime.smart_playlists().is_empty());
+    }
+
+    #[test]
+    fn runtime_rejects_smart_playlist_without_rules() {
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+        let empty_rules = SmartPlaylistRuleSet {
+            match_kind: SmartPlaylistMatchKind::All,
+            rules: Vec::new(),
+            limit: None,
+        };
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::CreateSmartPlaylist {
+                name: "Empty".to_owned(),
+                parent_folder_id: None,
+                rules: empty_rules,
+            }),
+            Err(ApplicationRuntimeError::InvalidSmartPlaylistRules)
+        );
+    }
+
+    #[test]
+    fn new_siblings_get_distinct_positions_across_types() {
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+        runtime
+            .handle_command(ApplicationCommand::CreatePlaylistFolder {
+                name: "Mixes".to_owned(),
+                parent_folder_id: None,
+            })
+            .expect("folder");
+        runtime
+            .handle_command(ApplicationCommand::CreatePlaylist {
+                name: "Manual".to_owned(),
+                parent_folder_id: None,
+            })
+            .expect("playlist");
+        runtime
+            .handle_command(ApplicationCommand::CreateSmartPlaylist {
+                name: "Smart".to_owned(),
+                parent_folder_id: None,
+                rules: test_rule_set(),
+            })
+            .expect("smart");
+
+        assert_eq!(runtime.playlist_folders()[0].position, 0);
+        assert_eq!(runtime.playlists()[0].position, 1);
+        assert_eq!(runtime.smart_playlists()[0].position, 2);
+    }
+
+    #[test]
+    fn moving_a_playlist_within_its_folder_reorders_siblings() {
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+        for name in ["A", "B", "C"] {
+            runtime
+                .handle_command(ApplicationCommand::CreatePlaylist {
+                    name: name.to_owned(),
+                    parent_folder_id: None,
+                })
+                .expect("create");
+        }
+        let playlist_b_id = runtime
+            .playlists()
+            .iter()
+            .find(|playlist| playlist.name == "B")
+            .map(|playlist| playlist.id)
+            .expect("playlist B exists");
+
+        runtime
+            .handle_command(ApplicationCommand::MovePlaylistItem {
+                item: PlaylistItem::Playlist(playlist_b_id),
+                target_parent_folder_id: None,
+                position: 0,
+            })
+            .expect("move within folder");
+
+        let mut ordered: Vec<&Playlist> = runtime.playlists().iter().collect();
+        ordered.sort_by_key(|playlist| playlist.position);
+        let names: Vec<&str> = ordered
+            .iter()
+            .map(|playlist| playlist.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["B", "A", "C"]);
+    }
+
+    #[test]
+    fn moving_a_playlist_across_folders_resequences_both_sides() {
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+        runtime
+            .handle_command(ApplicationCommand::CreatePlaylistFolder {
+                name: "Folder".to_owned(),
+                parent_folder_id: None,
+            })
+            .expect("folder");
+        let folder = folder_id(1);
+        runtime
+            .handle_command(ApplicationCommand::CreatePlaylist {
+                name: "Top A".to_owned(),
+                parent_folder_id: None,
+            })
+            .expect("top a");
+        runtime
+            .handle_command(ApplicationCommand::CreatePlaylist {
+                name: "Top B".to_owned(),
+                parent_folder_id: None,
+            })
+            .expect("top b");
+        let top_a_id = runtime
+            .playlists()
+            .iter()
+            .find(|playlist| playlist.name == "Top A")
+            .map(|playlist| playlist.id)
+            .expect("Top A exists");
+
+        runtime
+            .handle_command(ApplicationCommand::MovePlaylistItem {
+                item: PlaylistItem::Playlist(top_a_id),
+                target_parent_folder_id: Some(folder),
+                position: 0,
+            })
+            .expect("move into folder");
+
+        let in_folder: Vec<&Playlist> = runtime
+            .playlists()
+            .iter()
+            .filter(|playlist| playlist.parent_folder_id == Some(folder))
+            .collect();
+        assert_eq!(in_folder.len(), 1);
+        assert_eq!(in_folder[0].name, "Top A");
+        assert_eq!(in_folder[0].position, 0);
+
+        let at_top: Vec<&Playlist> = runtime
+            .playlists()
+            .iter()
+            .filter(|playlist| playlist.parent_folder_id.is_none())
+            .collect();
+        assert_eq!(at_top.len(), 1);
+        assert_eq!(at_top[0].name, "Top B");
+        assert_eq!(at_top[0].position, 1);
+        assert_eq!(runtime.playlist_folders()[0].position, 0);
+    }
+
+    #[test]
+    fn moving_a_folder_into_its_own_descendant_is_rejected() {
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+        runtime
+            .handle_command(ApplicationCommand::CreatePlaylistFolder {
+                name: "Outer".to_owned(),
+                parent_folder_id: None,
+            })
+            .expect("outer");
+        let outer = folder_id(1);
+        runtime
+            .handle_command(ApplicationCommand::CreatePlaylistFolder {
+                name: "Inner".to_owned(),
+                parent_folder_id: Some(outer),
+            })
+            .expect("inner");
+        let inner = folder_id(2);
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::MovePlaylistItem {
+                item: PlaylistItem::Folder(outer),
+                target_parent_folder_id: Some(inner),
+                position: 0,
+            }),
+            Err(ApplicationRuntimeError::PlaylistFolderWouldCycle)
+        );
+    }
+
+    fn folder_id(value: i64) -> PlaylistFolderId {
+        match PlaylistFolderId::new(value) {
+            Some(folder_id) => folder_id,
+            None => unreachable!("hard-coded positive folder id should be valid"),
+        }
+    }
+
+    fn smart_id(value: i64) -> SmartPlaylistId {
+        match SmartPlaylistId::new(value) {
+            Some(smart_id) => smart_id,
+            None => unreachable!("hard-coded positive smart-playlist id should be valid"),
+        }
+    }
+
+    fn test_rule_set() -> SmartPlaylistRuleSet {
+        SmartPlaylistRuleSet {
+            match_kind: SmartPlaylistMatchKind::All,
+            rules: vec![SmartPlaylistRule::Text {
+                field: SmartPlaylistTextField::Artist,
+                operator: SmartPlaylistTextOperator::Contains,
+                value: "Portishead".to_owned(),
+            }],
+            limit: None,
+        }
     }
 
     #[derive(Debug)]

@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use crate::{PlaylistId, TrackId};
+use crate::{PlaylistFolderId, PlaylistId, TrackId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Playlist {
     pub id: PlaylistId,
     pub name: String,
+    pub parent_folder_id: Option<PlaylistFolderId>,
+    pub position: u32,
     pub entries: Vec<PlaylistEntry>,
 }
 

@@ -3,27 +3,37 @@
 
 use std::collections::BTreeSet;
 
-use xtunes_domain::{Playlist, PlaylistEntry, PlaylistId, TrackId};
+use xtunes_domain::{Playlist, PlaylistEntry, PlaylistFolderId, PlaylistId, TrackId};
 use xtunes_library_store::LibraryStore;
 
-use crate::{ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult};
+use crate::{
+    ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult, playlist_items,
+};
 
 impl ApplicationRuntime {
-    pub(super) fn create_playlist(&mut self, name: String) -> ApplicationRuntimeResult<()> {
+    pub(super) fn create_playlist(
+        &mut self,
+        name: String,
+        parent_folder_id: Option<PlaylistFolderId>,
+    ) -> ApplicationRuntimeResult<()> {
         let name = normalized_playlist_name(name)?;
         let library_store = self.library_store()?;
+        playlist_items::ensure_parent_folder_exists(library_store, parent_folder_id)?;
+        let position = playlist_items::next_sibling_position(library_store, parent_folder_id)?;
         let playlists = library_store
             .playlists()
             .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
         let playlist = Playlist {
             id: next_playlist_id(&playlists)?,
             name,
+            parent_folder_id,
+            position,
             entries: Vec::new(),
         };
         library_store
             .save_playlist(playlist)
             .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
-        self.reload_playlists()
+        self.reload_playlist_state()
     }
 
     pub(super) fn rename_playlist(
@@ -44,7 +54,7 @@ impl ApplicationRuntime {
         library_store
             .save_playlist(playlist)
             .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
-        self.reload_playlists()
+        self.reload_playlist_state()
     }
 
     pub(super) fn delete_playlist(
@@ -52,18 +62,18 @@ impl ApplicationRuntime {
         playlist_id: PlaylistId,
     ) -> ApplicationRuntimeResult<()> {
         let library_store = self.library_store()?;
-        if library_store
+        let Some(removed) = library_store
             .playlist(playlist_id)
             .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?
-            .is_none()
-        {
+        else {
             return Err(ApplicationRuntimeError::PlaylistNotFound);
-        }
+        };
 
         library_store
             .delete_playlist(playlist_id)
             .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
-        self.reload_playlists()
+        playlist_items::compact_sibling_positions(library_store, removed.parent_folder_id)?;
+        self.reload_playlist_state()
     }
 
     pub(super) fn add_tracks_to_playlist(
@@ -99,7 +109,7 @@ impl ApplicationRuntime {
         library_store
             .save_playlist(playlist)
             .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
-        self.reload_playlists()
+        self.reload_playlist_state()
     }
 
     pub(super) fn remove_tracks_from_playlist(
@@ -124,7 +134,7 @@ impl ApplicationRuntime {
         library_store
             .save_playlist(playlist)
             .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
-        self.reload_playlists()
+        self.reload_playlist_state()
     }
 
     pub(super) fn move_playlist_entry(
@@ -158,21 +168,29 @@ impl ApplicationRuntime {
         library_store
             .save_playlist(playlist)
             .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
-        self.reload_playlists()
+        self.reload_playlist_state()
     }
 
-    fn library_store(&self) -> ApplicationRuntimeResult<&dyn LibraryStore> {
+    pub(crate) fn library_store(&self) -> ApplicationRuntimeResult<&dyn LibraryStore> {
         self.library_store
             .as_deref()
             .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)
     }
 
-    fn reload_playlists(&mut self) -> ApplicationRuntimeResult<()> {
-        let playlists = self
-            .library_store()?
+    pub(crate) fn reload_playlist_state(&mut self) -> ApplicationRuntimeResult<()> {
+        let library_store = self.library_store()?;
+        let playlists = library_store
             .playlists()
             .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
+        let playlist_folders = library_store
+            .playlist_folders()
+            .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
+        let smart_playlists = library_store
+            .smart_playlists()
+            .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
         self.playlists = playlists;
+        self.playlist_folders = playlist_folders;
+        self.smart_playlists = smart_playlists;
         Ok(())
     }
 
@@ -193,7 +211,7 @@ impl ApplicationRuntime {
     }
 }
 
-fn normalized_playlist_name(name: String) -> ApplicationRuntimeResult<String> {
+pub(crate) fn normalized_playlist_name(name: String) -> ApplicationRuntimeResult<String> {
     let name = name.trim().to_owned();
     if name.is_empty() {
         Err(ApplicationRuntimeError::InvalidPlaylistName)

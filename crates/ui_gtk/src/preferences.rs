@@ -298,8 +298,24 @@ fn scan_error_text(error: ApplicationRuntimeError) -> &'static str {
         ApplicationRuntimeError::LibraryStoreFailed => "The library database could not be updated.",
         ApplicationRuntimeError::MetadataWriteFailed => "The track metadata could not be updated.",
         ApplicationRuntimeError::InvalidPlaylistName => "The playlist name is not valid.",
+        ApplicationRuntimeError::InvalidPlaylistFolderName => "The folder name is not valid.",
+        ApplicationRuntimeError::InvalidSmartPlaylistName => {
+            "The smart playlist name is not valid."
+        }
+        ApplicationRuntimeError::InvalidSmartPlaylistRules => {
+            "A smart playlist needs at least one rule."
+        }
         ApplicationRuntimeError::PlaylistEntryNotFound
         | ApplicationRuntimeError::PlaylistNotFound => "The playlist could not be updated.",
+        ApplicationRuntimeError::PlaylistFolderNotFound => {
+            "The playlist folder could not be updated."
+        }
+        ApplicationRuntimeError::PlaylistFolderWouldCycle => {
+            "A folder cannot be moved inside itself."
+        }
+        ApplicationRuntimeError::SmartPlaylistNotFound => {
+            "The smart playlist could not be updated."
+        }
         ApplicationRuntimeError::BackgroundTaskRunning => "A library scan is already running.",
         ApplicationRuntimeError::PlaybackFailed
         | ApplicationRuntimeError::PlaybackServiceUnavailable

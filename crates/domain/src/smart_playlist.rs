@@ -3,12 +3,14 @@
 
 use std::{num::NonZeroU32, time::SystemTime};
 
-use crate::{Rating, SmartPlaylistId};
+use crate::{PlaylistFolderId, Rating, SmartPlaylistId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SmartPlaylist {
     pub id: SmartPlaylistId,
     pub name: String,
+    pub parent_folder_id: Option<PlaylistFolderId>,
+    pub position: u32,
     pub rules: SmartPlaylistRuleSet,
 }
 
@@ -16,7 +18,7 @@ pub struct SmartPlaylist {
 pub struct SmartPlaylistRuleSet {
     pub match_kind: SmartPlaylistMatchKind,
     pub rules: Vec<SmartPlaylistRule>,
-    pub limit: Option<NonZeroU32>,
+    pub limit: Option<SmartPlaylistLimit>,
 }
 
 impl SmartPlaylistRuleSet {
@@ -39,6 +41,29 @@ impl Default for SmartPlaylistRuleSet {
 pub enum SmartPlaylistMatchKind {
     All,
     Any,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SmartPlaylistLimit {
+    pub count: NonZeroU32,
+    pub selection: SmartPlaylistLimitSelection,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SmartPlaylistLimitSelection {
+    Random,
+    AlbumAscending,
+    ArtistAscending,
+    GenreAscending,
+    TitleAscending,
+    HighestRating,
+    LowestRating,
+    MostRecentlyPlayed,
+    LeastRecentlyPlayed,
+    MostOftenPlayed,
+    LeastOftenPlayed,
+    MostRecentlyAdded,
+    LeastRecentlyAdded,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -138,7 +163,12 @@ pub enum SmartPlaylistDateField {
 
 #[cfg(test)]
 mod tests {
-    use super::{SmartPlaylistMatchKind, SmartPlaylistRuleSet};
+    use std::num::NonZeroU32;
+
+    use super::{
+        SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind,
+        SmartPlaylistRuleSet,
+    };
 
     #[test]
     fn rule_sets_default_to_matching_all_rules_without_a_limit() {
@@ -147,5 +177,19 @@ mod tests {
         assert_eq!(rule_set.match_kind, SmartPlaylistMatchKind::All);
         assert!(rule_set.is_empty());
         assert_eq!(rule_set.limit, None);
+    }
+
+    #[test]
+    fn limits_pair_a_positive_count_with_a_selection_method() {
+        let limit = SmartPlaylistLimit {
+            count: NonZeroU32::new(25).expect("positive count"),
+            selection: SmartPlaylistLimitSelection::MostRecentlyAdded,
+        };
+
+        assert_eq!(limit.count.get(), 25);
+        assert_eq!(
+            limit.selection,
+            SmartPlaylistLimitSelection::MostRecentlyAdded
+        );
     }
 }
