@@ -1,15 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use std::{cell::RefCell, num::NonZeroU32, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    num::NonZeroU32,
+    rc::Rc,
+    time::{Duration, SystemTime},
+};
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 
 use xtunes_app_runtime::{
-    ApplicationCommand, SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind,
-    SmartPlaylistNumberField, SmartPlaylistNumberOperator, SmartPlaylistRule,
-    SmartPlaylistRuleSet, SmartPlaylistTextField, SmartPlaylistTextOperator,
+    ApplicationCommand, Rating, SmartPlaylistDateField, SmartPlaylistLimit,
+    SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistNumberField,
+    SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField,
+    SmartPlaylistTextOperator,
 };
 
 use super::{
@@ -21,6 +27,8 @@ use super::{
 enum EditorField {
     Text(SmartPlaylistTextField),
     Number(SmartPlaylistNumberField),
+    Rating,
+    Date(SmartPlaylistDateField),
 }
 
 const EDITOR_FIELDS: &[(EditorField, &str)] = &[
@@ -36,6 +44,11 @@ const EDITOR_FIELDS: &[(EditorField, &str)] = &[
         "Composer",
     ),
     (EditorField::Text(SmartPlaylistTextField::Genre), "Genre"),
+    (
+        EditorField::Text(SmartPlaylistTextField::FileName),
+        "File Name",
+    ),
+    (EditorField::Rating, "Rating"),
     (EditorField::Number(SmartPlaylistNumberField::Year), "Year"),
     (
         EditorField::Number(SmartPlaylistNumberField::PlayCount),
@@ -61,31 +74,138 @@ const EDITOR_FIELDS: &[(EditorField, &str)] = &[
         EditorField::Number(SmartPlaylistNumberField::BitrateKbps),
         "Bitrate (kbps)",
     ),
-];
-
-const TEXT_OPERATORS: &[(SmartPlaylistTextOperator, &str)] = &[
-    (SmartPlaylistTextOperator::Contains, "contains"),
-    (SmartPlaylistTextOperator::DoesNotContain, "does not contain"),
-    (SmartPlaylistTextOperator::Is, "is"),
-    (SmartPlaylistTextOperator::IsNot, "is not"),
-    (SmartPlaylistTextOperator::StartsWith, "starts with"),
-    (SmartPlaylistTextOperator::EndsWith, "ends with"),
-];
-
-const NUMBER_OPERATORS: &[(SmartPlaylistNumberOperator, &str)] = &[
-    (SmartPlaylistNumberOperator::Equal, "is"),
-    (SmartPlaylistNumberOperator::NotEqual, "is not"),
-    (SmartPlaylistNumberOperator::GreaterThan, "is greater than"),
     (
-        SmartPlaylistNumberOperator::GreaterThanOrEqual,
-        "is greater than or equal to",
+        EditorField::Date(SmartPlaylistDateField::DateAdded),
+        "Date Added",
     ),
-    (SmartPlaylistNumberOperator::LessThan, "is less than"),
     (
-        SmartPlaylistNumberOperator::LessThanOrEqual,
-        "is less than or equal to",
+        EditorField::Date(SmartPlaylistDateField::LastPlayed),
+        "Last Played",
+    ),
+    (
+        EditorField::Date(SmartPlaylistDateField::LastSkipped),
+        "Last Skipped",
     ),
 ];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditorOperator {
+    TextContains,
+    TextDoesNotContain,
+    TextIs,
+    TextIsNot,
+    TextStartsWith,
+    TextEndsWith,
+    TextIsEmpty,
+    TextIsPresent,
+    NumberEqual,
+    NumberNotEqual,
+    NumberGreaterThan,
+    NumberGreaterThanOrEqual,
+    NumberLessThan,
+    NumberLessThanOrEqual,
+    DateBefore,
+    DateAfter,
+    DateInLast,
+    DateNotInLast,
+    DateIsEmpty,
+    DateIsPresent,
+}
+
+impl EditorOperator {
+    fn label(self) -> &'static str {
+        match self {
+            Self::TextContains => "contains",
+            Self::TextDoesNotContain => "does not contain",
+            Self::TextIs => "is",
+            Self::TextIsNot => "is not",
+            Self::TextStartsWith => "starts with",
+            Self::TextEndsWith => "ends with",
+            Self::TextIsEmpty => "is empty",
+            Self::TextIsPresent => "is present",
+            Self::NumberEqual => "is",
+            Self::NumberNotEqual => "is not",
+            Self::NumberGreaterThan => "is greater than",
+            Self::NumberGreaterThanOrEqual => "is greater than or equal to",
+            Self::NumberLessThan => "is less than",
+            Self::NumberLessThanOrEqual => "is less than or equal to",
+            Self::DateBefore => "is before",
+            Self::DateAfter => "is after",
+            Self::DateInLast => "is in the last",
+            Self::DateNotInLast => "is not in the last",
+            Self::DateIsEmpty => "is empty",
+            Self::DateIsPresent => "is present",
+        }
+    }
+
+    fn value_kind(self) -> ValueKind {
+        match self {
+            Self::TextContains
+            | Self::TextDoesNotContain
+            | Self::TextIs
+            | Self::TextIsNot
+            | Self::TextStartsWith
+            | Self::TextEndsWith => ValueKind::Text,
+            Self::TextIsEmpty | Self::TextIsPresent => ValueKind::None,
+            Self::NumberEqual
+            | Self::NumberNotEqual
+            | Self::NumberGreaterThan
+            | Self::NumberGreaterThanOrEqual
+            | Self::NumberLessThan
+            | Self::NumberLessThanOrEqual => ValueKind::Number,
+            Self::DateBefore | Self::DateAfter => ValueKind::Date,
+            Self::DateInLast | Self::DateNotInLast => ValueKind::Days,
+            Self::DateIsEmpty | Self::DateIsPresent => ValueKind::None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ValueKind {
+    Text,
+    Number,
+    Rating,
+    Date,
+    Days,
+    None,
+}
+
+const TEXT_OPERATORS: &[EditorOperator] = &[
+    EditorOperator::TextContains,
+    EditorOperator::TextDoesNotContain,
+    EditorOperator::TextIs,
+    EditorOperator::TextIsNot,
+    EditorOperator::TextStartsWith,
+    EditorOperator::TextEndsWith,
+    EditorOperator::TextIsEmpty,
+    EditorOperator::TextIsPresent,
+];
+
+const NUMBER_OPERATORS: &[EditorOperator] = &[
+    EditorOperator::NumberEqual,
+    EditorOperator::NumberNotEqual,
+    EditorOperator::NumberGreaterThan,
+    EditorOperator::NumberGreaterThanOrEqual,
+    EditorOperator::NumberLessThan,
+    EditorOperator::NumberLessThanOrEqual,
+];
+
+const DATE_OPERATORS: &[EditorOperator] = &[
+    EditorOperator::DateBefore,
+    EditorOperator::DateAfter,
+    EditorOperator::DateInLast,
+    EditorOperator::DateNotInLast,
+    EditorOperator::DateIsEmpty,
+    EditorOperator::DateIsPresent,
+];
+
+fn operators_for_field(field: EditorField) -> &'static [EditorOperator] {
+    match field {
+        EditorField::Text(_) => TEXT_OPERATORS,
+        EditorField::Number(_) | EditorField::Rating => NUMBER_OPERATORS,
+        EditorField::Date(_) => DATE_OPERATORS,
+    }
+}
 
 const MATCH_KINDS: &[(SmartPlaylistMatchKind, &str)] = &[
     (SmartPlaylistMatchKind::All, "all"),
@@ -127,11 +247,71 @@ const LIMIT_SELECTIONS: &[(SmartPlaylistLimitSelection, &str)] = &[
 ];
 
 #[derive(Clone)]
+enum ValueWidget {
+    Text(gtk::Entry),
+    Number(gtk::SpinButton),
+    Rating(gtk::SpinButton),
+    Date(gtk::Entry),
+    Days(gtk::SpinButton),
+    None,
+}
+
+impl ValueWidget {
+    fn root(&self) -> Option<gtk::Widget> {
+        match self {
+            Self::Text(entry) => Some(entry.clone().upcast()),
+            Self::Number(spin) => Some(spin.clone().upcast()),
+            Self::Rating(spin) => Some(spin.clone().upcast()),
+            Self::Date(entry) => Some(entry.clone().upcast()),
+            Self::Days(spin) => Some(spin.clone().upcast()),
+            Self::None => None,
+        }
+    }
+
+    fn build(kind: ValueKind) -> Self {
+        match kind {
+            ValueKind::Text => {
+                let entry = gtk::Entry::new();
+                entry.set_hexpand(true);
+                entry.set_placeholder_text(Some("value"));
+                Self::Text(entry)
+            }
+            ValueKind::Number => {
+                let spin = gtk::SpinButton::with_range(0.0, 9_999_999.0, 1.0);
+                spin.set_value(0.0);
+                spin.set_digits(0);
+                Self::Number(spin)
+            }
+            ValueKind::Rating => {
+                let spin = gtk::SpinButton::with_range(0.0, 5.0, 1.0);
+                spin.set_value(0.0);
+                spin.set_digits(0);
+                Self::Rating(spin)
+            }
+            ValueKind::Date => {
+                let entry = gtk::Entry::new();
+                entry.set_placeholder_text(Some("YYYY-MM-DD"));
+                entry.set_max_length(10);
+                entry.set_width_chars(11);
+                Self::Date(entry)
+            }
+            ValueKind::Days => {
+                let spin = gtk::SpinButton::with_range(1.0, 9_999.0, 1.0);
+                spin.set_value(7.0);
+                spin.set_digits(0);
+                Self::Days(spin)
+            }
+            ValueKind::None => Self::None,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct RuleRow {
     container: gtk::Box,
-    field_combo: gtk::DropDown,
-    operator_combo: gtk::DropDown,
-    value_entry: gtk::Entry,
+    current_field: Rc<Cell<EditorField>>,
+    current_operator: Rc<Cell<EditorOperator>>,
+    current_value: Rc<RefCell<ValueWidget>>,
 }
 
 impl RuleRow {
@@ -148,132 +328,376 @@ impl RuleRow {
         let field_combo = gtk::DropDown::new(Some(field_model), gtk::Expression::NONE);
         field_combo.set_selected(0);
 
-        let operator_combo = gtk::DropDown::new(Some(operator_model_for(EDITOR_FIELDS[0].0)), gtk::Expression::NONE);
+        let initial_field = EDITOR_FIELDS[0].0;
+        let initial_operator = operators_for_field(initial_field)[0];
+
+        let operator_combo = gtk::DropDown::new(
+            Some(operator_model_for_field(initial_field)),
+            gtk::Expression::NONE,
+        );
         operator_combo.set_selected(0);
 
-        let value_entry = gtk::Entry::new();
-        value_entry.set_hexpand(true);
-        value_entry.set_placeholder_text(Some("value"));
+        let value_container = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        value_container.set_hexpand(true);
 
-        let operator_combo_clone = operator_combo.clone();
-        field_combo.connect_selected_notify(move |dropdown| {
-            let index = dropdown.selected() as usize;
-            let Some((field, _)) = EDITOR_FIELDS.get(index) else {
-                return;
-            };
-            operator_combo_clone.set_model(Some(&operator_model_for(*field)));
-            operator_combo_clone.set_selected(0);
-        });
+        let days_suffix = gtk::Label::new(Some("days"));
+        days_suffix.set_visible(false);
+
+        let current_field = Rc::new(Cell::new(initial_field));
+        let current_operator = Rc::new(Cell::new(initial_operator));
+        let current_value = Rc::new(RefCell::new(ValueWidget::None));
+
+        install_value_widget(
+            &value_container,
+            &days_suffix,
+            &current_value,
+            initial_field,
+            initial_operator,
+        );
 
         container.append(&field_combo);
         container.append(&operator_combo);
-        container.append(&value_entry);
+        container.append(&value_container);
+        container.append(&days_suffix);
+
+        let operator_combo_for_field = operator_combo.clone();
+        let current_field_for_field = current_field.clone();
+        let current_operator_for_field = current_operator.clone();
+        let current_value_for_field = current_value.clone();
+        let value_container_for_field = value_container.clone();
+        let days_suffix_for_field = days_suffix.clone();
+        field_combo.connect_selected_notify(move |dropdown| {
+            let index = dropdown.selected() as usize;
+            let Some((field, _)) = EDITOR_FIELDS.get(index).copied() else {
+                return;
+            };
+            current_field_for_field.set(field);
+            operator_combo_for_field.set_model(Some(&operator_model_for_field(field)));
+            operator_combo_for_field.set_selected(0);
+            let operator = operators_for_field(field)[0];
+            current_operator_for_field.set(operator);
+            install_value_widget(
+                &value_container_for_field,
+                &days_suffix_for_field,
+                &current_value_for_field,
+                field,
+                operator,
+            );
+        });
+
+        let current_field_for_op = current_field.clone();
+        let current_operator_for_op = current_operator.clone();
+        let current_value_for_op = current_value.clone();
+        let value_container_for_op = value_container.clone();
+        let days_suffix_for_op = days_suffix.clone();
+        operator_combo.connect_selected_notify(move |dropdown| {
+            let field = current_field_for_op.get();
+            let operators = operators_for_field(field);
+            let index = dropdown.selected() as usize;
+            let Some(operator) = operators.get(index).copied() else {
+                return;
+            };
+            current_operator_for_op.set(operator);
+            install_value_widget(
+                &value_container_for_op,
+                &days_suffix_for_op,
+                &current_value_for_op,
+                field,
+                operator,
+            );
+        });
 
         Self {
             container,
-            field_combo,
-            operator_combo,
-            value_entry,
+            current_field,
+            current_operator,
+            current_value,
         }
     }
 
     fn extract(&self) -> Result<SmartPlaylistRule, RuleError> {
-        extract_rule(
-            self.field_combo.selected() as usize,
-            self.operator_combo.selected() as usize,
-            &self.value_entry.text(),
-        )
+        let input = value_input_from_widget(&self.current_value.borrow());
+        extract_rule(self.current_field.get(), self.current_operator.get(), &input)
     }
 }
 
-fn extract_rule(
-    field_index: usize,
-    operator_index: usize,
-    raw_value: &str,
-) -> Result<SmartPlaylistRule, RuleError> {
-    let (field, _) = EDITOR_FIELDS
-        .get(field_index)
-        .copied()
-        .ok_or(RuleError::FieldMissing)?;
-
-    match field {
-        EditorField::Text(text_field) => {
-            let (operator, _) = TEXT_OPERATORS
-                .get(operator_index)
-                .copied()
-                .ok_or(RuleError::OperatorMissing)?;
-            let value = raw_value.trim().to_owned();
-            if value.is_empty() {
-                return Err(RuleError::EmptyTextValue);
-            }
-            Ok(SmartPlaylistRule::Text {
-                field: text_field,
-                operator,
-                value,
-            })
-        }
-        EditorField::Number(number_field) => {
-            let (operator, _) = NUMBER_OPERATORS
-                .get(operator_index)
-                .copied()
-                .ok_or(RuleError::OperatorMissing)?;
-            let trimmed = raw_value.trim();
-            if trimmed.is_empty() {
-                return Err(RuleError::EmptyNumberValue);
-            }
-            let value = trimmed
-                .parse::<i64>()
-                .map_err(|_| RuleError::NonNumericValue {
-                    offending: trimmed.to_owned(),
-                })?;
-            Ok(SmartPlaylistRule::Number {
-                field: number_field,
-                operator,
-                value,
-            })
-        }
-    }
-}
-
-fn operator_model_for(field: EditorField) -> gtk::StringList {
-    match field {
-        EditorField::Text(_) => gtk::StringList::new(
-            &TEXT_OPERATORS
-                .iter()
-                .map(|(_, label)| *label)
-                .collect::<Vec<_>>(),
-        ),
-        EditorField::Number(_) => gtk::StringList::new(
-            &NUMBER_OPERATORS
-                .iter()
-                .map(|(_, label)| *label)
-                .collect::<Vec<_>>(),
-        ),
+fn value_input_from_widget(value: &ValueWidget) -> ValueInput {
+    match value {
+        ValueWidget::Text(entry) => ValueInput::Text(entry.text().to_string()),
+        ValueWidget::Number(spin) => ValueInput::Number(spin.value_as_int() as i64),
+        ValueWidget::Rating(spin) => ValueInput::Rating(spin.value_as_int().max(0) as u32),
+        ValueWidget::Date(entry) => ValueInput::Date(entry.text().to_string()),
+        ValueWidget::Days(spin) => ValueInput::Days(spin.value_as_int().max(0) as u32),
+        ValueWidget::None => ValueInput::None,
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum ValueInput {
+    Text(String),
+    Number(i64),
+    Rating(u32),
+    Date(String),
+    Days(u32),
+    None,
+}
+
+fn install_value_widget(
+    container: &gtk::Box,
+    days_suffix: &gtk::Label,
+    current_value: &Rc<RefCell<ValueWidget>>,
+    field: EditorField,
+    operator: EditorOperator,
+) {
+    let kind = effective_value_kind(field, operator);
+    let new_widget = ValueWidget::build(kind);
+
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+    if let Some(root) = new_widget.root() {
+        container.append(&root);
+    }
+    days_suffix.set_visible(matches!(new_widget, ValueWidget::Days(_)));
+    current_value.replace(new_widget);
+}
+
+fn effective_value_kind(field: EditorField, operator: EditorOperator) -> ValueKind {
+    match (field, operator.value_kind()) {
+        (EditorField::Rating, ValueKind::Number) => ValueKind::Rating,
+        (_, kind) => kind,
+    }
+}
+
+fn operator_model_for_field(field: EditorField) -> gtk::StringList {
+    let labels: Vec<&str> = operators_for_field(field)
+        .iter()
+        .map(|op| op.label())
+        .collect();
+    gtk::StringList::new(&labels)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum RuleError {
-    FieldMissing,
-    OperatorMissing,
+    FieldOperatorMismatch,
     EmptyTextValue,
-    EmptyNumberValue,
-    NonNumericValue { offending: String },
+    OutOfRangeRating { offending: String },
+    InvalidDate { offending: String },
+    InvalidDays,
 }
 
 impl RuleError {
     fn message(&self) -> String {
         match self {
-            Self::FieldMissing | Self::OperatorMissing => {
-                "A rule is missing a field or operator.".to_owned()
+            Self::FieldOperatorMismatch => {
+                "This combination of field and operator is not supported.".to_owned()
             }
             Self::EmptyTextValue => "A text rule needs a value.".to_owned(),
-            Self::EmptyNumberValue => "A numeric rule needs a value.".to_owned(),
-            Self::NonNumericValue { offending } => {
-                format!("\"{offending}\" is not a valid number.")
+            Self::OutOfRangeRating { offending } => {
+                format!("\"{offending}\" is not a valid rating (0 to 5).")
             }
+            Self::InvalidDate { offending } => {
+                format!("\"{offending}\" is not a valid date (use YYYY-MM-DD).")
+            }
+            Self::InvalidDays => "The number of days must be at least 1.".to_owned(),
         }
     }
+}
+
+fn extract_rule(
+    field: EditorField,
+    operator: EditorOperator,
+    value: &ValueInput,
+) -> Result<SmartPlaylistRule, RuleError> {
+    match (field, operator) {
+        (EditorField::Text(text_field), op) if matches!(op.value_kind(), ValueKind::Text) => {
+            let raw = read_text(value)?;
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(RuleError::EmptyTextValue);
+            }
+            Ok(SmartPlaylistRule::Text {
+                field: text_field,
+                operator: text_operator(op).ok_or(RuleError::FieldOperatorMismatch)?,
+                value: trimmed.to_owned(),
+            })
+        }
+        (EditorField::Text(text_field), EditorOperator::TextIsEmpty) => {
+            Ok(SmartPlaylistRule::TextIsEmpty { field: text_field })
+        }
+        (EditorField::Text(text_field), EditorOperator::TextIsPresent) => {
+            Ok(SmartPlaylistRule::TextIsPresent { field: text_field })
+        }
+        (EditorField::Number(number_field), op)
+            if matches!(op.value_kind(), ValueKind::Number) =>
+        {
+            let parsed = read_number(value)?;
+            Ok(SmartPlaylistRule::Number {
+                field: number_field,
+                operator: number_operator(op).ok_or(RuleError::FieldOperatorMismatch)?,
+                value: parsed,
+            })
+        }
+        (EditorField::Rating, op) if matches!(op.value_kind(), ValueKind::Number) => {
+            let parsed = read_rating(value)?;
+            Ok(SmartPlaylistRule::Rating {
+                operator: number_operator(op).ok_or(RuleError::FieldOperatorMismatch)?,
+                value: parsed,
+            })
+        }
+        (EditorField::Date(date_field), EditorOperator::DateBefore) => {
+            Ok(SmartPlaylistRule::DateBefore {
+                field: date_field,
+                date: read_date(value)?,
+            })
+        }
+        (EditorField::Date(date_field), EditorOperator::DateAfter) => {
+            Ok(SmartPlaylistRule::DateAfter {
+                field: date_field,
+                date: read_date(value)?,
+            })
+        }
+        (EditorField::Date(date_field), EditorOperator::DateInLast) => {
+            Ok(SmartPlaylistRule::DateInLast {
+                field: date_field,
+                days: read_days(value)?,
+            })
+        }
+        (EditorField::Date(date_field), EditorOperator::DateNotInLast) => {
+            Ok(SmartPlaylistRule::DateNotInLast {
+                field: date_field,
+                days: read_days(value)?,
+            })
+        }
+        (EditorField::Date(date_field), EditorOperator::DateIsEmpty) => {
+            Ok(SmartPlaylistRule::DateIsEmpty { field: date_field })
+        }
+        (EditorField::Date(date_field), EditorOperator::DateIsPresent) => {
+            Ok(SmartPlaylistRule::DateIsPresent { field: date_field })
+        }
+        _ => Err(RuleError::FieldOperatorMismatch),
+    }
+}
+
+fn read_text(value: &ValueInput) -> Result<String, RuleError> {
+    match value {
+        ValueInput::Text(text) => Ok(text.clone()),
+        _ => Err(RuleError::FieldOperatorMismatch),
+    }
+}
+
+fn read_number(value: &ValueInput) -> Result<i64, RuleError> {
+    match value {
+        ValueInput::Number(number) => Ok(*number),
+        _ => Err(RuleError::FieldOperatorMismatch),
+    }
+}
+
+fn read_rating(value: &ValueInput) -> Result<Rating, RuleError> {
+    match value {
+        ValueInput::Rating(raw) => {
+            let stars = u8::try_from(*raw).map_err(|_| RuleError::OutOfRangeRating {
+                offending: raw.to_string(),
+            })?;
+            Rating::new(stars).ok_or(RuleError::OutOfRangeRating {
+                offending: stars.to_string(),
+            })
+        }
+        _ => Err(RuleError::FieldOperatorMismatch),
+    }
+}
+
+fn read_date(value: &ValueInput) -> Result<SystemTime, RuleError> {
+    match value {
+        ValueInput::Date(text) => parse_iso_date(text.trim()).ok_or(RuleError::InvalidDate {
+            offending: text.clone(),
+        }),
+        _ => Err(RuleError::FieldOperatorMismatch),
+    }
+}
+
+fn read_days(value: &ValueInput) -> Result<NonZeroU32, RuleError> {
+    match value {
+        ValueInput::Days(raw) => NonZeroU32::new(*raw).ok_or(RuleError::InvalidDays),
+        _ => Err(RuleError::FieldOperatorMismatch),
+    }
+}
+
+fn text_operator(operator: EditorOperator) -> Option<SmartPlaylistTextOperator> {
+    Some(match operator {
+        EditorOperator::TextContains => SmartPlaylistTextOperator::Contains,
+        EditorOperator::TextDoesNotContain => SmartPlaylistTextOperator::DoesNotContain,
+        EditorOperator::TextIs => SmartPlaylistTextOperator::Is,
+        EditorOperator::TextIsNot => SmartPlaylistTextOperator::IsNot,
+        EditorOperator::TextStartsWith => SmartPlaylistTextOperator::StartsWith,
+        EditorOperator::TextEndsWith => SmartPlaylistTextOperator::EndsWith,
+        _ => return None,
+    })
+}
+
+fn number_operator(operator: EditorOperator) -> Option<SmartPlaylistNumberOperator> {
+    Some(match operator {
+        EditorOperator::NumberEqual => SmartPlaylistNumberOperator::Equal,
+        EditorOperator::NumberNotEqual => SmartPlaylistNumberOperator::NotEqual,
+        EditorOperator::NumberGreaterThan => SmartPlaylistNumberOperator::GreaterThan,
+        EditorOperator::NumberGreaterThanOrEqual => SmartPlaylistNumberOperator::GreaterThanOrEqual,
+        EditorOperator::NumberLessThan => SmartPlaylistNumberOperator::LessThan,
+        EditorOperator::NumberLessThanOrEqual => SmartPlaylistNumberOperator::LessThanOrEqual,
+        _ => return None,
+    })
+}
+
+fn parse_iso_date(text: &str) -> Option<SystemTime> {
+    let mut parts = text.split('-');
+    let year: i32 = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if !(1970..=9999).contains(&year) || !(1..=12).contains(&month) {
+        return None;
+    }
+    let max_day = days_in_month(year, month);
+    if !(1..=max_day).contains(&day) {
+        return None;
+    }
+    let days = days_since_unix_epoch(year, month, day)?;
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(days * 86_400))
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_since_unix_epoch(year: i32, month: u32, day: u32) -> Option<u64> {
+    if year < 1970 {
+        return None;
+    }
+    let mut days: u64 = 0;
+    for y in 1970..year {
+        days += if is_leap_year(y) { 366 } else { 365 };
+    }
+    for m in 1..month {
+        days += u64::from(days_in_month(year, m));
+    }
+    days += u64::from(day - 1);
+    Some(days)
 }
 
 pub(crate) fn open_smart_playlist_editor(
@@ -615,138 +1039,160 @@ mod tests {
     use super::*;
 
     #[test]
-    fn text_operator_table_matches_text_operator_enum_count() {
-        assert_eq!(TEXT_OPERATORS.len(), 6);
+    fn parse_iso_date_accepts_padded_dates() {
+        let date = parse_iso_date("2024-05-23").expect("valid date");
+        let elapsed = date
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("after epoch");
+        let expected_days: u64 = (1970..2024)
+            .map(|y| if is_leap_year(y) { 366 } else { 365 })
+            .sum::<u64>()
+            + 31
+            + 29
+            + 31
+            + 30
+            + 22;
+        assert_eq!(elapsed.as_secs(), expected_days * 86_400);
     }
 
     #[test]
-    fn number_operator_table_matches_number_operator_enum_count() {
-        assert_eq!(NUMBER_OPERATORS.len(), 6);
+    fn parse_iso_date_rejects_invalid_dates() {
+        assert!(parse_iso_date("2024-02-30").is_none());
+        assert!(parse_iso_date("2024-13-01").is_none());
+        assert!(parse_iso_date("not-a-date").is_none());
+        assert!(parse_iso_date("2024-05").is_none());
+        assert!(parse_iso_date("2024-05-23-extra").is_none());
+        assert!(parse_iso_date("1969-12-31").is_none());
     }
 
     #[test]
-    fn limit_selection_table_excludes_no_selection_methods() {
-        for selection in [
-            SmartPlaylistLimitSelection::Random,
-            SmartPlaylistLimitSelection::AlbumAscending,
-            SmartPlaylistLimitSelection::ArtistAscending,
-            SmartPlaylistLimitSelection::GenreAscending,
-            SmartPlaylistLimitSelection::TitleAscending,
-            SmartPlaylistLimitSelection::HighestRating,
-            SmartPlaylistLimitSelection::LowestRating,
-            SmartPlaylistLimitSelection::MostRecentlyPlayed,
-            SmartPlaylistLimitSelection::LeastRecentlyPlayed,
-            SmartPlaylistLimitSelection::MostOftenPlayed,
-            SmartPlaylistLimitSelection::LeastOftenPlayed,
-            SmartPlaylistLimitSelection::MostRecentlyAdded,
-            SmartPlaylistLimitSelection::LeastRecentlyAdded,
-        ] {
-            assert!(
-                LIMIT_SELECTIONS
-                    .iter()
-                    .any(|(item, _)| *item == selection),
-                "expected {selection:?} to be available in the editor"
-            );
+    fn leap_year_rules_match_gregorian_calendar() {
+        assert!(is_leap_year(2000));
+        assert!(!is_leap_year(1900));
+        assert!(is_leap_year(2024));
+        assert!(!is_leap_year(2023));
+    }
+
+    #[test]
+    fn extract_rule_text_is_empty_creates_text_is_empty_variant() {
+        let rule = extract_rule(
+            EditorField::Text(SmartPlaylistTextField::Genre),
+            EditorOperator::TextIsEmpty,
+            &ValueInput::None,
+        )
+        .expect("extracts");
+        assert_eq!(
+            rule,
+            SmartPlaylistRule::TextIsEmpty {
+                field: SmartPlaylistTextField::Genre,
+            }
+        );
+    }
+
+    #[test]
+    fn extract_rule_rating_constructs_rating_variant_with_parsed_stars() {
+        let rule = extract_rule(
+            EditorField::Rating,
+            EditorOperator::NumberGreaterThanOrEqual,
+            &ValueInput::Rating(4),
+        )
+        .expect("extracts");
+        assert_eq!(
+            rule,
+            SmartPlaylistRule::Rating {
+                operator: SmartPlaylistNumberOperator::GreaterThanOrEqual,
+                value: Rating::new(4).expect("valid"),
+            }
+        );
+    }
+
+    #[test]
+    fn extract_rule_rating_rejects_out_of_range_value() {
+        let result = extract_rule(
+            EditorField::Rating,
+            EditorOperator::NumberEqual,
+            &ValueInput::Rating(9),
+        );
+        assert_eq!(
+            result,
+            Err(RuleError::OutOfRangeRating {
+                offending: "9".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn extract_rule_date_before_parses_iso_value() {
+        let rule = extract_rule(
+            EditorField::Date(SmartPlaylistDateField::DateAdded),
+            EditorOperator::DateBefore,
+            &ValueInput::Date("2024-05-23".to_owned()),
+        )
+        .expect("extracts");
+        match rule {
+            SmartPlaylistRule::DateBefore { field, date } => {
+                assert_eq!(field, SmartPlaylistDateField::DateAdded);
+                let expected = parse_iso_date("2024-05-23").expect("valid");
+                assert_eq!(date, expected);
+            }
+            other => panic!("unexpected rule variant: {other:?}"),
         }
     }
 
     #[test]
-    fn empty_text_value_yields_friendly_message() {
-        let error = RuleError::EmptyTextValue;
-        assert_eq!(error.message(), "A text rule needs a value.");
-    }
-
-    #[test]
-    fn non_numeric_value_message_quotes_the_offending_input() {
-        let error = RuleError::NonNumericValue {
-            offending: "abc".to_owned(),
-        };
-        assert_eq!(error.message(), "\"abc\" is not a valid number.");
-    }
-
-    fn editor_field_index_for(target: EditorField) -> usize {
-        EDITOR_FIELDS
-            .iter()
-            .position(|(field, _)| *field == target)
-            .expect("editor field is registered")
-    }
-
-    fn text_operator_index_for(target: SmartPlaylistTextOperator) -> usize {
-        TEXT_OPERATORS
-            .iter()
-            .position(|(operator, _)| *operator == target)
-            .expect("text operator is registered")
-    }
-
-    fn number_operator_index_for(target: SmartPlaylistNumberOperator) -> usize {
-        NUMBER_OPERATORS
-            .iter()
-            .position(|(operator, _)| *operator == target)
-            .expect("number operator is registered")
-    }
-
-    #[test]
-    fn extract_text_rule_trims_whitespace_and_returns_text_variant() {
-        let rule = extract_rule(
-            editor_field_index_for(EditorField::Text(SmartPlaylistTextField::Genre)),
-            text_operator_index_for(SmartPlaylistTextOperator::Contains),
-            "  Trip-Hop  ",
-        )
-        .expect("text rule extracts");
-
-        assert_eq!(
-            rule,
-            SmartPlaylistRule::Text {
-                field: SmartPlaylistTextField::Genre,
-                operator: SmartPlaylistTextOperator::Contains,
-                value: "Trip-Hop".to_owned(),
-            }
-        );
-    }
-
-    #[test]
-    fn extract_text_rule_rejects_empty_value() {
+    fn extract_rule_date_before_rejects_invalid_iso() {
         let result = extract_rule(
-            editor_field_index_for(EditorField::Text(SmartPlaylistTextField::Title)),
-            text_operator_index_for(SmartPlaylistTextOperator::Is),
-            "   ",
+            EditorField::Date(SmartPlaylistDateField::DateAdded),
+            EditorOperator::DateBefore,
+            &ValueInput::Date("nope".to_owned()),
         );
-
-        assert_eq!(result, Err(RuleError::EmptyTextValue));
-    }
-
-    #[test]
-    fn extract_number_rule_parses_signed_integer_value() {
-        let rule = extract_rule(
-            editor_field_index_for(EditorField::Number(SmartPlaylistNumberField::PlayCount)),
-            number_operator_index_for(SmartPlaylistNumberOperator::GreaterThanOrEqual),
-            "12",
-        )
-        .expect("number rule extracts");
-
-        assert_eq!(
-            rule,
-            SmartPlaylistRule::Number {
-                field: SmartPlaylistNumberField::PlayCount,
-                operator: SmartPlaylistNumberOperator::GreaterThanOrEqual,
-                value: 12,
-            }
-        );
-    }
-
-    #[test]
-    fn extract_number_rule_rejects_non_numeric_value() {
-        let result = extract_rule(
-            editor_field_index_for(EditorField::Number(SmartPlaylistNumberField::Year)),
-            number_operator_index_for(SmartPlaylistNumberOperator::Equal),
-            "nineteen",
-        );
-
         assert_eq!(
             result,
-            Err(RuleError::NonNumericValue {
-                offending: "nineteen".to_owned(),
+            Err(RuleError::InvalidDate {
+                offending: "nope".to_owned(),
             })
+        );
+    }
+
+    #[test]
+    fn extract_rule_date_in_last_uses_days() {
+        let rule = extract_rule(
+            EditorField::Date(SmartPlaylistDateField::LastPlayed),
+            EditorOperator::DateInLast,
+            &ValueInput::Days(14),
+        )
+        .expect("extracts");
+        match rule {
+            SmartPlaylistRule::DateInLast { field, days } => {
+                assert_eq!(field, SmartPlaylistDateField::LastPlayed);
+                assert_eq!(days.get(), 14);
+            }
+            other => panic!("unexpected rule variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_rule_date_in_last_rejects_zero_days() {
+        let result = extract_rule(
+            EditorField::Date(SmartPlaylistDateField::LastPlayed),
+            EditorOperator::DateInLast,
+            &ValueInput::Days(0),
+        );
+        assert_eq!(result, Err(RuleError::InvalidDays));
+    }
+
+    #[test]
+    fn effective_value_kind_uses_rating_for_rating_field() {
+        assert_eq!(
+            effective_value_kind(EditorField::Rating, EditorOperator::NumberEqual),
+            ValueKind::Rating
+        );
+        assert_eq!(
+            effective_value_kind(
+                EditorField::Number(SmartPlaylistNumberField::Year),
+                EditorOperator::NumberEqual,
+            ),
+            ValueKind::Number
         );
     }
 }
