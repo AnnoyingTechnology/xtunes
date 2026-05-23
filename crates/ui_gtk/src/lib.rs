@@ -32,6 +32,7 @@ mod smart_playlist_editor;
 mod status_bar;
 mod titlebar;
 mod track_context;
+mod track_context_ops;
 mod track_table;
 mod window_chrome;
 

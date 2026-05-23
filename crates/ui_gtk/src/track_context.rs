@@ -28,6 +28,8 @@ struct AddToPlaylistAction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrackContextActionId {
+    CopyFiles,
+    ShowInFolder,
     RemoveFromLibrary,
     MoveToTrash,
     RemoveFromPlaylist,
@@ -36,11 +38,21 @@ pub(crate) enum TrackContextActionId {
 impl TrackContextActionId {
     fn css_class(self) -> &'static str {
         match self {
+            Self::CopyFiles => "track-context-copy-files",
+            Self::ShowInFolder => "track-context-show-in-folder",
             Self::RemoveFromLibrary => "track-context-remove-from-library",
             Self::MoveToTrash => "track-context-move-to-trash",
             Self::RemoveFromPlaylist => "track-context-remove-from-playlist",
         }
     }
+}
+
+/// Visual grouping inside the popover. Safe actions render above the separator
+/// next to "Add to Playlist"; destructive actions render below it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TrackContextActionSection {
+    Safe,
+    Destructive,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,6 +85,7 @@ enum TrackActionConfirmation {
 pub(crate) struct TrackContextAction {
     id: TrackContextActionId,
     label: &'static str,
+    section: TrackContextActionSection,
     selection: TrackSelectionRequirement,
     confirmation: TrackActionConfirmation,
     /// When `Some`, the predicate is evaluated each time the menu is popped
@@ -84,10 +97,35 @@ pub(crate) struct TrackContextAction {
 }
 
 impl TrackContextAction {
+    pub(crate) fn copy_files(callback: TrackActionCallback) -> Self {
+        Self {
+            id: TrackContextActionId::CopyFiles,
+            label: "Copy",
+            section: TrackContextActionSection::Safe,
+            selection: TrackSelectionRequirement::AtLeastOne,
+            confirmation: TrackActionConfirmation::None,
+            visibility: None,
+            callback,
+        }
+    }
+
+    pub(crate) fn show_in_folder(callback: TrackActionCallback) -> Self {
+        Self {
+            id: TrackContextActionId::ShowInFolder,
+            label: "Show in Folder",
+            section: TrackContextActionSection::Safe,
+            selection: TrackSelectionRequirement::AtLeastOne,
+            confirmation: TrackActionConfirmation::None,
+            visibility: None,
+            callback,
+        }
+    }
+
     pub(crate) fn remove_from_library(callback: TrackActionCallback) -> Self {
         Self {
             id: TrackContextActionId::RemoveFromLibrary,
             label: "Remove from Library",
+            section: TrackContextActionSection::Destructive,
             selection: TrackSelectionRequirement::AtLeastOne,
             confirmation: TrackActionConfirmation::None,
             visibility: None,
@@ -99,6 +137,7 @@ impl TrackContextAction {
         Self {
             id: TrackContextActionId::MoveToTrash,
             label: "Move to Trash",
+            section: TrackContextActionSection::Destructive,
             selection: TrackSelectionRequirement::AtLeastOne,
             confirmation: TrackActionConfirmation::MoveToTrash,
             visibility: None,
@@ -113,6 +152,7 @@ impl TrackContextAction {
         Self {
             id: TrackContextActionId::RemoveFromPlaylist,
             label: "Remove from Playlist",
+            section: TrackContextActionSection::Destructive,
             selection: TrackSelectionRequirement::AtLeastOne,
             confirmation: TrackActionConfirmation::None,
             visibility: Some(visibility),
@@ -281,29 +321,47 @@ impl TrackRowContextMenu {
             has_safe_section = true;
         }
 
-        let dangerous: Vec<&TrackContextAction> =
+        let available: Vec<&TrackContextAction> =
             self.actions.available_actions(track_ids.len()).collect();
+        let (safe, destructive): (Vec<&TrackContextAction>, Vec<&TrackContextAction>) = available
+            .into_iter()
+            .partition(|action| action.section == TrackContextActionSection::Safe);
 
-        if has_safe_section && !dangerous.is_empty() {
+        for action in &safe {
+            self.append_action_button(&content, popover, action, &track_ids);
+            has_safe_section = true;
+        }
+
+        if has_safe_section && !destructive.is_empty() {
             let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
             separator.add_css_class("track-context-menu-separator");
             content.append(&separator);
         }
 
-        for action in dangerous {
-            let button = context_menu_button(action);
-            let action = action.clone();
-            let parent = self.parent_window.clone();
-            let popover = popover.clone();
-            let track_ids = track_ids.clone();
-            button.connect_clicked(move |_| {
-                popover.popdown();
-                run_context_action(&action, &parent, track_ids.clone());
-            });
-            content.append(&button);
+        for action in &destructive {
+            self.append_action_button(&content, popover, action, &track_ids);
         }
 
         content
+    }
+
+    fn append_action_button(
+        &self,
+        content: &gtk::Box,
+        popover: &gtk::Popover,
+        action: &TrackContextAction,
+        track_ids: &[TrackId],
+    ) {
+        let button = context_menu_button(action);
+        let action = action.clone();
+        let parent = self.parent_window.clone();
+        let popover = popover.clone();
+        let track_ids = track_ids.to_vec();
+        button.connect_clicked(move |_| {
+            popover.popdown();
+            run_context_action(&action, &parent, track_ids.clone());
+        });
+        content.append(&button);
     }
 }
 
@@ -533,8 +591,8 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use super::{
-        TrackActionCallback, TrackContextAction, TrackContextActionId, TrackSelectionRequirement,
-        trash_confirmation_detail,
+        TrackActionCallback, TrackContextAction, TrackContextActionId, TrackContextActionSection,
+        TrackSelectionRequirement, trash_confirmation_detail,
     };
 
     #[test]
@@ -553,14 +611,41 @@ mod tests {
     fn declared_actions_have_stable_identity_and_labels() {
         let callback = no_op_callback();
         let actions = [
+            TrackContextAction::copy_files(callback.clone()),
+            TrackContextAction::show_in_folder(callback.clone()),
             TrackContextAction::remove_from_library(callback.clone()),
             TrackContextAction::move_to_trash(callback),
         ];
 
-        assert_eq!(actions[0].id, TrackContextActionId::RemoveFromLibrary);
-        assert_eq!(actions[0].label, "Remove from Library");
-        assert_eq!(actions[1].id, TrackContextActionId::MoveToTrash);
-        assert_eq!(actions[1].label, "Move to Trash");
+        assert_eq!(actions[0].id, TrackContextActionId::CopyFiles);
+        assert_eq!(actions[0].label, "Copy");
+        assert_eq!(actions[1].id, TrackContextActionId::ShowInFolder);
+        assert_eq!(actions[1].label, "Show in Folder");
+        assert_eq!(actions[2].id, TrackContextActionId::RemoveFromLibrary);
+        assert_eq!(actions[2].label, "Remove from Library");
+        assert_eq!(actions[3].id, TrackContextActionId::MoveToTrash);
+        assert_eq!(actions[3].label, "Move to Trash");
+    }
+
+    #[test]
+    fn safe_actions_render_above_destructive_ones() {
+        let callback = no_op_callback();
+        assert_eq!(
+            TrackContextAction::copy_files(callback.clone()).section,
+            TrackContextActionSection::Safe,
+        );
+        assert_eq!(
+            TrackContextAction::show_in_folder(callback.clone()).section,
+            TrackContextActionSection::Safe,
+        );
+        assert_eq!(
+            TrackContextAction::remove_from_library(callback.clone()).section,
+            TrackContextActionSection::Destructive,
+        );
+        assert_eq!(
+            TrackContextAction::move_to_trash(callback).section,
+            TrackContextActionSection::Destructive,
+        );
     }
 
     #[test]

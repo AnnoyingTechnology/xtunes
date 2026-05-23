@@ -42,6 +42,7 @@ use super::{
         AddToPlaylistCallback, AddToPlaylistEntry, AddToPlaylistProvider, TrackActionCallback,
         TrackActionVisibility, TrackContextAction, TrackContextActionSet, TrackRowContextMenu,
     },
+    track_context_ops::{copy_files_callback, show_in_folder_callback},
     track_table::{
         RatingChangedCallback, TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table,
     },
@@ -107,7 +108,10 @@ pub(crate) fn build_main_window(
 
     let track_activated = track_activated_callback(&command_controller, playback_changed.clone());
     let library_changed_holder: LibraryChangedHolder = Rc::new(RefCell::new(None));
+    let parent_window = window.clone().upcast::<gtk::Window>();
     let context_actions = track_context_actions(
+        &runtime,
+        &parent_window,
         &command_controller,
         playback_changed.clone(),
         library_changed_holder.clone(),
@@ -115,25 +119,21 @@ pub(crate) fn build_main_window(
     let add_to_playlist_provider = add_to_playlist_provider(&runtime);
     let add_to_playlist_callback =
         add_to_playlist_callback(&command_controller, &runtime, &library_changed_holder);
-    let context_menu = TrackRowContextMenu::new(
-        context_actions,
-        window.clone().upcast::<gtk::Window>(),
-    )
-    .with_add_to_playlist(
-        add_to_playlist_provider.clone(),
-        add_to_playlist_callback.clone(),
-    );
+    let context_menu = TrackRowContextMenu::new(context_actions, parent_window.clone())
+        .with_add_to_playlist(
+            add_to_playlist_provider.clone(),
+            add_to_playlist_callback.clone(),
+        );
     let playlist_context_actions = playlist_track_context_actions(
+        &runtime,
+        &parent_window,
         &command_controller,
         playback_changed.clone(),
         library_changed_holder.clone(),
         &sidebar,
     );
-    let playlist_context_menu = TrackRowContextMenu::new(
-        playlist_context_actions,
-        window.clone().upcast::<gtk::Window>(),
-    )
-    .with_add_to_playlist(add_to_playlist_provider, add_to_playlist_callback);
+    let playlist_context_menu = TrackRowContextMenu::new(playlist_context_actions, parent_window)
+        .with_add_to_playlist(add_to_playlist_provider, add_to_playlist_callback);
     let rating_changed =
         rating_changed_callback(&command_controller, library_changed_holder.clone());
     let songs_table = build_track_table(
@@ -828,11 +828,15 @@ fn rating_changed_callback(
 }
 
 fn track_context_actions(
+    runtime: &SharedRuntime,
+    window: &gtk::Window,
     command_controller: &SharedCommandController,
     playback_changed: PlaybackChangedCallback,
     library_changed_holder: LibraryChangedHolder,
 ) -> TrackContextActionSet {
     TrackContextActionSet::new(vec![
+        TrackContextAction::copy_files(copy_files_callback(runtime, window)),
+        TrackContextAction::show_in_folder(show_in_folder_callback(runtime, window)),
         TrackContextAction::remove_from_library(track_mutation_callback(
             command_controller,
             playback_changed.clone(),
@@ -849,12 +853,16 @@ fn track_context_actions(
 }
 
 fn playlist_track_context_actions(
+    runtime: &SharedRuntime,
+    window: &gtk::Window,
     command_controller: &SharedCommandController,
     playback_changed: PlaybackChangedCallback,
     library_changed_holder: LibraryChangedHolder,
     sidebar: &PlaylistSidebar,
 ) -> TrackContextActionSet {
     TrackContextActionSet::new(vec![
+        TrackContextAction::copy_files(copy_files_callback(runtime, window)),
+        TrackContextAction::show_in_folder(show_in_folder_callback(runtime, window)),
         TrackContextAction::remove_from_playlist(
             remove_from_playlist_callback(
                 command_controller,
