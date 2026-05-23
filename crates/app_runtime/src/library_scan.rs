@@ -4,6 +4,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    time::SystemTime,
 };
 
 use xtunes_domain::{
@@ -165,7 +166,13 @@ fn track_from_scanned_track(
                 return Err(ApplicationRuntimeError::LibraryStoreFailed);
             };
             *next_track_id += 1;
-            (track_id, PlayStatistics::default())
+            (
+                track_id,
+                PlayStatistics {
+                    date_added_at: Some(SystemTime::now()),
+                    ..PlayStatistics::default()
+                },
+            )
         }
     };
 

@@ -9,4 +9,5 @@ pub struct PlayStatistics {
     pub skip_count: u64,
     pub last_played_at: Option<SystemTime>,
     pub last_skipped_at: Option<SystemTime>,
+    pub date_added_at: Option<SystemTime>,
 }

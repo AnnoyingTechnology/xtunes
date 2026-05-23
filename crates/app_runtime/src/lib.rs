@@ -16,7 +16,7 @@ pub use xtunes_domain::{
     SmartPlaylistMatchKind, SmartPlaylistNumberField, SmartPlaylistNumberOperator,
     SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField, SmartPlaylistTextOperator,
     Track, TrackAvailability, TrackId, TrackLocation, TrackMetadata, TrackPlaybackSource,
-    TrackRelativePath, UserSettings, VolumePercent,
+    TrackRelativePath, UserSettings, VolumePercent, matching_tracks,
 };
 use xtunes_library_store::LibraryStore;
 use xtunes_metadata::MetadataService;
@@ -272,6 +272,21 @@ impl ApplicationRuntime {
         self.settings
             .library_path()
             .map(|library_path| track.location.absolute_path(library_path))
+    }
+
+    pub fn smart_playlist_matching_tracks(
+        &self,
+        smart_playlist_id: SmartPlaylistId,
+        now: std::time::SystemTime,
+    ) -> Vec<&Track> {
+        let Some(smart_playlist) = self
+            .smart_playlists
+            .iter()
+            .find(|smart_playlist| smart_playlist.id == smart_playlist_id)
+        else {
+            return Vec::new();
+        };
+        matching_tracks(&self.library_tracks, &smart_playlist.rules, now)
     }
 }
 

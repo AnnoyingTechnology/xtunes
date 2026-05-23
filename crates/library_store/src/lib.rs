@@ -161,6 +161,7 @@ impl SqliteLibraryStore {
                     skip_count INTEGER NOT NULL DEFAULT 0,
                     last_played_at_unix INTEGER,
                     last_skipped_at_unix INTEGER,
+                    date_added_at_unix INTEGER,
                     is_missing INTEGER NOT NULL DEFAULT 0
                 );
 
@@ -336,9 +337,10 @@ impl LibraryStore for SqliteLibraryStore {
                     skip_count,
                     last_played_at_unix,
                     last_skipped_at_unix,
+                    date_added_at_unix,
                     is_missing
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
                 ON CONFLICT(id) DO UPDATE SET
                     relative_path = excluded.relative_path,
                     title = excluded.title,
@@ -357,6 +359,7 @@ impl LibraryStore for SqliteLibraryStore {
                     skip_count = excluded.skip_count,
                     last_played_at_unix = excluded.last_played_at_unix,
                     last_skipped_at_unix = excluded.last_skipped_at_unix,
+                    date_added_at_unix = excluded.date_added_at_unix,
                     is_missing = excluded.is_missing
                 "#,
                 params![
@@ -378,6 +381,7 @@ impl LibraryStore for SqliteLibraryStore {
                     statistics.skip_count as i64,
                     statistics.last_played_at.and_then(system_time_to_unix),
                     statistics.last_skipped_at.and_then(system_time_to_unix),
+                    statistics.date_added_at.and_then(system_time_to_unix),
                     track.location.is_missing(),
                 ],
             )
@@ -416,6 +420,7 @@ impl LibraryStore for SqliteLibraryStore {
                     skip_count,
                     last_played_at_unix,
                     last_skipped_at_unix,
+                    date_added_at_unix,
                     is_missing
                 FROM tracks
                 WHERE id = ?1
@@ -456,6 +461,7 @@ impl LibraryStore for SqliteLibraryStore {
                     skip_count,
                     last_played_at_unix,
                     last_skipped_at_unix,
+                    date_added_at_unix,
                     is_missing
                 FROM tracks
                 ORDER BY id
@@ -852,13 +858,14 @@ fn track_from_row(row: &Row<'_>) -> StoreResult<Track> {
             skip_count: row.get::<_, i64>(15).map_err(StoreError::from)? as u64,
             last_played_at: optional_i64(row, 16)?.map(unix_to_system_time),
             last_skipped_at: optional_i64(row, 17)?.map(unix_to_system_time),
+            date_added_at: optional_i64(row, 18)?.map(unix_to_system_time),
         },
     })
 }
 
 fn track_location_from_row(row: &Row<'_>) -> StoreResult<TrackLocation> {
     let path = row.get::<_, String>(1).map_err(StoreError::from)?;
-    let is_missing = row.get::<_, bool>(18).map_err(StoreError::from)?;
+    let is_missing = row.get::<_, bool>(19).map_err(StoreError::from)?;
     let relative_path =
         TrackRelativePath::new(path.clone()).ok_or(StoreError::InvalidStoredPath(path))?;
 

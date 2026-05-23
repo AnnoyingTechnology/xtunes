@@ -13,6 +13,7 @@ mod query;
 mod rating;
 mod settings;
 mod smart_playlist;
+mod smart_playlist_evaluation;
 mod statistics;
 mod track;
 
@@ -33,5 +34,6 @@ pub use smart_playlist::{
     SmartPlaylistMatchKind, SmartPlaylistNumberField, SmartPlaylistNumberOperator,
     SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField, SmartPlaylistTextOperator,
 };
+pub use smart_playlist_evaluation::{matching_tracks, track_matches_rule, track_matches_rule_set};
 pub use statistics::PlayStatistics;
 pub use track::{Track, TrackAvailability, TrackLocation, TrackRelativePath};

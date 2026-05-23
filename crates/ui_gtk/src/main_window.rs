@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, time::SystemTime};
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
@@ -306,26 +306,36 @@ fn playlist_table_rows_for(
     runtime: &ApplicationRuntime,
     selection: Option<PlaylistItem>,
 ) -> Vec<TrackTableRow> {
-    let Some(PlaylistItem::Playlist(playlist_id)) = selection else {
-        return Vec::new();
-    };
-    let Some(playlist) = runtime
-        .playlists()
-        .iter()
-        .find(|playlist| playlist.id == playlist_id)
-    else {
-        return Vec::new();
-    };
-    let library_root = runtime.settings().library_path();
-    let tracks_by_id: HashMap<TrackId, &Track> = runtime
-        .library_tracks()
-        .iter()
-        .map(|track| (track.id, track))
-        .collect();
-    playlist_entries_in_order(playlist)
-        .filter_map(|track_id| tracks_by_id.get(&track_id).copied())
-        .map(|track| TrackTableRow::from_track(track, library_root))
-        .collect()
+    match selection {
+        Some(PlaylistItem::Playlist(playlist_id)) => {
+            let Some(playlist) = runtime
+                .playlists()
+                .iter()
+                .find(|playlist| playlist.id == playlist_id)
+            else {
+                return Vec::new();
+            };
+            let library_root = runtime.settings().library_path();
+            let tracks_by_id: HashMap<TrackId, &Track> = runtime
+                .library_tracks()
+                .iter()
+                .map(|track| (track.id, track))
+                .collect();
+            playlist_entries_in_order(playlist)
+                .filter_map(|track_id| tracks_by_id.get(&track_id).copied())
+                .map(|track| TrackTableRow::from_track(track, library_root))
+                .collect()
+        }
+        Some(PlaylistItem::SmartPlaylist(smart_playlist_id)) => {
+            let library_root = runtime.settings().library_path();
+            runtime
+                .smart_playlist_matching_tracks(smart_playlist_id, SystemTime::now())
+                .into_iter()
+                .map(|track| TrackTableRow::from_track(track, library_root))
+                .collect()
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn playlist_entries_in_order(playlist: &Playlist) -> impl Iterator<Item = TrackId> + '_ {
