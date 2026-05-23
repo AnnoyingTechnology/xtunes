@@ -154,6 +154,12 @@ pub(crate) fn build_main_window(
         &runtime,
         &sidebar,
     ));
+    sidebar.set_rename_callback(sidebar_rename_callback(
+        &command_controller,
+        &runtime,
+        &sidebar,
+    ));
+    sidebar.set_delete_callback(sidebar_delete_callback(&command_controller, &sidebar));
     library_changed_holder.replace(Some(library_changed.clone()));
     let scan_requested =
         library_scan_requested_callback(&runtime, library_changed.clone(), &status_bar);
@@ -281,6 +287,83 @@ fn sidebar_action_callback(
                 Rc::new(move || sidebar_for_created.refresh()),
                 name,
             );
+        }
+    })
+}
+
+fn sidebar_rename_callback(
+    command_controller: &SharedCommandController,
+    runtime: &SharedRuntime,
+    sidebar: &PlaylistSidebar,
+) -> super::sidebar::SidebarRenameCallback {
+    let command_controller = command_controller.clone();
+    let runtime = runtime.clone();
+    let sidebar = sidebar.clone();
+
+    Rc::new(move |item, new_name| {
+        let dispatched = match item {
+            PlaylistItem::Playlist(playlist_id) => {
+                command_controller.dispatch_succeeded(ApplicationCommand::RenamePlaylist {
+                    playlist_id,
+                    name: new_name,
+                })
+            }
+            PlaylistItem::Folder(folder_id) => {
+                command_controller.dispatch_succeeded(ApplicationCommand::RenamePlaylistFolder {
+                    folder_id,
+                    name: new_name,
+                })
+            }
+            PlaylistItem::SmartPlaylist(smart_playlist_id) => {
+                let Some(rules) = runtime
+                    .borrow()
+                    .smart_playlists()
+                    .iter()
+                    .find(|smart| smart.id == smart_playlist_id)
+                    .map(|smart| smart.rules.clone())
+                else {
+                    return;
+                };
+                command_controller.dispatch_succeeded(ApplicationCommand::UpdateSmartPlaylist {
+                    smart_playlist_id,
+                    name: new_name,
+                    rules,
+                })
+            }
+        };
+        if dispatched {
+            sidebar.refresh();
+        }
+    })
+}
+
+fn sidebar_delete_callback(
+    command_controller: &SharedCommandController,
+    sidebar: &PlaylistSidebar,
+) -> super::sidebar::SidebarDeleteCallback {
+    let command_controller = command_controller.clone();
+    let sidebar = sidebar.clone();
+
+    Rc::new(move |item| {
+        let dispatched = match item {
+            PlaylistItem::Playlist(playlist_id) => {
+                command_controller.dispatch_succeeded(ApplicationCommand::DeletePlaylist {
+                    playlist_id,
+                })
+            }
+            PlaylistItem::Folder(folder_id) => {
+                command_controller.dispatch_succeeded(ApplicationCommand::DeletePlaylistFolder {
+                    folder_id,
+                })
+            }
+            PlaylistItem::SmartPlaylist(smart_playlist_id) => {
+                command_controller.dispatch_succeeded(ApplicationCommand::DeleteSmartPlaylist {
+                    smart_playlist_id,
+                })
+            }
+        };
+        if dispatched {
+            sidebar.refresh();
         }
     })
 }

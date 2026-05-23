@@ -22,6 +22,8 @@ use super::{
 
 pub(crate) type SidebarSelectionChangedCallback = Rc<dyn Fn(Option<PlaylistItem>)>;
 pub(crate) type SidebarMoveCallback = Rc<dyn Fn(PlaylistItem, PlaylistItem, DropPosition)>;
+pub(crate) type SidebarRenameCallback = Rc<dyn Fn(PlaylistItem, String)>;
+pub(crate) type SidebarDeleteCallback = Rc<dyn Fn(PlaylistItem)>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DropPosition {
@@ -153,6 +155,8 @@ impl SidebarSnapshot {
 }
 
 type MoveCallbackHolder = Rc<RefCell<Option<SidebarMoveCallback>>>;
+type RenameCallbackHolder = Rc<RefCell<Option<SidebarRenameCallback>>>;
+type DeleteCallbackHolder = Rc<RefCell<Option<SidebarDeleteCallback>>>;
 
 #[derive(Clone)]
 pub(crate) struct PlaylistSidebar {
@@ -161,6 +165,8 @@ pub(crate) struct PlaylistSidebar {
     runtime: SharedRuntime,
     on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>>,
     on_move: MoveCallbackHolder,
+    on_rename: RenameCallbackHolder,
+    on_delete: DeleteCallbackHolder,
 }
 
 impl PlaylistSidebar {
@@ -186,9 +192,15 @@ impl PlaylistSidebar {
         selection.set_can_unselect(true);
 
         let on_move: MoveCallbackHolder = Rc::new(RefCell::new(None));
+        let on_rename: RenameCallbackHolder = Rc::new(RefCell::new(None));
+        let on_delete: DeleteCallbackHolder = Rc::new(RefCell::new(None));
         let list_view = gtk::ListView::new(
             Some(selection.clone()),
-            Some(build_row_factory(on_move.clone())),
+            Some(build_row_factory(
+                on_move.clone(),
+                on_rename.clone(),
+                on_delete.clone(),
+            )),
         );
         list_view.add_css_class("playlist-sidebar-list");
         list_view.set_vexpand(true);
@@ -211,6 +223,8 @@ impl PlaylistSidebar {
             runtime,
             on_selection_changed,
             on_move,
+            on_rename,
+            on_delete,
         }
     }
 
@@ -224,6 +238,14 @@ impl PlaylistSidebar {
 
     pub(crate) fn set_move_callback(&self, callback: SidebarMoveCallback) {
         self.on_move.replace(Some(callback));
+    }
+
+    pub(crate) fn set_rename_callback(&self, callback: SidebarRenameCallback) {
+        self.on_rename.replace(Some(callback));
+    }
+
+    pub(crate) fn set_delete_callback(&self, callback: SidebarDeleteCallback) {
+        self.on_delete.replace(Some(callback));
     }
 
     pub(crate) fn current_selection(&self) -> Option<PlaylistItem> {
@@ -325,7 +347,11 @@ fn list_store_for(items: &[SidebarItem]) -> gio::ListStore {
     store
 }
 
-fn build_row_factory(on_move: MoveCallbackHolder) -> gtk::SignalListItemFactory {
+fn build_row_factory(
+    on_move: MoveCallbackHolder,
+    on_rename: RenameCallbackHolder,
+    on_delete: DeleteCallbackHolder,
+) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_factory, list_item| {
         let Some(list_item) = list_item.downcast_ref::<gtk::ListItem>() else {
@@ -334,14 +360,29 @@ fn build_row_factory(on_move: MoveCallbackHolder) -> gtk::SignalListItemFactory 
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         row.set_margin_top(2);
         row.set_margin_bottom(2);
+
         let icon = gtk::Image::new();
         icon.add_css_class("playlist-sidebar-icon");
+
+        let name_stack = gtk::Stack::new();
+        name_stack.set_hexpand(true);
+        name_stack.set_transition_type(gtk::StackTransitionType::None);
+
         let label = gtk::Label::new(None);
         label.set_xalign(0.0);
         label.set_ellipsize(gtk::pango::EllipsizeMode::End);
         label.set_hexpand(true);
+
+        let entry = gtk::Entry::new();
+        entry.set_hexpand(true);
+        entry.add_css_class("playlist-sidebar-rename-entry");
+
+        name_stack.add_named(&label, Some("label"));
+        name_stack.add_named(&entry, Some("entry"));
+        name_stack.set_visible_child_name("label");
+
         row.append(&icon);
-        row.append(&label);
+        row.append(&name_stack);
 
         let expander = gtk::TreeExpander::new();
         expander.set_child(Some(&row));
@@ -392,20 +433,384 @@ fn build_row_factory(on_move: MoveCallbackHolder) -> gtk::SignalListItemFactory 
         let Ok(icon) = icon_widget.downcast::<gtk::Image>() else {
             return;
         };
-        let Some(label_widget) = icon.next_sibling() else {
+        let Some(stack_widget) = icon.next_sibling() else {
             return;
         };
-        let Ok(label) = label_widget.downcast::<gtk::Label>() else {
+        let Ok(name_stack) = stack_widget.downcast::<gtk::Stack>() else {
+            return;
+        };
+        let Some(label) = name_stack
+            .child_by_name("label")
+            .and_then(|child| child.downcast::<gtk::Label>().ok())
+        else {
+            return;
+        };
+        let Some(entry) = name_stack
+            .child_by_name("entry")
+            .and_then(|child| child.downcast::<gtk::Entry>().ok())
+        else {
             return;
         };
 
         icon.set_icon_name(Some(icon_name));
         label.set_text(&label_text);
+        entry.set_text(&label_text);
+        name_stack.set_visible_child_name("label");
 
         attach_drag_and_drop(&row, playlist_item, on_move.clone());
+        attach_row_context_menu(
+            &row,
+            playlist_item,
+            label_text.clone(),
+            name_stack.clone(),
+            label.clone(),
+            entry.clone(),
+            on_delete.clone(),
+        );
+        attach_rename_entry_signals(
+            &entry,
+            &name_stack,
+            &label,
+            playlist_item,
+            on_rename.clone(),
+        );
     });
 
     factory
+}
+
+fn attach_row_context_menu(
+    row: &gtk::Box,
+    item: PlaylistItem,
+    current_name: String,
+    name_stack: gtk::Stack,
+    label: gtk::Label,
+    entry: gtk::Entry,
+    on_delete: DeleteCallbackHolder,
+) {
+    remove_secondary_gestures(row);
+
+    let gesture = gtk::GestureClick::new();
+    gesture.set_button(gdk::BUTTON_SECONDARY);
+    let row_widget = row.clone();
+    gesture.connect_pressed(move |gesture, _n_press, x, y| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        popup_row_context_menu(
+            &row_widget,
+            item,
+            current_name.clone(),
+            name_stack.clone(),
+            label.clone(),
+            entry.clone(),
+            on_delete.clone(),
+            x,
+            y,
+        );
+    });
+    row.add_controller(gesture);
+}
+
+fn remove_secondary_gestures(widget: &gtk::Box) {
+    let controllers = widget.observe_controllers();
+    let mut to_remove: Vec<gtk::EventController> = Vec::new();
+    for index in 0..controllers.n_items() {
+        let Some(object) = controllers.item(index) else {
+            continue;
+        };
+        let Some(gesture) = object.downcast_ref::<gtk::GestureClick>() else {
+            continue;
+        };
+        if gesture.button() != gdk::BUTTON_SECONDARY {
+            continue;
+        }
+        if let Ok(controller) = object.downcast::<gtk::EventController>() {
+            to_remove.push(controller);
+        }
+    }
+    for controller in to_remove {
+        widget.remove_controller(&controller);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn popup_row_context_menu(
+    anchor: &gtk::Box,
+    item: PlaylistItem,
+    current_name: String,
+    name_stack: gtk::Stack,
+    label: gtk::Label,
+    entry: gtk::Entry,
+    on_delete: DeleteCallbackHolder,
+    x: f64,
+    y: f64,
+) {
+    let popover = gtk::Popover::new();
+    popover.set_has_arrow(false);
+    popover.set_parent(anchor);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.add_css_class("sidebar-context-menu");
+
+    let rename_button = row_action_button("Rename");
+    let popover_for_rename = popover.clone();
+    let name_stack_for_rename = name_stack.clone();
+    let label_for_rename = label.clone();
+    let entry_for_rename = entry.clone();
+    rename_button.connect_clicked(move |_| {
+        popover_for_rename.popdown();
+        begin_rename(&name_stack_for_rename, &label_for_rename, &entry_for_rename);
+    });
+    content.append(&rename_button);
+
+    let delete_button = row_action_button(delete_label_for(item));
+    delete_button.add_css_class("destructive-action");
+    let popover_for_delete = popover.clone();
+    let anchor_for_delete = anchor.clone();
+    delete_button.connect_clicked(move |_| {
+        popover_for_delete.popdown();
+        confirm_and_delete(
+            anchor_for_delete.upcast_ref::<gtk::Widget>(),
+            item,
+            current_name.clone(),
+            on_delete.clone(),
+        );
+    });
+    content.append(&delete_button);
+
+    popover.set_child(Some(&content));
+
+    let popover_for_close = popover.clone();
+    popover.connect_closed(move |_| {
+        popover_for_close.unparent();
+    });
+
+    let rect = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+    popover.set_pointing_to(Some(&rect));
+    popover.popup();
+}
+
+fn row_action_button(label_text: &str) -> gtk::Button {
+    let label = gtk::Label::new(Some(label_text));
+    label.set_xalign(0.0);
+    label.set_halign(gtk::Align::Fill);
+    label.set_hexpand(true);
+
+    let button = gtk::Button::new();
+    button.add_css_class("flat");
+    button.add_css_class("sidebar-context-menu-item");
+    button.set_child(Some(&label));
+    button.set_halign(gtk::Align::Fill);
+    button.set_hexpand(true);
+    button
+}
+
+fn delete_label_for(item: PlaylistItem) -> &'static str {
+    match item {
+        PlaylistItem::Folder(_) => "Delete Folder…",
+        PlaylistItem::Playlist(_) => "Delete Playlist",
+        PlaylistItem::SmartPlaylist(_) => "Delete Smart Playlist",
+    }
+}
+
+fn begin_rename(name_stack: &gtk::Stack, label: &gtk::Label, entry: &gtk::Entry) {
+    entry.set_text(&label.text());
+    name_stack.set_visible_child_name("entry");
+    entry.grab_focus();
+    entry.select_region(0, -1);
+}
+
+fn cancel_rename(name_stack: &gtk::Stack, label: &gtk::Label, entry: &gtk::Entry) {
+    entry.set_text(&label.text());
+    name_stack.set_visible_child_name("label");
+}
+
+fn commit_rename(
+    name_stack: &gtk::Stack,
+    label: &gtk::Label,
+    entry: &gtk::Entry,
+    item: PlaylistItem,
+    on_rename: &RenameCallbackHolder,
+) {
+    let new_name = entry.text().to_string();
+    let trimmed = new_name.trim();
+    if trimmed.is_empty() || trimmed == label.text().as_str() {
+        cancel_rename(name_stack, label, entry);
+        return;
+    }
+    name_stack.set_visible_child_name("label");
+    if let Some(callback) = on_rename.borrow().as_ref() {
+        callback(item, trimmed.to_owned());
+    }
+}
+
+fn attach_rename_entry_signals(
+    entry: &gtk::Entry,
+    name_stack: &gtk::Stack,
+    label: &gtk::Label,
+    item: PlaylistItem,
+    on_rename: RenameCallbackHolder,
+) {
+    remove_focus_controllers(entry);
+
+    let name_stack_for_activate = name_stack.clone();
+    let label_for_activate = label.clone();
+    let on_rename_for_activate = on_rename.clone();
+    entry.connect_activate(move |entry| {
+        commit_rename(
+            &name_stack_for_activate,
+            &label_for_activate,
+            entry,
+            item,
+            &on_rename_for_activate,
+        );
+    });
+
+    let key_controller = gtk::EventControllerKey::new();
+    let name_stack_for_escape = name_stack.clone();
+    let label_for_escape = label.clone();
+    let entry_for_escape = entry.clone();
+    key_controller.connect_key_pressed(move |_controller, key, _keycode, _state| {
+        if key == gdk::Key::Escape {
+            cancel_rename(&name_stack_for_escape, &label_for_escape, &entry_for_escape);
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    entry.add_controller(key_controller);
+
+    let focus_controller = gtk::EventControllerFocus::new();
+    let name_stack_for_focus = name_stack.clone();
+    let label_for_focus = label.clone();
+    let entry_for_focus = entry.clone();
+    let on_rename_for_focus = on_rename.clone();
+    focus_controller.connect_leave(move |_controller| {
+        if name_stack_for_focus.visible_child_name().as_deref() == Some("entry") {
+            commit_rename(
+                &name_stack_for_focus,
+                &label_for_focus,
+                &entry_for_focus,
+                item,
+                &on_rename_for_focus,
+            );
+        }
+    });
+    entry.add_controller(focus_controller);
+}
+
+fn remove_focus_controllers(entry: &gtk::Entry) {
+    let controllers = entry.observe_controllers();
+    let mut to_remove: Vec<gtk::EventController> = Vec::new();
+    for index in 0..controllers.n_items() {
+        let Some(object) = controllers.item(index) else {
+            continue;
+        };
+        if object.downcast_ref::<gtk::EventControllerKey>().is_some()
+            || object.downcast_ref::<gtk::EventControllerFocus>().is_some()
+        {
+            if let Ok(controller) = object.downcast::<gtk::EventController>() {
+                to_remove.push(controller);
+            }
+        }
+    }
+    for controller in to_remove {
+        entry.remove_controller(&controller);
+    }
+}
+
+fn confirm_and_delete(
+    anchor: &gtk::Widget,
+    item: PlaylistItem,
+    current_name: String,
+    on_delete: DeleteCallbackHolder,
+) {
+    let Some(root) = anchor.root() else {
+        return;
+    };
+    let Ok(parent_window) = root.downcast::<gtk::Window>() else {
+        return;
+    };
+
+    let (title, detail, button_label) = match item {
+        PlaylistItem::Folder(_) => (
+            "Delete Folder",
+            format!(
+                "\"{current_name}\" will be deleted along with every playlist, smart playlist, and folder inside it. This cannot be undone."
+            ),
+            "Delete Folder",
+        ),
+        PlaylistItem::Playlist(_) => (
+            "Delete Playlist",
+            format!("\"{current_name}\" will be removed from the sidebar. The tracks themselves stay in your library."),
+            "Delete Playlist",
+        ),
+        PlaylistItem::SmartPlaylist(_) => (
+            "Delete Smart Playlist",
+            format!("\"{current_name}\" will be removed from the sidebar. The tracks it currently matches stay in your library."),
+            "Delete Smart Playlist",
+        ),
+    };
+
+    let window = gtk::Window::builder()
+        .title(title)
+        .transient_for(&parent_window)
+        .modal(true)
+        .resizable(false)
+        .default_width(440)
+        .build();
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_top(18);
+    content.set_margin_end(18);
+    content.set_margin_bottom(18);
+    content.set_margin_start(18);
+
+    let detail_label = gtk::Label::new(Some(&detail));
+    detail_label.add_css_class("dim-label");
+    detail_label.set_xalign(0.0);
+    detail_label.set_wrap(true);
+    content.append(&detail_label);
+
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+
+    let cancel_button = gtk::Button::with_label("Cancel");
+    let delete_button = gtk::Button::with_label(button_label);
+    delete_button.add_css_class("destructive-action");
+
+    let window_for_cancel = window.clone();
+    cancel_button.connect_clicked(move |_| {
+        window_for_cancel.close();
+    });
+
+    let window_for_delete = window.clone();
+    delete_button.connect_clicked(move |_| {
+        if let Some(callback) = on_delete.borrow().as_ref() {
+            callback(item);
+        }
+        window_for_delete.close();
+    });
+
+    buttons.append(&cancel_button);
+    buttons.append(&delete_button);
+    content.append(&buttons);
+    window.set_child(Some(&content));
+    window.set_default_widget(Some(&cancel_button));
+
+    let key_controller = gtk::EventControllerKey::new();
+    let window_for_escape = window.clone();
+    key_controller.connect_key_pressed(move |_controller, key, _keycode, _state| {
+        if key == gdk::Key::Escape {
+            window_for_escape.close();
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    window.add_controller(key_controller);
+
+    window.present();
+    cancel_button.grab_focus();
 }
 
 fn attach_drag_and_drop(row: &gtk::Box, item: PlaylistItem, on_move: MoveCallbackHolder) {
