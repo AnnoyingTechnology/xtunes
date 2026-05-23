@@ -328,6 +328,10 @@ button.album-detail-icon-button:focus {
     padding: 4px;
 }
 
+.smart-playlist-error {
+    color: #e66100;
+}
+
 button.track-context-menu-item,
 button.sidebar-context-menu-item {
     min-height: 30px;

@@ -8,10 +8,12 @@ use gtk::{gdk, glib};
 
 pub(crate) const NEW_PLAYLIST_DEFAULT_NAME: &str = "untitled playlist";
 pub(crate) const NEW_PLAYLIST_FOLDER_DEFAULT_NAME: &str = "untitled folder";
+pub(crate) const NEW_SMART_PLAYLIST_DEFAULT_NAME: &str = "untitled smart playlist";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SidebarContextAction {
     NewPlaylist,
+    NewSmartPlaylist,
     NewPlaylistFolder,
 }
 
@@ -19,6 +21,7 @@ impl SidebarContextAction {
     fn label(self) -> &'static str {
         match self {
             Self::NewPlaylist => "New Playlist",
+            Self::NewSmartPlaylist => "New Smart Playlist\u{2026}",
             Self::NewPlaylistFolder => "New Playlist Folder",
         }
     }
@@ -26,6 +29,7 @@ impl SidebarContextAction {
     fn css_class(self) -> &'static str {
         match self {
             Self::NewPlaylist => "sidebar-context-new-playlist",
+            Self::NewSmartPlaylist => "sidebar-context-new-smart-playlist",
             Self::NewPlaylistFolder => "sidebar-context-new-playlist-folder",
         }
     }
@@ -33,6 +37,7 @@ impl SidebarContextAction {
 
 const SIDEBAR_CONTEXT_ACTIONS: &[SidebarContextAction] = &[
     SidebarContextAction::NewPlaylist,
+    SidebarContextAction::NewSmartPlaylist,
     SidebarContextAction::NewPlaylistFolder,
 ];
 
@@ -175,6 +180,10 @@ mod tests {
     #[test]
     fn action_labels_match_the_product_contract() {
         assert_eq!(SidebarContextAction::NewPlaylist.label(), "New Playlist");
+        assert_eq!(
+            SidebarContextAction::NewSmartPlaylist.label(),
+            "New Smart Playlist\u{2026}"
+        );
         assert_eq!(
             SidebarContextAction::NewPlaylistFolder.label(),
             "New Playlist Folder"

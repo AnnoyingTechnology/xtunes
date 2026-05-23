@@ -21,9 +21,11 @@ use super::{
     preferences::install_preferences_action,
     sidebar::{PlaylistSidebar, build_content_area},
     sidebar_context::{
-        NEW_PLAYLIST_DEFAULT_NAME, NEW_PLAYLIST_FOLDER_DEFAULT_NAME, SidebarActionCallback,
-        SidebarContextAction, SidebarContextMenu, unique_default_name,
+        NEW_PLAYLIST_DEFAULT_NAME, NEW_PLAYLIST_FOLDER_DEFAULT_NAME,
+        NEW_SMART_PLAYLIST_DEFAULT_NAME, SidebarActionCallback, SidebarContextAction,
+        SidebarContextMenu, unique_default_name,
     },
+    smart_playlist_editor::open_smart_playlist_editor,
     status_bar::StatusBar,
     titlebar::{
         Titlebar, build_titlebar, connect_titlebar_playback_controls, sync_play_pause_icon,
@@ -142,6 +144,7 @@ pub(crate) fn build_main_window(
         &playlists_table,
     ));
     sidebar.install_context_menu(SidebarContextMenu::new(sidebar_action_callback(
+        &window,
         &command_controller,
         &runtime,
         &sidebar,
@@ -217,45 +220,62 @@ fn library_changed_callback(
 }
 
 fn sidebar_action_callback(
+    parent: &gtk::ApplicationWindow,
     command_controller: &SharedCommandController,
     runtime: &SharedRuntime,
     sidebar: &PlaylistSidebar,
 ) -> SidebarActionCallback {
+    let parent = parent.clone();
     let command_controller = command_controller.clone();
     let runtime = runtime.clone();
     let sidebar = sidebar.clone();
 
-    Rc::new(move |action| {
-        let dispatched = match action {
-            SidebarContextAction::NewPlaylist => {
-                let existing_names: Vec<String> = runtime
-                    .borrow()
-                    .playlists()
-                    .iter()
-                    .map(|playlist| playlist.name.clone())
-                    .collect();
-                let name = unique_default_name(existing_names, NEW_PLAYLIST_DEFAULT_NAME);
-                command_controller.dispatch_succeeded(ApplicationCommand::CreatePlaylist {
-                    name,
-                    parent_folder_id: None,
-                })
+    Rc::new(move |action| match action {
+        SidebarContextAction::NewPlaylist => {
+            let existing_names: Vec<String> = runtime
+                .borrow()
+                .playlists()
+                .iter()
+                .map(|playlist| playlist.name.clone())
+                .collect();
+            let name = unique_default_name(existing_names, NEW_PLAYLIST_DEFAULT_NAME);
+            if command_controller.dispatch_succeeded(ApplicationCommand::CreatePlaylist {
+                name,
+                parent_folder_id: None,
+            }) {
+                sidebar.refresh();
             }
-            SidebarContextAction::NewPlaylistFolder => {
-                let existing_names: Vec<String> = runtime
-                    .borrow()
-                    .playlist_folders()
-                    .iter()
-                    .map(|folder| folder.name.clone())
-                    .collect();
-                let name = unique_default_name(existing_names, NEW_PLAYLIST_FOLDER_DEFAULT_NAME);
-                command_controller.dispatch_succeeded(ApplicationCommand::CreatePlaylistFolder {
-                    name,
-                    parent_folder_id: None,
-                })
+        }
+        SidebarContextAction::NewPlaylistFolder => {
+            let existing_names: Vec<String> = runtime
+                .borrow()
+                .playlist_folders()
+                .iter()
+                .map(|folder| folder.name.clone())
+                .collect();
+            let name = unique_default_name(existing_names, NEW_PLAYLIST_FOLDER_DEFAULT_NAME);
+            if command_controller.dispatch_succeeded(ApplicationCommand::CreatePlaylistFolder {
+                name,
+                parent_folder_id: None,
+            }) {
+                sidebar.refresh();
             }
-        };
-        if dispatched {
-            sidebar.refresh();
+        }
+        SidebarContextAction::NewSmartPlaylist => {
+            let existing_names: Vec<String> = runtime
+                .borrow()
+                .smart_playlists()
+                .iter()
+                .map(|smart| smart.name.clone())
+                .collect();
+            let name = unique_default_name(existing_names, NEW_SMART_PLAYLIST_DEFAULT_NAME);
+            let sidebar_for_created = sidebar.clone();
+            open_smart_playlist_editor(
+                &parent,
+                command_controller.clone(),
+                Rc::new(move || sidebar_for_created.refresh()),
+                name,
+            );
         }
     })
 }
