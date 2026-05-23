@@ -1,16 +1,16 @@
-# xTunes Project Basis
+# Sustain Project Basis
 
-`xTunes` is a Linux-only, Debian-first music library/player intended to replace
+`Sustain` is a Linux-only, Debian-first music library/player intended to replace
 Rhythmbox for a single primary user. The product target is an
 iTunes-like desktop music manager, roughly aligned with the dense, predictable
 library workflow of iTunes 11, circa 2012.
 
 Project and application naming:
 
-- Product/application name: `xTunes`
-- Rust binary name: `xtunes`
-- Rust crate/package prefix: `xtunes-*` / `xtunes_*`
-- Linux application id: `io.github.open_xtunes.xtunes`
+- Product/application name: `Sustain`
+- Rust binary name: `sustain`
+- Rust crate/package prefix: `sustain-*` / `sustain_*`
+- Linux application id: `io.github.open_sustain.sustain`
 
 Rhythmbox is treated as an import source only. Do not design runtime features
 that depend on Rhythmbox internals, plugins, themes, or UI behavior.
@@ -56,7 +56,7 @@ Prioritize:
 - playlist sidebar stays below the media top bar, left of the main content
 - mode switcher belongs to the main content column, not to the full window root
 - predictable iTunes-like library and playlist behavior
-- first-class native GTK light and dark appearance; do not add an xTunes theme picker
+- first-class native GTK light and dark appearance; do not add an Sustain theme picker
 - fast search/filtering over a large local music library
 - settings/preferences
 - robust import from Rhythmbox library data
@@ -83,7 +83,7 @@ Rating persistence:
 
 ## Development Phase
 
-xTunes is in pre-release development. It has never been published and has no
+Sustain is in pre-release development. It has never been published and has no
 external users; the only databases, settings files, or on-disk artefacts that
 exist are the maintainer's local working copies.
 

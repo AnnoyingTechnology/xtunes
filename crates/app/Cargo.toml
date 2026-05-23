@@ -1,44 +1,44 @@
 [package]
-name = "xtunes-app"
+name = "sustain-app"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Music library and player for Linux"
 license.workspace = true
-homepage = "https://github.com/open-xtunes/xtunes"
-repository = "https://github.com/open-xtunes/xtunes"
+homepage = "https://github.com/open-sustain/sustain"
+repository = "https://github.com/open-sustain/sustain"
 authors = ["AnnoyingTechnology"]
 
 [[bin]]
-name = "xtunes"
+name = "sustain"
 path = "src/main.rs"
 
 [dependencies]
-xtunes-app-runtime = { path = "../app_runtime" }
-xtunes-library-store = { path = "../library_store" }
-xtunes-metadata = { path = "../metadata" }
-xtunes-playback = { path = "../playback" }
-xtunes-settings = { path = "../settings" }
-xtunes-ui-gtk = { path = "../ui_gtk" }
+sustain-app-runtime = { path = "../app_runtime" }
+sustain-library-store = { path = "../library_store" }
+sustain-metadata = { path = "../metadata" }
+sustain-playback = { path = "../playback" }
+sustain-settings = { path = "../settings" }
+sustain-ui-gtk = { path = "../ui_gtk" }
 
 [lints]
 workspace = true
 
 [package.metadata.deb]
-name = "xtunes"
-maintainer = "xTunes contributors <https://github.com/open-xtunes/xtunes>"
+name = "sustain"
+maintainer = "Sustain contributors <https://github.com/open-sustain/sustain>"
 section = "sound"
 priority = "optional"
 depends = "$auto, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad"
 assets = [
-    ["target/release/xtunes", "usr/bin/", "755"],
-    ["../../data/io.github.open_xtunes.xtunes.desktop", "usr/share/applications/", "644"],
-    ["../../data/icons/hicolor/16x16/apps/io.github.open_xtunes.xtunes.png", "usr/share/icons/hicolor/16x16/apps/", "644"],
-    ["../../data/icons/hicolor/24x24/apps/io.github.open_xtunes.xtunes.png", "usr/share/icons/hicolor/24x24/apps/", "644"],
-    ["../../data/icons/hicolor/32x32/apps/io.github.open_xtunes.xtunes.png", "usr/share/icons/hicolor/32x32/apps/", "644"],
-    ["../../data/icons/hicolor/48x48/apps/io.github.open_xtunes.xtunes.png", "usr/share/icons/hicolor/48x48/apps/", "644"],
-    ["../../data/icons/hicolor/64x64/apps/io.github.open_xtunes.xtunes.png", "usr/share/icons/hicolor/64x64/apps/", "644"],
-    ["../../data/icons/hicolor/128x128/apps/io.github.open_xtunes.xtunes.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
-    ["../../data/icons/hicolor/256x256/apps/io.github.open_xtunes.xtunes.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
-    ["../../data/icons/hicolor/512x512/apps/io.github.open_xtunes.xtunes.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
+    ["target/release/sustain", "usr/bin/", "755"],
+    ["../../data/io.github.open_sustain.sustain.desktop", "usr/share/applications/", "644"],
+    ["../../data/icons/hicolor/16x16/apps/io.github.open_sustain.sustain.png", "usr/share/icons/hicolor/16x16/apps/", "644"],
+    ["../../data/icons/hicolor/24x24/apps/io.github.open_sustain.sustain.png", "usr/share/icons/hicolor/24x24/apps/", "644"],
+    ["../../data/icons/hicolor/32x32/apps/io.github.open_sustain.sustain.png", "usr/share/icons/hicolor/32x32/apps/", "644"],
+    ["../../data/icons/hicolor/48x48/apps/io.github.open_sustain.sustain.png", "usr/share/icons/hicolor/48x48/apps/", "644"],
+    ["../../data/icons/hicolor/64x64/apps/io.github.open_sustain.sustain.png", "usr/share/icons/hicolor/64x64/apps/", "644"],
+    ["../../data/icons/hicolor/128x128/apps/io.github.open_sustain.sustain.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
+    ["../../data/icons/hicolor/256x256/apps/io.github.open_sustain.sustain.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+    ["../../data/icons/hicolor/512x512/apps/io.github.open_sustain.sustain.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
 ]

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use xtunes_domain::{MetadataChange, Rating, TrackId};
+use sustain_domain::{MetadataChange, Rating, TrackId};
 
 use crate::{
     ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult,

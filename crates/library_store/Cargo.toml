@@ -1,17 +1,17 @@
 [package]
-name = "xtunes-library-store"
+name = "sustain-library-store"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [lib]
-name = "xtunes_library_store"
+name = "sustain_library_store"
 path = "src/lib.rs"
 
 [dependencies]
 rusqlite = { version = "0.39.0", features = ["bundled"] }
-xtunes-domain = { path = "../domain" }
+sustain-domain = { path = "../domain" }
 
 [lints]
 workspace = true

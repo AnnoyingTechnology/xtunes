@@ -1,19 +1,19 @@
-# xTunes
+# Sustain
 
-![xTunes interface screenshot dark](screenshot-dark.png)
+![Sustain interface screenshot dark](screenshot-dark.png)
 
-![xTunes interface screenshot dark](screenshot-light.png)
+![Sustain interface screenshot dark](screenshot-light.png)
 
-Open xTunes is a Linux music player heavily inspired by old iTunes builds.
+Open Sustain is a Linux music player heavily inspired by old iTunes builds.
 
 > I was an Apple fanboy during the iTunes golden era (2005-2015).
-> Each new release was a real treat and what I miss most after switching to Linux.
+> Each new release was a treat and what I still miss years after switching to Linux.
 > Advent of solid LLM agents in late 2025 allowed me to get a substitute rolling.
 
 This player is not an iTunes clone for a few reasons :
 - each versions brought and took away good things, I'm cherry picking what I believe to be tasteful,
 - bloat has not been ported,
-- features for music lovers are added.
+- features for music lovers have been added.
 
 This player is not designed by commity. 
 It's autoritarian, as I believe was the case for most good Apple products.
@@ -26,10 +26,17 @@ The library management has two modes, similar to what iTunes does :
 - "Don't touch my files" (default), which only scans a designated library folder. In this mode, your audio files can only be "enhanced" by populating more ID.3 tags. They are never moved or re-organized.
 - "Keep my library organized", which arranges and sorts the files cleanly by Artist and Album in the designated library folder. 
 
+## Stack
+
 The stack is Rust, GTK4, GStreamer, and SQLite. It should work on any linux distro. 
 I'm striving for fast, safe and maintainable code.
 
-Features that will _probably_ come later :
+## Features
+
+Implemented:
+- Playlists, Smart playlists, playlists folders
+
+_probably_ coming later :
 - Import from iTunes/Apple Music (.xml)
 - Import from Rhythmbox
 - BPM detection [drift from iTunes features]
@@ -45,15 +52,15 @@ Features that will _probably_ come later :
 
 ## Key locations
 
-- Config: `~/.config/xtunes/settings.toml`
-- Database: `~/.local/share/xtunes/library.sqlite`
+- Config: `~/.config/sustain/settings.toml`
+- Database: `~/.local/share/sustain/library.sqlite`
 
 ## Development
 
 ```sh
 sudo apt install libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
-cargo run -p xtunes-app
+cargo run -p sustain-app
 cargo test --workspace
 cargo clippy --workspace --all-targets
 ```
@@ -62,3 +69,7 @@ cargo clippy --workspace --all-targets
 
 A longtime friend who stayed on macOS told me iTunes (now Apple Music) had "lost the plot" and that he'd love a version without all the junk. He told me the latest Apple Music puts the player at the bottom of the window. I didn't believe him, turns out it's true.
 Apple has lost its way, but 2010-era Apple nailed music playback and I know what would improve on that. So there's probably room for a deshitified iTunes on macOS too.
+
+## No Apple intellectual property
+
+This project was written from scratch in Rust, against GTK4 and GStreamer. No Apple source code was read, decompiled, disassembled, or reverse-engineered in the making of Sustain. No Apple binaries, icons, fonts, artwork, sound effects, or localized strings are bundled or redistributed here. The visual and behavioral inspiration comes entirely from my memory and taste as a long-time iTunes user — i.e. from the publicly observable user experience of the application, which is not protected by copyright under EU law (cf. CJEU C-406/10, *SAS Institute v. World Programming*). Sustain is not affiliated with, endorsed by, or connected to Apple Inc. in any way. "iTunes" and "Apple Music" are trademarks of Apple Inc., referenced here only descriptively.

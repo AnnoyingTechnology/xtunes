@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
-use xtunes_app_runtime::{PlaylistId, TrackId};
+use sustain_app_runtime::{PlaylistId, TrackId};
 
 pub(crate) type TrackActionCallback = Rc<dyn Fn(Vec<TrackId>)>;
 pub(crate) type TrackActionVisibility = Rc<dyn Fn(&[TrackId]) -> bool>;
@@ -638,7 +638,7 @@ fn trash_confirmation_detail(count: usize) -> String {
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
-    use xtunes_app_runtime::TrackId;
+    use sustain_app_runtime::TrackId;
 
     use super::{
         TrackActionCallback, TrackActionVisibility, TrackContextAction, TrackContextActionId,

@@ -1,21 +1,21 @@
 [package]
-name = "xtunes-app-runtime"
+name = "sustain-app-runtime"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [lib]
-name = "xtunes_app_runtime"
+name = "sustain_app_runtime"
 path = "src/lib.rs"
 
 [dependencies]
 trash = "5"
-xtunes-settings = { path = "../settings" }
-xtunes-domain = { path = "../domain" }
-xtunes-library-store = { path = "../library_store" }
-xtunes-metadata = { path = "../metadata" }
-xtunes-playback = { path = "../playback" }
+sustain-settings = { path = "../settings" }
+sustain-domain = { path = "../domain" }
+sustain-library-store = { path = "../library_store" }
+sustain-metadata = { path = "../metadata" }
+sustain-playback = { path = "../playback" }
 
 [lints]
 workspace = true

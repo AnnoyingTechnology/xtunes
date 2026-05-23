@@ -4,7 +4,7 @@
 use std::{cell::Cell, rc::Rc};
 
 use gtk::prelude::*;
-use xtunes_app_runtime::{ApplicationCommand, PlaybackCommand, PlaybackState, VolumePercent};
+use sustain_app_runtime::{ApplicationCommand, PlaybackCommand, PlaybackState, VolumePercent};
 
 use super::{
     DEFAULT_VOLUME_PERCENT, MEDIA_ICON_SIZE, NOW_PLAYING_HORIZONTAL_MARGIN,

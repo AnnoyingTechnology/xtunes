@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use xtunes_domain::{
+use sustain_domain::{
     PlaybackCommand, PlaybackQueue, PlaybackQueueSource, PlaybackState, TrackId,
     TrackPlaybackSource,
 };
-use xtunes_playback::PlaybackService;
+use sustain_playback::PlaybackService;
 
 use crate::{ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult};
 

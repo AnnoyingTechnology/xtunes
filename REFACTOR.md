@@ -1,4 +1,4 @@
-# xTunes Refactor Plan
+# Sustain Refactor Plan
 
 This is a prioritized refactor list for the next feature wave: real shuffle and
 repeat behavior, richer preferences, larger track context menus, regular
@@ -63,7 +63,7 @@ Scope:
 - Make play-library, play-album, play-playlist, and play-selection feed the same
   queue machinery.
 - Keep GStreamer as a playback service only; queue semantics belong in domain or
-  app-runtime, not in `xtunes-playback`.
+  app-runtime, not in `sustain-playback`.
 
 Acceptance criteria:
 
@@ -327,7 +327,7 @@ them.
 ### 12. Prepare library organization mode
 
 Settings will need a "Keep my library organized" checkbox. This is not just UI
-state: it means newly added tracks become managed by xTunes and are moved into a
+state: it means newly added tracks become managed by Sustain and are moved into a
 clean metadata-derived path under the library root, such as
 artist/album/track.ext.
 
@@ -355,7 +355,7 @@ Acceptance criteria:
 ### 13. Extract and centralize app CSS - Done
 
 Custom CSS is currently installed from a large string in `ui_gtk/src/lib.rs`.
-Theme behavior is important for xTunes, and this will become harder to audit as
+Theme behavior is important for Sustain, and this will become harder to audit as
 more views, including File Info, are added.
 
 Static CSS now lives in `ui_gtk/src/app.css` and is installed through the
@@ -366,7 +366,7 @@ Scope:
 - Move static CSS into an `app_css` module or GTK resource file.
 - Keep theme-aware tokens centralized.
 - Continue relying on native GTK light/dark behavior.
-- Only force colors where xTunes controls both background and foreground.
+- Only force colors where Sustain controls both background and foreground.
 
 Acceptance criteria:
 

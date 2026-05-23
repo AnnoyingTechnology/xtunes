@@ -1,12 +1,12 @@
 [package]
-name = "xtunes-domain"
+name = "sustain-domain"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [lib]
-name = "xtunes_domain"
+name = "sustain_domain"
 path = "src/lib.rs"
 
 [lints]

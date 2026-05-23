@@ -11,7 +11,7 @@ use std::{
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
-use xtunes_app_runtime::{ApplicationCommand, PlaybackCommand, Track, TrackId};
+use sustain_app_runtime::{ApplicationCommand, PlaybackCommand, Track, TrackId};
 
 use super::{
     PlaybackChangedCallback, SharedRuntime, artwork_color::ArtworkPalette,

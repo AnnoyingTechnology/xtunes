@@ -1,19 +1,19 @@
 [package]
-name = "xtunes-settings"
+name = "sustain-settings"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [lib]
-name = "xtunes_settings"
+name = "sustain_settings"
 path = "src/lib.rs"
 
 [dependencies]
 directories = "6.0.0"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"
-xtunes-domain = { path = "../domain" }
+sustain-domain = { path = "../domain" }
 
 [lints]
 workspace = true

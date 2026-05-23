@@ -10,7 +10,7 @@ use std::{
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
-use xtunes_app_runtime::{
+use sustain_app_runtime::{
     PlaybackCommand, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId,
     PlaylistItem, Rating, Track, TrackId,
 };
@@ -60,7 +60,7 @@ pub(crate) fn build_main_window(
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .decorated(false)
-        .title("xTunes")
+        .title("Sustain")
         .default_width(1100)
         .default_height(720)
         .build();
@@ -527,7 +527,7 @@ fn resolve_move_target(
     source: PlaylistItem,
     target: PlaylistItem,
     drop_position: super::sidebar::DropPosition,
-) -> Option<(Option<xtunes_app_runtime::PlaylistFolderId>, u32)> {
+) -> Option<(Option<sustain_app_runtime::PlaylistFolderId>, u32)> {
     use super::sidebar::DropPosition;
     if source == target {
         return None;

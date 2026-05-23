@@ -5,7 +5,7 @@
 
 use std::cmp::Ordering;
 
-pub use xtunes_domain::{LibraryQuery, SortDirection, Track, TrackSort, TrackSortColumn};
+pub use sustain_domain::{LibraryQuery, SortDirection, Track, TrackSort, TrackSortColumn};
 
 pub type SearchResult<T> = Result<T, SearchError>;
 
@@ -126,7 +126,7 @@ fn normalize(value: &str) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use xtunes_domain::{
+    use sustain_domain::{
         PlayStatistics, Rating, TrackId, TrackLocation, TrackMetadata, TrackRelativePath,
     };
 

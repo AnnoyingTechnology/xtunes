@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use xtunes_domain::{PlaylistFolder, PlaylistFolderId};
+use sustain_domain::{PlaylistFolder, PlaylistFolderId};
 
 use crate::{
     ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult, playlist_items,

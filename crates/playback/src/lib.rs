@@ -8,7 +8,7 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 use gst::glib;
 use gst::prelude::*;
 use gstreamer as gst;
-pub use xtunes_domain::{PlaybackCommand, PlaybackState, TrackPlaybackSource, VolumePercent};
+pub use sustain_domain::{PlaybackCommand, PlaybackState, TrackPlaybackSource, VolumePercent};
 
 pub type PlaybackResult<T> = Result<T, PlaybackError>;
 
@@ -289,7 +289,7 @@ fn duration_from_clock_time(clock_time: gst::ClockTime) -> Duration {
 mod tests {
     use std::{path::PathBuf, time::Duration};
 
-    use xtunes_domain::TrackId;
+    use sustain_domain::TrackId;
 
     use super::{
         NullPlaybackService, PlaybackError, PlaybackService, PlaybackState, VolumePercent,

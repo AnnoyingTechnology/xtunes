@@ -8,7 +8,7 @@ use std::{cell::RefCell, rc::Rc};
 use gtk::prelude::*;
 use main_window::build_main_window;
 
-pub use xtunes_app_runtime::{
+pub use sustain_app_runtime::{
     ApplicationCommand, ApplicationQuery, ApplicationRuntime, ApplicationRuntimeError,
     BackgroundTaskStatus, LibraryScanResult, LibraryScanSummary, UserSettings,
     run_library_scan_task,
@@ -62,7 +62,7 @@ const VOLUME_WIDTH: i32 = 192;
 const DEFAULT_VOLUME_PERCENT: u8 = 80;
 const VOLUME_MAGNET_THRESHOLD: f64 = 0.90;
 const WINDOW_SHADOW_MARGIN: i32 = 14;
-const APP_ID: &str = "io.github.open_xtunes.xtunes";
+const APP_ID: &str = "io.github.open_sustain.sustain";
 const SONGS_VIEW: &str = "songs";
 const ALBUMS_VIEW: &str = "albums";
 const PLAYLISTS_VIEW: &str = "playlists";
@@ -71,7 +71,7 @@ pub(crate) type SharedRuntime = Rc<RefCell<ApplicationRuntime>>;
 pub(crate) type LibraryChangedCallback = Rc<dyn Fn()>;
 pub(crate) type LibraryChangedHolder = Rc<RefCell<Option<LibraryChangedCallback>>>;
 pub(crate) type PlaybackChangedCallback = Rc<dyn Fn()>;
-pub(crate) type ShowAlbumAction = Rc<dyn Fn(xtunes_app_runtime::TrackId)>;
+pub(crate) type ShowAlbumAction = Rc<dyn Fn(sustain_app_runtime::TrackId)>;
 pub(crate) type ShowAlbumHolder = Rc<RefCell<Option<ShowAlbumAction>>>;
 
 pub fn run(runtime: ApplicationRuntime) {

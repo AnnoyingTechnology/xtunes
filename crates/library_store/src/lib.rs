@@ -14,11 +14,11 @@ use std::{
 use std::num::NonZeroU32;
 
 use rusqlite::{Connection, Row, params};
-pub use xtunes_domain::{
+pub use sustain_domain::{
     LibraryQuery, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, Rating, SmartPlaylist,
     SmartPlaylistId, Track, TrackId,
 };
-use xtunes_domain::{
+use sustain_domain::{
     PlayStatistics, PlaylistEntry, SmartPlaylistDateField, SmartPlaylistLimit,
     SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistNumberField,
     SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField,
@@ -132,7 +132,7 @@ impl SqliteLibraryStore {
             .map_err(|_| StoreError::StoreUnavailable)
     }
 
-    // xTunes is in pre-release development: the SQLite schema is not yet stable.
+    // Sustain is in pre-release development: the SQLite schema is not yet stable.
     // Schema changes are made by editing the CREATE TABLE statements below; any
     // existing local database is expected to be wiped and rebuilt from a library
     // re-scan, not migrated. Do not add migration code for in-development schemas.
@@ -236,7 +236,7 @@ fn default_database_path() -> Option<std::path::PathBuf> {
     if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
         return Some(
             std::path::PathBuf::from(data_home)
-                .join("xtunes")
+                .join("sustain")
                 .join("library.sqlite"),
         );
     }
@@ -245,7 +245,7 @@ fn default_database_path() -> Option<std::path::PathBuf> {
         std::path::PathBuf::from(home)
             .join(".local")
             .join("share")
-            .join("xtunes")
+            .join("sustain")
             .join("library.sqlite")
     })
 }
@@ -266,7 +266,7 @@ fn track_matches_search(track: &Track, search_text: &str) -> bool {
     .any(|value| value.to_ascii_lowercase().contains(&needle))
 }
 
-fn sort_tracks(tracks: &mut [Track], sort: xtunes_domain::TrackSort) {
+fn sort_tracks(tracks: &mut [Track], sort: sustain_domain::TrackSort) {
     tracks.sort_by(|left, right| {
         let ordering = compare_tracks(left, right, sort.column);
         let ordering = if sort.column == TrackSortColumn::PlaylistPosition {
@@ -1630,7 +1630,7 @@ mod tests {
 
     use std::{num::NonZeroU32, time::SystemTime};
 
-    use xtunes_domain::{
+    use sustain_domain::{
         PlayStatistics, PlaylistEntry, Rating, SmartPlaylistDateField, SmartPlaylistLimit,
         SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistNumberField,
         SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet,

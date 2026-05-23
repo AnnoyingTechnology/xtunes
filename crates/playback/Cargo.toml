@@ -1,17 +1,17 @@
 [package]
-name = "xtunes-playback"
+name = "sustain-playback"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [lib]
-name = "xtunes_playback"
+name = "sustain_playback"
 path = "src/lib.rs"
 
 [dependencies]
 gstreamer = "0.24.5"
-xtunes-domain = { path = "../domain" }
+sustain-domain = { path = "../domain" }
 
 [lints]
 workspace = true

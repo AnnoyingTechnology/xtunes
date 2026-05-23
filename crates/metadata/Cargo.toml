@@ -1,17 +1,17 @@
 [package]
-name = "xtunes-metadata"
+name = "sustain-metadata"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [lib]
-name = "xtunes_metadata"
+name = "sustain_metadata"
 path = "src/lib.rs"
 
 [dependencies]
 lofty = "0.24.0"
-xtunes-domain = { path = "../domain" }
+sustain-domain = { path = "../domain" }
 
 [lints]
 workspace = true

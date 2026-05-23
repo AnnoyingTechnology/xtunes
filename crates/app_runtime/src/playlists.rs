@@ -3,8 +3,8 @@
 
 use std::collections::BTreeSet;
 
-use xtunes_domain::{Playlist, PlaylistEntry, PlaylistFolderId, PlaylistId, TrackId};
-use xtunes_library_store::LibraryStore;
+use sustain_domain::{Playlist, PlaylistEntry, PlaylistFolderId, PlaylistId, TrackId};
+use sustain_library_store::LibraryStore;
 
 use crate::{
     ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult, playlist_items,

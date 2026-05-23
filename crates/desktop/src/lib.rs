@@ -5,7 +5,7 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-pub use xtunes_app_runtime::{ApplicationCommand, ApplicationQuery, PlaybackState, TrackId};
+pub use sustain_app_runtime::{ApplicationCommand, ApplicationQuery, PlaybackState, TrackId};
 
 pub type DesktopResult<T> = Result<T, DesktopError>;
 

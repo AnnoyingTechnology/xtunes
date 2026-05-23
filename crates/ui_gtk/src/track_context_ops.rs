@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 use gtk::{FileLauncher, gdk, gio};
-use xtunes_app_runtime::{ApplicationCommand, PlaybackCommand, TrackId};
+use sustain_app_runtime::{ApplicationCommand, PlaybackCommand, TrackId};
 
 use super::{
     LibraryChangedHolder, SharedRuntime, ShowAlbumHolder,
@@ -143,7 +143,7 @@ fn copy_paths_to_clipboard(window: &gtk::Window, paths: &[PathBuf]) {
     let file_list = gdk::FileList::from_array(&files);
     let provider = gdk::ContentProvider::for_value(&file_list.to_value());
     if let Err(error) = window.clipboard().set_content(Some(&provider)) {
-        eprintln!("xtunes: clipboard set failed: {error}");
+        eprintln!("sustain: clipboard set failed: {error}");
     }
 }
 
@@ -157,7 +157,7 @@ fn show_path_in_folder(window: &gtk::Window, path: &Path) {
     let launcher = FileLauncher::new(Some(&file));
     launcher.open_containing_folder(Some(window), None::<&gio::Cancellable>, |result| {
         if let Err(error) = result {
-            eprintln!("xtunes: open containing folder failed: {error}");
+            eprintln!("sustain: open containing folder failed: {error}");
         }
     });
 }

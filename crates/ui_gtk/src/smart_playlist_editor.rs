@@ -11,7 +11,7 @@ use std::{
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 
-use xtunes_app_runtime::{
+use sustain_app_runtime::{
     ApplicationCommand, Rating, SmartPlaylistDateField, SmartPlaylistId, SmartPlaylistLimit,
     SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistNumberField,
     SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField,
@@ -424,7 +424,11 @@ impl RuleRow {
 
     fn extract(&self) -> Result<SmartPlaylistRule, RuleError> {
         let input = value_input_from_widget(&self.current_value.borrow());
-        extract_rule(self.current_field.get(), self.current_operator.get(), &input)
+        extract_rule(
+            self.current_field.get(),
+            self.current_operator.get(),
+            &input,
+        )
     }
 }
 
@@ -535,9 +539,7 @@ fn extract_rule(
         (EditorField::Text(text_field), EditorOperator::TextIsPresent) => {
             Ok(SmartPlaylistRule::TextIsPresent { field: text_field })
         }
-        (EditorField::Number(number_field), op)
-            if matches!(op.value_kind(), ValueKind::Number) =>
-        {
+        (EditorField::Number(number_field), op) if matches!(op.value_kind(), ValueKind::Number) => {
             let parsed = read_number(value)?;
             Ok(SmartPlaylistRule::Number {
                 field: number_field,

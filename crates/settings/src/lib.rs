@@ -12,7 +12,7 @@ use std::{
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
-pub use xtunes_domain::{LibrarySettings, UserSettings};
+pub use sustain_domain::{LibrarySettings, UserSettings};
 
 pub type SettingsResult<T> = Result<T, SettingsError>;
 
@@ -74,7 +74,7 @@ impl TomlSettingsStore {
     pub fn open_default() -> SettingsResult<Self> {
         let base_dirs = BaseDirs::new().ok_or(SettingsError::ConfigDirectoryUnavailable)?;
         Ok(Self::new(
-            base_dirs.config_dir().join("xtunes").join("settings.toml"),
+            base_dirs.config_dir().join("sustain").join("settings.toml"),
         ))
     }
 
@@ -192,8 +192,8 @@ mod tests {
             .expect("system clock after unix epoch")
             .as_nanos();
         std::env::temp_dir()
-            .join(format!("xtunes_settings_test_{unique_suffix}"))
-            .join("xtunes")
+            .join(format!("sustain_settings_test_{unique_suffix}"))
+            .join("sustain")
             .join("settings.toml")
     }
 }

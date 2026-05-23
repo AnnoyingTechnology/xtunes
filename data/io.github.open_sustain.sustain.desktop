@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=xTunes
+Name=Sustain
 Comment=Music library and player
-Exec=xtunes
-Icon=io.github.open_xtunes.xtunes
+Exec=sustain
+Icon=io.github.open_sustain.sustain
 Terminal=false
 Categories=Audio;Music;Player;GTK;
 Keywords=music;player;library;audio;
-StartupWMClass=io.github.open_xtunes.xtunes
+StartupWMClass=io.github.open_sustain.sustain

@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use xtunes_app_runtime::{Track, TrackId, TrackMetadata};
+use sustain_app_runtime::{Track, TrackId, TrackMetadata};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct AlbumViewModel {
@@ -170,7 +170,7 @@ fn normalize_album_key(value: &str) -> String {
 mod tests {
     use std::{path::PathBuf, time::Duration};
 
-    use xtunes_app_runtime::{
+    use sustain_app_runtime::{
         PlayStatistics, Rating, Track, TrackId, TrackLocation, TrackMetadata, TrackRelativePath,
     };
 

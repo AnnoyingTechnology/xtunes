@@ -7,11 +7,11 @@ use std::{
     time::SystemTime,
 };
 
-use xtunes_domain::{
+use sustain_domain::{
     PlayStatistics, Track, TrackAvailability, TrackId, TrackLocation, TrackRelativePath,
 };
-use xtunes_library_store::LibraryStore;
-use xtunes_metadata::{LibraryScan, LibraryScanner, ScannedTrack};
+use sustain_library_store::LibraryStore;
+use sustain_metadata::{LibraryScan, LibraryScanner, ScannedTrack};
 
 use crate::{
     ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult, LibraryScanResult,

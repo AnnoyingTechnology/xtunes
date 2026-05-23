@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
 };
 
-pub use xtunes_domain::{
+pub use sustain_domain::{
     ApplicationCommand, ApplicationQuery, FieldChange, LibrarySettings, MetadataChange,
     PlayStatistics, PlaybackCommand, PlaybackOptions, PlaybackQueue, PlaybackQueueSource,
     PlaybackState, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId,
@@ -19,11 +19,11 @@ pub use xtunes_domain::{
     TrackLocation, TrackMetadata, TrackPlaybackSource, TrackRelativePath, UserSettings,
     VolumePercent, matching_tracks,
 };
-use xtunes_library_store::LibraryStore;
-use xtunes_metadata::MetadataService;
-use xtunes_playback::PlaybackService;
-pub use xtunes_playback::TrackEndedCallback;
-use xtunes_settings::SettingsStore;
+use sustain_library_store::LibraryStore;
+use sustain_metadata::MetadataService;
+use sustain_playback::PlaybackService;
+pub use sustain_playback::TrackEndedCallback;
+use sustain_settings::SettingsStore;
 
 mod commands;
 mod library_mutation;
@@ -315,17 +315,17 @@ mod tests {
         sync::{Arc, Mutex, MutexGuard},
     };
 
-    use xtunes_domain::{
+    use sustain_domain::{
         ApplicationCommand, FieldChange, PlayStatistics, PlaybackCommand, PlaybackOptions,
         PlaybackState, Playlist, PlaylistFolderId, PlaylistId, PlaylistItem, Rating, RepeatMode,
         SmartPlaylistId, SmartPlaylistMatchKind, SmartPlaylistRule, SmartPlaylistRuleSet,
         SmartPlaylistTextField, SmartPlaylistTextOperator, Track, TrackId, TrackLocation,
         TrackMetadata, UserSettings, VolumePercent,
     };
-    use xtunes_library_store::{InMemoryLibraryStore, LibraryStore, StoreResult};
-    use xtunes_metadata::{MetadataChange, MetadataError, MetadataResult};
-    use xtunes_playback::NullPlaybackService;
-    use xtunes_settings::{SettingsError, SettingsResult, SettingsStore};
+    use sustain_library_store::{InMemoryLibraryStore, LibraryStore, StoreResult};
+    use sustain_metadata::{MetadataChange, MetadataError, MetadataResult};
+    use sustain_playback::NullPlaybackService;
+    use sustain_settings::{SettingsError, SettingsResult, SettingsStore};
 
     use super::{ApplicationRuntime, ApplicationRuntimeError, LibraryScanSummary, MetadataService};
 
@@ -1879,7 +1879,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock after unix epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("xtunes_runtime_test_{unique_suffix}"))
+        std::env::temp_dir().join(format!("sustain_runtime_test_{unique_suffix}"))
     }
 
     fn positive_track_id() -> TrackId {

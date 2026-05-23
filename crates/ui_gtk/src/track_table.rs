@@ -7,7 +7,7 @@ use gtk::{gio, glib};
 use std::cell::Cell;
 use std::cmp::Ordering as CmpOrdering;
 use std::rc::Rc;
-use xtunes_app_runtime::{Rating, TrackId};
+use sustain_app_runtime::{Rating, TrackId};
 
 use super::track_context::TrackRowContextMenu;
 use cells::{

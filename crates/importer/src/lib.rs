@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-pub use xtunes_domain::{PlayStatistics, Rating, TrackMetadata};
+pub use sustain_domain::{PlayStatistics, Rating, TrackMetadata};
 
 pub type ImportResult<T> = Result<T, ImportError>;
 

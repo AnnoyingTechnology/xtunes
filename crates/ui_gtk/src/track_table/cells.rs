@@ -8,7 +8,7 @@ use std::{
 
 use gtk::prelude::*;
 use gtk::{gdk, glib, graphene};
-use xtunes_app_runtime::{Rating, TrackId};
+use sustain_app_runtime::{Rating, TrackId};
 
 use super::{RatingChangedCallback, columns::TrackTableColumn, row::TrackTableRow};
 use crate::sidebar::tracks_drag_payload;
@@ -380,8 +380,7 @@ fn install_cell_drag_source(
         let position = list_item.position();
         let row_track_id = row_track_id(list_item.item())?;
 
-        let track_ids = if position != gtk::INVALID_LIST_POSITION
-            && selection.is_selected(position)
+        let track_ids = if position != gtk::INVALID_LIST_POSITION && selection.is_selected(position)
         {
             let mut selected = collect_selected_track_ids(&selection);
             if !selected.contains(&row_track_id) {

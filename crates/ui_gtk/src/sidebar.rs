@@ -10,7 +10,7 @@ use std::{
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 
-use xtunes_app_runtime::{
+use sustain_app_runtime::{
     ApplicationRuntime, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, PlaylistItem,
     SmartPlaylist, SmartPlaylistId, TrackId,
 };
@@ -221,8 +221,7 @@ impl PlaylistSidebar {
         let on_rename: RenameCallbackHolder = Rc::new(RefCell::new(None));
         let on_delete: DeleteCallbackHolder = Rc::new(RefCell::new(None));
         let on_tracks_drop: TracksDropCallbackHolder = Rc::new(RefCell::new(None));
-        let on_edit_smart_playlist: EditSmartPlaylistCallbackHolder =
-            Rc::new(RefCell::new(None));
+        let on_edit_smart_playlist: EditSmartPlaylistCallbackHolder = Rc::new(RefCell::new(None));
         let pending_rename: Rc<RefCell<Option<PlaylistItem>>> = Rc::new(RefCell::new(None));
         let list_view = gtk::ListView::new(
             Some(selection.clone()),
@@ -473,12 +472,9 @@ fn build_tree_model(runtime: &ApplicationRuntime) -> gtk::TreeListModel {
     let root_store = list_store_for(snapshot.items_under(None));
 
     let snapshot_for_children = snapshot.clone();
-    gtk::TreeListModel::new(
-        root_store,
-        false,
-        true,
-        move |object| children_for(object, &snapshot_for_children),
-    )
+    gtk::TreeListModel::new(root_store, false, true, move |object| {
+        children_for(object, &snapshot_for_children)
+    })
 }
 
 fn children_for(object: &glib::Object, snapshot: &SidebarSnapshot) -> Option<gio::ListModel> {
@@ -951,12 +947,16 @@ fn confirm_and_delete(
         ),
         PlaylistItem::Playlist(_) => (
             "Delete Playlist",
-            format!("\"{current_name}\" will be removed from the sidebar. The tracks themselves stay in your library."),
+            format!(
+                "\"{current_name}\" will be removed from the sidebar. The tracks themselves stay in your library."
+            ),
             "Delete Playlist",
         ),
         PlaylistItem::SmartPlaylist(_) => (
             "Delete Smart Playlist",
-            format!("\"{current_name}\" will be removed from the sidebar. The tracks it currently matches stay in your library."),
+            format!(
+                "\"{current_name}\" will be removed from the sidebar. The tracks it currently matches stay in your library."
+            ),
             "Delete Smart Playlist",
         ),
     };
@@ -1274,14 +1274,19 @@ fn clamp_sidebar_width(content_area: &gtk::Paned) {
 
 #[cfg(test)]
 mod tests {
-    use xtunes_app_runtime::{
+    use sustain_app_runtime::{
         PlaylistId, SmartPlaylistId, SmartPlaylistMatchKind, SmartPlaylistRule,
         SmartPlaylistRuleSet, SmartPlaylistTextField, SmartPlaylistTextOperator,
     };
 
     use super::*;
 
-    fn folder(id: i64, name: &str, parent: Option<PlaylistFolderId>, position: u32) -> PlaylistFolder {
+    fn folder(
+        id: i64,
+        name: &str,
+        parent: Option<PlaylistFolderId>,
+        position: u32,
+    ) -> PlaylistFolder {
         PlaylistFolder {
             id: PlaylistFolderId::new(id).expect("positive folder id"),
             name: name.to_owned(),
@@ -1355,7 +1360,10 @@ mod tests {
             .iter()
             .map(|item| item.item)
             .collect();
-        assert_eq!(nested_items, vec![PlaylistItem::Playlist(nested_playlist.id)]);
+        assert_eq!(
+            nested_items,
+            vec![PlaylistItem::Playlist(nested_playlist.id)]
+        );
 
         assert!(
             snapshot
@@ -1420,9 +1428,9 @@ mod tests {
     #[test]
     fn tracks_payload_round_trips_for_multiple_ids() {
         let ids = vec![
-            xtunes_app_runtime::TrackId::new(1).expect("positive"),
-            xtunes_app_runtime::TrackId::new(7).expect("positive"),
-            xtunes_app_runtime::TrackId::new(42).expect("positive"),
+            sustain_app_runtime::TrackId::new(1).expect("positive"),
+            sustain_app_runtime::TrackId::new(7).expect("positive"),
+            sustain_app_runtime::TrackId::new(42).expect("positive"),
         ];
         let payload = tracks_drag_payload(&ids);
         assert_eq!(payload, "tracks:1,7,42");
@@ -1439,7 +1447,10 @@ mod tests {
 
     #[test]
     fn classify_drag_payload_distinguishes_kinds() {
-        assert_eq!(classify_drag_payload("tracks:1,2,3"), Some(DragKind::Tracks));
+        assert_eq!(
+            classify_drag_payload("tracks:1,2,3"),
+            Some(DragKind::Tracks)
+        );
         assert_eq!(
             classify_drag_payload("playlist:7"),
             Some(DragKind::PlaylistItem)

@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use xtunes_app_runtime::{PlaybackState, Track, TrackMetadata};
+use sustain_app_runtime::{PlaybackState, Track, TrackMetadata};
 
 pub(super) fn track_title(track: &Track) -> String {
     non_empty_text(&track.metadata.title)
@@ -91,7 +91,7 @@ fn non_empty_text(value: &Option<String>) -> Option<String> {
 mod tests {
     use std::time::Duration;
 
-    use xtunes_app_runtime::TrackMetadata;
+    use sustain_app_runtime::TrackMetadata;
 
     use super::{
         artist_album_text, progress_fraction, progress_fraction_from_x, remaining_time_text,

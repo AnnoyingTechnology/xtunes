@@ -191,7 +191,11 @@ fn duration_text(duration_seconds: u64) -> String {
         format!("{} {}", hours, pluralize(hours as usize, "hour", "hours"))
     } else {
         let minutes = duration_seconds / 60;
-        format!("{} {}", minutes, pluralize(minutes as usize, "minute", "minutes"))
+        format!(
+            "{} {}",
+            minutes,
+            pluralize(minutes as usize, "minute", "minutes")
+        )
     }
 }
 

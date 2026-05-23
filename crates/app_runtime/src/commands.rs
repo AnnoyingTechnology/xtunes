@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use xtunes_domain::ApplicationCommand;
+use sustain_domain::ApplicationCommand;
 
 use crate::{ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult, library_scan};
 

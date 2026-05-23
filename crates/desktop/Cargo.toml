@@ -1,16 +1,16 @@
 [package]
-name = "xtunes-desktop"
+name = "sustain-desktop"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [lib]
-name = "xtunes_desktop"
+name = "sustain_desktop"
 path = "src/lib.rs"
 
 [dependencies]
-xtunes-app-runtime = { path = "../app_runtime" }
+sustain-app-runtime = { path = "../app_runtime" }
 
 [lints]
 workspace = true

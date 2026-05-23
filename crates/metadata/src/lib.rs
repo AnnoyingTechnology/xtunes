@@ -18,7 +18,7 @@ use lofty::{
     },
 };
 
-pub use xtunes_domain::{FieldChange, MetadataChange, Rating, TrackMetadata, TrackRelativePath};
+pub use sustain_domain::{FieldChange, MetadataChange, Rating, TrackMetadata, TrackRelativePath};
 
 pub type MetadataResult<T> = Result<T, MetadataError>;
 
@@ -426,7 +426,7 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    use xtunes_domain::TrackMetadata;
+    use sustain_domain::TrackMetadata;
 
     use super::{
         AudioFormat, LibraryScanner, MetadataError, MetadataResult, MetadataService, Rating,
@@ -565,6 +565,6 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock after unix epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("xtunes_metadata_test_{unique_suffix}"))
+        std::env::temp_dir().join(format!("sustain_metadata_test_{unique_suffix}"))
     }
 }

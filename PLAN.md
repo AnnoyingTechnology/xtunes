@@ -1,16 +1,33 @@
-# xTunes Architecture Plan
+# Sustain Architecture Plan
 
 ## Product Name (Open)
 
-The working name `xTunes` is provisional and likely to change before any public
-release. The maintainer is not satisfied with it: the `x` prefix carries a
-late-90s/early-2000s Linux-desktop flavor (xterm, xmms, xchat, xine) that reads
-as dated rather than as heritage, and the `Tunes` half leans too hard on iTunes
-phonetics for an application that is explicitly not iTunes.
+The working name `Sustain` is provisional and **must** change before any public
+release. The rename is driven by two independent concerns, either of which
+would be sufficient on its own:
+
+1. **Taste.** The maintainer is not satisfied with the name: the `x` prefix
+   carries a late-90s/early-2000s Linux-desktop flavor (xterm, xmms, xchat,
+   xine) that reads as dated rather than as heritage, and the `Tunes` half
+   leans too hard on iTunes phonetics for an application that is explicitly
+   not iTunes.
+2. **Legal exposure.** `Sustain` shares the distinctive `Tunes` suffix with
+   Apple's `iTunes` registered trademark (EUIPO + INPI) and the product is
+   openly positioned as an iTunes-inspired player. Under EU trademark law
+   (Regulation 2017/1001) and the French Code de la propriété intellectuelle
+   (art. L713-2/3), the likelihood-of-confusion and dilution tests for a
+   reputed mark cut against a single-letter prefix swap. Keeping the name
+   through a public release would invite, at minimum, a takedown or
+   cease-and-desist; renaming before publication eliminates that exposure
+   cleanly. The code itself, the UX inspiration, and the GPL license carry
+   no comparable risk (cf. CJEU C-406/10, *SAS Institute v. World
+   Programming*, on the non-copyrightability of software functionality and
+   look-and-feel) — the name is the single structural change required.
 
 Given the quality bar the maintainer is holding the codebase to, the product
-deserves a name worth being proud of. A better name should be chosen before the
-first public release.
+deserves a name worth being proud of, and one that does not pick a fight with
+Apple's legal team. A better name must be chosen before the first public
+release.
 
 Current candidate names the maintainer likes: **Needle** and **Spindle**. Both
 evoke physical-media / turntable imagery, which fits the product's dense,
@@ -30,8 +47,8 @@ Direction worth exploring when the time comes:
 - usable as a binary name, crate prefix, and reverse-DNS application id
   without awkward transformations
 
-Renaming touches the binary name, crate prefix (`xtunes-*` / `xtunes_*`), the
-application id (`io.github.open_xtunes.xtunes`), packaging metadata, and every
+Renaming touches the binary name, crate prefix (`sustain-*` / `sustain_*`), the
+application id (`io.github.open_sustain.sustain`), packaging metadata, and every
 SPDX/copyright header. Plan the rename as a single coordinated change rather
 than a drip of partial renames.
 
@@ -47,7 +64,7 @@ developer => desired contextual menu on tracks:
 - Remove from library (already implemented)
 - Move to trash (already implemented)
 
-`xTunes` is a Linux-only, Debian-first music library/player built with Rust,
+`Sustain` is a Linux-only, Debian-first music library/player built with Rust,
 GTK4, GStreamer, and SQLite. The product target is an iTunes 8~12-like desktop
 music manager centered on a dense table/list workflow.
 
@@ -145,7 +162,7 @@ The first schema should cover:
 Start with a non-destructive library model.
 
 In the first stage, scanning a configured library folder should index the files
-where they already are. xTunes must not rename, move, copy, or reorganize files
+where they already are. Sustain must not rename, move, copy, or reorganize files
 unless the user explicitly enables a future managed-library setting. Manual file
 addition should also be accepted without forcing those files into a specific
 filesystem layout.
@@ -185,6 +202,16 @@ manually. Relocating should update the track location while preserving playlists
 rating, metadata cache, and listening statistics.
 
 ## Library Scan Performance (Known Issue)
+
+Measurement context: the observations below were taken from an unoptimized
+debug build (`cargo run -p sustain-app`, `dev` profile, `unoptimized +
+debuginfo`). A release build is expected to be substantially faster on the
+CPU-bound phases (tag decoding, hashing, SQLite work), so the absolute
+numbers will move. The structural problem — synchronous work on the GTK
+main thread freezing the UI — is not a profile-level issue and will still
+be present in release; the hard requirements below must hold for both
+profiles, with the validation target re-measured on a release build before
+this is considered closed.
 
 The current scan path does not survive a real-world library. Observed behavior
 on a ~10,000-track library:
@@ -251,6 +278,18 @@ full tag re-read).
 
 ## Table Interaction Performance (Known Issue)
 
+Measurement context: the observations below were taken from an unoptimized
+debug build (`cargo run -p sustain-app`, `dev` profile, `unoptimized +
+debuginfo`). Debug builds penalize per-row bind work, sort/filter passes,
+and any hot path that crosses generics or iterator chains, so the absolute
+sluggishness will partially shrink under `--release`. However, the
+Rhythmbox baseline cited below is also a distribution build, not a debug
+build, so the comparison is fair only after we re-measure Sustain in
+release. Before declaring a regression vs. Rhythmbox, the table targets
+must be re-validated on a release build; structural issues uncovered along
+the way (non-virtualized rows, per-bind allocations, synchronous queries
+on selection) are profile-independent and must be fixed regardless.
+
 Independently from the scan freeze, the Songs table itself does not stay
 responsive at real library sizes. Observed on the maintainer's ~10k-track
 library, on top-tier consumer hardware as of mid-2026:
@@ -270,7 +309,7 @@ Rhythmbox on the same hardware. Scrolling is smooth and row selection is
 instantaneous. The performance target here is therefore known to be
 achievable on this machine with this dataset — this is not chasing a wild
 goose, it is matching a baseline that an existing GTK music player already
-hits. If xTunes cannot match it, the bottleneck is in our own code, not in
+hits. If Sustain cannot match it, the bottleneck is in our own code, not in
 GTK, the library, or the hardware.
 
 Hard requirements:
@@ -322,7 +361,7 @@ shell is "done"; meeting them only on small fake fixtures does not count.
 
 The current auto-advance path inserts an audible silence between tracks.
 When the currently playing track hits end-of-stream, GStreamer emits an EOS
-message on the playbin's bus; xTunes responds by stopping the pipeline,
+message on the playbin's bus; Sustain responds by stopping the pipeline,
 loading the next track's URI, and restarting playback. Between "stop" and
 "playing", the audio output is silent — observable as roughly a half-second
 gap between consecutive tracks.
@@ -331,7 +370,7 @@ A half-second of silence between tracks is not acceptable in a music
 player. Pauses between tracks break album playback, ruin transitions on
 mixed records (live recordings, DJ sets, concept albums with crossfaded
 tracks), and make every playlist feel disjointed. This must be fixed
-before xTunes is shippable as a real player. It is deferred, not
+before Sustain is shippable as a real player. It is deferred, not
 forgotten.
 
 The intended fix uses GStreamer's `playbin` `about-to-finish` signal
@@ -556,7 +595,7 @@ The playlist sidebar should be visibly darker than adjacent content in both
 light and dark modes.
 
 Light and dark appearance should follow native GTK/system theme behavior. Do
-not add an xTunes theme picker. Keep theme-aware CSS tokens centralized and
+not add an Sustain theme picker. Keep theme-aware CSS tokens centralized and
 make every custom tint, row state, control, and window surface work in both
 native light and native dark modes.
 
@@ -788,7 +827,7 @@ Constraints if/when this is built:
 
 - runs as a background task surfaced in the bottom status bar, never blocking
   the UI or playback
-- network requests are gated behind an explicit user-initiated action; xTunes
+- network requests are gated behind an explicit user-initiated action; Sustain
   must not silently phone home during normal library scanning
 - provider client lives in its own crate (e.g. `metadata_remote`) so the core
   metadata crate stays offline and testable
@@ -802,7 +841,7 @@ status surface are solid.
 
 ## Smart Shuffle (Tentative)
 
-In addition to a pure-random shuffle mode, xTunes should offer a `Smart Shuffle`
+In addition to a pure-random shuffle mode, Sustain should offer a `Smart Shuffle`
 mode that picks the next track by similarity to the currently playing track
 rather than uniformly at random. Pure random shuffle remains the default and
 must stay available; smart shuffle is an opt-in alternative selectable from the
@@ -870,7 +909,7 @@ behavior are solid.
 
 ## Developer Isolation (CLI Data Paths)
 
-Once xTunes is installed system-wide (e.g. via `.deb`), a developer working on
+Once Sustain is installed system-wide (e.g. via `.deb`), a developer working on
 a branch out of a checkout must not risk colliding with or corrupting the
 installed instance's data — in particular the user's real music library
 database, their settings, and any cached artwork. The current behavior, where
@@ -894,7 +933,7 @@ two paths every time), a single convenience flag:
 
 - `--local-scope` (alternatively `--dev`): place both the TOML config and the
   SQLite database in the current working directory, under predictable names
-  (e.g. `xtunes.toml` and `xtunes.sqlite`). Cached artwork and any other
+  (e.g. `sustain.toml` and `sustain.sqlite`). Cached artwork and any other
   on-disk artefacts produced by the run go under a sibling directory in the
   same working directory.
 
@@ -916,7 +955,7 @@ Non-goals:
 
 Once this lands, the dev instructions in `README.md` must document the
 flags and recommend `--local-scope` (or the explicit pair) as the standard
-way to run xTunes against anything other than the installed user's real
+way to run Sustain against anything other than the installed user's real
 library. The recommendation should be prominent enough that a new
 contributor cannot miss it.
 

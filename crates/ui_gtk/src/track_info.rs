@@ -11,7 +11,7 @@ use std::{
 
 use gtk::prelude::*;
 use gtk::{FileDialog, FileFilter, gdk, gio, glib};
-use xtunes_app_runtime::{
+use sustain_app_runtime::{
     ApplicationCommand, FieldChange, MetadataChange, Rating, Track, TrackId, TrackMetadata,
 };
 
@@ -607,7 +607,7 @@ fn open_artwork_picker(
             return;
         };
         let Ok(bytes) = std::fs::read(&path) else {
-            eprintln!("xtunes: failed to read artwork file: {}", path.display());
+            eprintln!("sustain: failed to read artwork file: {}", path.display());
             return;
         };
         if command_controller.dispatch_succeeded(ApplicationCommand::SetArtwork {
@@ -1002,7 +1002,7 @@ mod tests {
     };
     use std::path::Path;
     use std::time::Duration;
-    use xtunes_app_runtime::FieldChange;
+    use sustain_app_runtime::FieldChange;
 
     #[test]
     fn text_diff_preserves_unchanged_value() {

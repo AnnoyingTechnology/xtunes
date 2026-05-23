@@ -19,7 +19,7 @@ use model::{
     artist_album_text, playback_position, progress_fraction, progress_fraction_from_x,
     remaining_time_text, time_text, track_title,
 };
-use xtunes_app_runtime::{ApplicationCommand, NowPlaying, PlaybackCommand, Track};
+use sustain_app_runtime::{ApplicationCommand, NowPlaying, PlaybackCommand, Track};
 
 mod model;
 
