@@ -252,6 +252,10 @@ impl ApplicationRuntime {
         self.playback_queue.options()
     }
 
+    pub fn playback_queue_current_track_id(&self) -> Option<TrackId> {
+        self.playback_queue.current_track_id()
+    }
+
     pub fn now_playing(&self) -> NowPlaying {
         let state = self.playback_state();
         let track = playback::playback_track_id(&state)

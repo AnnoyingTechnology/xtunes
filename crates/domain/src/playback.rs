@@ -10,6 +10,7 @@ pub enum PlaybackCommand {
     PlayTrack(TrackId),
     PlayPreviousTrack,
     PlayNextTrack,
+    EnqueueNext(Vec<TrackId>),
     ToggleShuffle,
     ToggleRepeat,
     Pause,
@@ -208,6 +209,54 @@ impl PlaybackQueue {
             .filter(|candidate| *candidate != track_id)
             .collect();
         self.replace_ordered_track_ids(ordered_track_ids, shuffle_seed);
+    }
+
+    /// Inserts the given tracks so they play immediately after the currently
+    /// playing track, in both the ordered queue and the play order. Tracks
+    /// already present elsewhere in the queue are moved to the new position;
+    /// the currently playing track is left in place and skipped if present
+    /// in `track_ids`. Returns `false` when there is no current track to
+    /// anchor against or when the candidate list reduces to nothing.
+    pub fn enqueue_after_current(&mut self, track_ids: &[TrackId]) -> bool {
+        let Some(current_track_id) = self.current_track_id else {
+            return false;
+        };
+
+        let mut to_insert: Vec<TrackId> = Vec::with_capacity(track_ids.len());
+        for candidate in track_ids {
+            if *candidate != current_track_id && !to_insert.contains(candidate) {
+                to_insert.push(*candidate);
+            }
+        }
+        if to_insert.is_empty() {
+            return false;
+        }
+
+        self.ordered_track_ids.retain(|id| !to_insert.contains(id));
+        self.play_order_track_ids
+            .retain(|id| !to_insert.contains(id));
+
+        if let Some(index) = self
+            .ordered_track_ids
+            .iter()
+            .position(|id| *id == current_track_id)
+        {
+            for (offset, track_id) in to_insert.iter().enumerate() {
+                self.ordered_track_ids.insert(index + 1 + offset, *track_id);
+            }
+        }
+        if let Some(index) = self
+            .play_order_track_ids
+            .iter()
+            .position(|id| *id == current_track_id)
+        {
+            for (offset, track_id) in to_insert.iter().enumerate() {
+                self.play_order_track_ids
+                    .insert(index + 1 + offset, *track_id);
+            }
+        }
+
+        true
     }
 
     fn adjacent_track_id(&self, step: TrackStep) -> Option<TrackId> {
@@ -524,6 +573,105 @@ mod tests {
         assert_eq!(queue.current_track_id(), None);
         assert_eq!(queue.next_track_id(), None);
         assert_eq!(queue.ordered_track_ids(), &[track_id(1), track_id(3)]);
+    }
+
+    #[test]
+    fn enqueue_after_current_inserts_at_current_plus_one() {
+        let mut queue = queue_with_options(track_id(2), PlaybackOptions::default());
+
+        assert!(queue.enqueue_after_current(&[track_id(9)]));
+
+        assert_eq!(
+            queue.ordered_track_ids(),
+            &[track_id(1), track_id(2), track_id(9), track_id(3)]
+        );
+        assert_eq!(queue.next_track_id(), Some(track_id(9)));
+    }
+
+    #[test]
+    fn enqueue_after_current_moves_track_already_later_in_queue() {
+        let mut queue = queue_with_options(track_id(1), PlaybackOptions::default());
+
+        assert!(queue.enqueue_after_current(&[track_id(3)]));
+
+        assert_eq!(
+            queue.ordered_track_ids(),
+            &[track_id(1), track_id(3), track_id(2)]
+        );
+        assert_eq!(queue.next_track_id(), Some(track_id(3)));
+    }
+
+    #[test]
+    fn enqueue_after_current_inserts_multiple_in_order() {
+        let mut queue = queue_with_options(track_id(1), PlaybackOptions::default());
+
+        assert!(queue.enqueue_after_current(&[track_id(9), track_id(8)]));
+
+        assert_eq!(
+            queue.ordered_track_ids(),
+            &[
+                track_id(1),
+                track_id(9),
+                track_id(8),
+                track_id(2),
+                track_id(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn enqueue_after_current_dedupes_repeated_candidates() {
+        let mut queue = queue_with_options(track_id(1), PlaybackOptions::default());
+
+        assert!(queue.enqueue_after_current(&[track_id(9), track_id(9), track_id(8)]));
+
+        assert_eq!(
+            queue.ordered_track_ids(),
+            &[
+                track_id(1),
+                track_id(9),
+                track_id(8),
+                track_id(2),
+                track_id(3)
+            ]
+        );
+    }
+
+    #[test]
+    fn enqueue_after_current_skips_currently_playing_track() {
+        let mut queue = queue_with_options(track_id(2), PlaybackOptions::default());
+
+        assert!(!queue.enqueue_after_current(&[track_id(2)]));
+        assert_eq!(
+            queue.ordered_track_ids(),
+            &[track_id(1), track_id(2), track_id(3)]
+        );
+    }
+
+    #[test]
+    fn enqueue_after_current_returns_false_with_no_current_track() {
+        let mut queue = PlaybackQueue::empty(PlaybackOptions::default());
+
+        assert!(!queue.enqueue_after_current(&[track_id(1)]));
+        assert!(queue.ordered_track_ids().is_empty());
+    }
+
+    #[test]
+    fn enqueue_after_current_inserts_in_shuffle_play_order_too() {
+        let mut queue = queue_with_options(
+            track_id(2),
+            PlaybackOptions {
+                shuffle_enabled: true,
+                repeat_mode: RepeatMode::Off,
+            },
+        );
+
+        assert!(queue.enqueue_after_current(&[track_id(9)]));
+
+        let play_order = queue.play_order_track_ids();
+        assert_eq!(play_order.first().copied(), Some(track_id(2)));
+        assert_eq!(play_order.get(1).copied(), Some(track_id(9)));
+        assert_eq!(queue.next_track_id(), Some(track_id(9)));
     }
 
     fn queue_with_options(current_track_id: TrackId, options: PlaybackOptions) -> PlaybackQueue {

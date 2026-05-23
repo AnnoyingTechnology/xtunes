@@ -28,6 +28,7 @@ struct AddToPlaylistAction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrackContextActionId {
+    PlayNext,
     CopyFiles,
     ShowInFolder,
     ShowAlbum,
@@ -39,6 +40,7 @@ pub(crate) enum TrackContextActionId {
 impl TrackContextActionId {
     fn css_class(self) -> &'static str {
         match self {
+            Self::PlayNext => "track-context-play-next",
             Self::CopyFiles => "track-context-copy-files",
             Self::ShowInFolder => "track-context-show-in-folder",
             Self::ShowAlbum => "track-context-show-album",
@@ -99,6 +101,21 @@ pub(crate) struct TrackContextAction {
 }
 
 impl TrackContextAction {
+    pub(crate) fn play_next(
+        callback: TrackActionCallback,
+        visibility: TrackActionVisibility,
+    ) -> Self {
+        Self {
+            id: TrackContextActionId::PlayNext,
+            label: "Play Next",
+            section: TrackContextActionSection::Safe,
+            selection: TrackSelectionRequirement::AtLeastOne,
+            confirmation: TrackActionConfirmation::None,
+            visibility: Some(visibility),
+            callback,
+        }
+    }
+
     pub(crate) fn copy_files(callback: TrackActionCallback) -> Self {
         Self {
             id: TrackContextActionId::CopyFiles,
@@ -629,31 +646,36 @@ mod tests {
     #[test]
     fn declared_actions_have_stable_identity_and_labels() {
         let callback = no_op_callback();
-        let visibility = always_visible();
         let actions = [
+            TrackContextAction::play_next(callback.clone(), always_visible()),
             TrackContextAction::copy_files(callback.clone()),
             TrackContextAction::show_in_folder(callback.clone()),
-            TrackContextAction::show_album(callback.clone(), visibility),
+            TrackContextAction::show_album(callback.clone(), always_visible()),
             TrackContextAction::remove_from_library(callback.clone()),
             TrackContextAction::move_to_trash(callback),
         ];
 
-        assert_eq!(actions[0].id, TrackContextActionId::CopyFiles);
-        assert_eq!(actions[0].label, "Copy");
-        assert_eq!(actions[1].id, TrackContextActionId::ShowInFolder);
-        assert_eq!(actions[1].label, "Show in Folder");
-        assert_eq!(actions[2].id, TrackContextActionId::ShowAlbum);
-        assert_eq!(actions[2].label, "Show Album");
-        assert_eq!(actions[3].id, TrackContextActionId::RemoveFromLibrary);
-        assert_eq!(actions[3].label, "Remove from Library");
-        assert_eq!(actions[4].id, TrackContextActionId::MoveToTrash);
-        assert_eq!(actions[4].label, "Move to Trash");
+        assert_eq!(actions[0].id, TrackContextActionId::PlayNext);
+        assert_eq!(actions[0].label, "Play Next");
+        assert_eq!(actions[1].id, TrackContextActionId::CopyFiles);
+        assert_eq!(actions[1].label, "Copy");
+        assert_eq!(actions[2].id, TrackContextActionId::ShowInFolder);
+        assert_eq!(actions[2].label, "Show in Folder");
+        assert_eq!(actions[3].id, TrackContextActionId::ShowAlbum);
+        assert_eq!(actions[3].label, "Show Album");
+        assert_eq!(actions[4].id, TrackContextActionId::RemoveFromLibrary);
+        assert_eq!(actions[4].label, "Remove from Library");
+        assert_eq!(actions[5].id, TrackContextActionId::MoveToTrash);
+        assert_eq!(actions[5].label, "Move to Trash");
     }
 
     #[test]
     fn safe_actions_render_above_destructive_ones() {
         let callback = no_op_callback();
-        let visibility = always_visible();
+        assert_eq!(
+            TrackContextAction::play_next(callback.clone(), always_visible()).section,
+            TrackContextActionSection::Safe,
+        );
         assert_eq!(
             TrackContextAction::copy_files(callback.clone()).section,
             TrackContextActionSection::Safe,
@@ -663,7 +685,7 @@ mod tests {
             TrackContextActionSection::Safe,
         );
         assert_eq!(
-            TrackContextAction::show_album(callback.clone(), visibility).section,
+            TrackContextAction::show_album(callback.clone(), always_visible()).section,
             TrackContextActionSection::Safe,
         );
         assert_eq!(
@@ -674,6 +696,18 @@ mod tests {
             TrackContextAction::move_to_trash(callback).section,
             TrackContextActionSection::Destructive,
         );
+    }
+
+    #[test]
+    fn play_next_is_hidden_when_visibility_predicate_returns_false() {
+        let callback = no_op_callback();
+        let track_id = TrackId::new(1).expect("positive track id");
+
+        let visible = TrackContextAction::play_next(callback.clone(), always_visible());
+        assert!(visible.is_available(&[track_id]));
+
+        let hidden = TrackContextAction::play_next(callback, never_visible());
+        assert!(!hidden.is_available(&[track_id]));
     }
 
     #[test]

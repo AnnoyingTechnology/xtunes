@@ -6,10 +6,11 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 use gtk::{FileLauncher, gdk, gio};
-use xtunes_app_runtime::TrackId;
+use xtunes_app_runtime::{ApplicationCommand, PlaybackCommand, TrackId};
 
 use super::{
     SharedRuntime, ShowAlbumHolder,
+    command_controller::SharedCommandController,
     track_context::{TrackActionCallback, TrackActionVisibility},
 };
 
@@ -25,6 +26,30 @@ pub(crate) fn copy_files_callback(
             return;
         }
         copy_paths_to_clipboard(&window, &paths);
+    })
+}
+
+pub(crate) fn play_next_callback(
+    command_controller: &SharedCommandController,
+) -> TrackActionCallback {
+    let command_controller = command_controller.clone();
+    Rc::new(move |track_ids: Vec<TrackId>| {
+        if track_ids.is_empty() {
+            return;
+        }
+        let _result = command_controller
+            .dispatch(ApplicationCommand::Playback(PlaybackCommand::EnqueueNext(
+                track_ids,
+            )));
+    })
+}
+
+pub(crate) fn playback_has_current_track_visibility(
+    runtime: &SharedRuntime,
+) -> TrackActionVisibility {
+    let runtime = runtime.clone();
+    Rc::new(move |_track_ids: &[TrackId]| {
+        runtime.borrow().playback_queue_current_track_id().is_some()
     })
 }
 

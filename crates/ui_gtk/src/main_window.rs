@@ -43,8 +43,8 @@ use super::{
         TrackActionVisibility, TrackContextAction, TrackContextActionSet, TrackRowContextMenu,
     },
     track_context_ops::{
-        copy_files_callback, show_album_callback, show_in_folder_callback,
-        track_has_album_visibility,
+        copy_files_callback, play_next_callback, playback_has_current_track_visibility,
+        show_album_callback, show_in_folder_callback, track_has_album_visibility,
     },
     track_table::{
         RatingChangedCallback, TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table,
@@ -850,12 +850,16 @@ fn track_context_actions(
     library_changed_holder: LibraryChangedHolder,
 ) -> TrackContextActionSet {
     TrackContextActionSet::new(vec![
-        TrackContextAction::copy_files(copy_files_callback(runtime, window)),
-        TrackContextAction::show_in_folder(show_in_folder_callback(runtime, window)),
+        TrackContextAction::play_next(
+            play_next_callback(command_controller),
+            playback_has_current_track_visibility(runtime),
+        ),
         TrackContextAction::show_album(
             show_album_callback(show_album_holder),
             track_has_album_visibility(runtime),
         ),
+        TrackContextAction::copy_files(copy_files_callback(runtime, window)),
+        TrackContextAction::show_in_folder(show_in_folder_callback(runtime, window)),
         TrackContextAction::remove_from_library(track_mutation_callback(
             command_controller,
             playback_changed.clone(),
@@ -881,12 +885,16 @@ fn playlist_track_context_actions(
     sidebar: &PlaylistSidebar,
 ) -> TrackContextActionSet {
     TrackContextActionSet::new(vec![
-        TrackContextAction::copy_files(copy_files_callback(runtime, window)),
-        TrackContextAction::show_in_folder(show_in_folder_callback(runtime, window)),
+        TrackContextAction::play_next(
+            play_next_callback(command_controller),
+            playback_has_current_track_visibility(runtime),
+        ),
         TrackContextAction::show_album(
             show_album_callback(show_album_holder),
             track_has_album_visibility(runtime),
         ),
+        TrackContextAction::copy_files(copy_files_callback(runtime, window)),
+        TrackContextAction::show_in_folder(show_in_folder_callback(runtime, window)),
         TrackContextAction::remove_from_playlist(
             remove_from_playlist_callback(
                 command_controller,

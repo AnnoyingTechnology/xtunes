@@ -31,6 +31,10 @@ impl ApplicationRuntime {
             }
             PlaybackCommand::PlayPreviousTrack => self.play_previous_track(),
             PlaybackCommand::PlayNextTrack => self.play_next_track(),
+            PlaybackCommand::EnqueueNext(track_ids) => {
+                self.playback_queue.enqueue_after_current(&track_ids);
+                Ok(())
+            }
             PlaybackCommand::Pause => self
                 .playback_service()?
                 .pause()
