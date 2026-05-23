@@ -323,11 +323,13 @@ button.album-detail-icon-button:focus {
     color: #e66100;
 }
 
-.track-context-menu {
+.track-context-menu,
+.sidebar-context-menu {
     padding: 4px;
 }
 
-button.track-context-menu-item {
+button.track-context-menu-item,
+button.sidebar-context-menu-item {
     min-height: 30px;
     min-width: 160px;
     padding-left: 8px;

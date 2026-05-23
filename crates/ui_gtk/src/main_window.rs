@@ -20,6 +20,10 @@ use super::{
     now_playing::NowPlayingView,
     preferences::install_preferences_action,
     sidebar::{PlaylistSidebar, build_content_area},
+    sidebar_context::{
+        NEW_PLAYLIST_DEFAULT_NAME, NEW_PLAYLIST_FOLDER_DEFAULT_NAME, SidebarActionCallback,
+        SidebarContextAction, SidebarContextMenu, unique_default_name,
+    },
     status_bar::StatusBar,
     titlebar::{
         Titlebar, build_titlebar, connect_titlebar_playback_controls, sync_play_pause_icon,
@@ -137,6 +141,11 @@ pub(crate) fn build_main_window(
         &runtime,
         &playlists_table,
     ));
+    sidebar.install_context_menu(SidebarContextMenu::new(sidebar_action_callback(
+        &command_controller,
+        &runtime,
+        &sidebar,
+    )));
     library_changed_holder.replace(Some(library_changed.clone()));
     let scan_requested =
         library_scan_requested_callback(&runtime, library_changed.clone(), &status_bar);
@@ -204,6 +213,50 @@ fn library_changed_callback(
         let playlist_rows =
             playlist_table_rows_for(&runtime.borrow(), sidebar.current_selection());
         playlists_table.replace_rows(playlist_rows);
+    })
+}
+
+fn sidebar_action_callback(
+    command_controller: &SharedCommandController,
+    runtime: &SharedRuntime,
+    sidebar: &PlaylistSidebar,
+) -> SidebarActionCallback {
+    let command_controller = command_controller.clone();
+    let runtime = runtime.clone();
+    let sidebar = sidebar.clone();
+
+    Rc::new(move |action| {
+        let dispatched = match action {
+            SidebarContextAction::NewPlaylist => {
+                let existing_names: Vec<String> = runtime
+                    .borrow()
+                    .playlists()
+                    .iter()
+                    .map(|playlist| playlist.name.clone())
+                    .collect();
+                let name = unique_default_name(existing_names, NEW_PLAYLIST_DEFAULT_NAME);
+                command_controller.dispatch_succeeded(ApplicationCommand::CreatePlaylist {
+                    name,
+                    parent_folder_id: None,
+                })
+            }
+            SidebarContextAction::NewPlaylistFolder => {
+                let existing_names: Vec<String> = runtime
+                    .borrow()
+                    .playlist_folders()
+                    .iter()
+                    .map(|folder| folder.name.clone())
+                    .collect();
+                let name = unique_default_name(existing_names, NEW_PLAYLIST_FOLDER_DEFAULT_NAME);
+                command_controller.dispatch_succeeded(ApplicationCommand::CreatePlaylistFolder {
+                    name,
+                    parent_folder_id: None,
+                })
+            }
+        };
+        if dispatched {
+            sidebar.refresh();
+        }
     })
 }
 

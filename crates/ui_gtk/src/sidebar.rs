@@ -10,7 +10,10 @@ use xtunes_app_runtime::{
     ApplicationRuntime, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistItem, SmartPlaylist,
 };
 
-use super::{SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SharedRuntime};
+use super::{
+    SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SharedRuntime,
+    sidebar_context::SidebarContextMenu,
+};
 
 pub(crate) type SidebarSelectionChangedCallback = Rc<dyn Fn(Option<PlaylistItem>)>;
 
@@ -172,6 +175,10 @@ impl PlaylistSidebar {
 
     pub(crate) fn current_selection(&self) -> Option<PlaylistItem> {
         selected_item(&self.selection)
+    }
+
+    pub(crate) fn install_context_menu(&self, menu: SidebarContextMenu) {
+        menu.install_on(self.root.upcast_ref::<gtk::Widget>());
     }
 
     pub(crate) fn refresh(&self) {

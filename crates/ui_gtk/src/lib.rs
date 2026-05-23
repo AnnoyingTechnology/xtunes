@@ -27,6 +27,7 @@ mod mode_bar;
 mod now_playing;
 mod preferences;
 mod sidebar;
+mod sidebar_context;
 mod status_bar;
 mod titlebar;
 mod track_context;
