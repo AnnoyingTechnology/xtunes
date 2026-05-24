@@ -300,14 +300,13 @@ impl TrackRowContextMenu {
         let (parent_x, parent_y) = if anchor.as_ref() == popover_parent.as_ref() {
             (x, y)
         } else {
-            let Some(coordinates) =
-                anchor
-                    .as_ref()
-                    .translate_coordinates(popover_parent.as_ref(), x, y)
-            else {
+            let Some(point) = anchor.as_ref().compute_point(
+                popover_parent.as_ref(),
+                &gtk::graphene::Point::new(x as f32, y as f32),
+            ) else {
                 return;
             };
-            coordinates
+            (point.x() as f64, point.y() as f64)
         };
 
         let popover = gtk::Popover::new();

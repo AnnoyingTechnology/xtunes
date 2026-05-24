@@ -139,7 +139,8 @@ fn resize_handle(
             return;
         };
         let (surface_x, surface_y) = handle_for_gesture
-            .translate_coordinates(&window, x, y)
+            .compute_point(&window, &gtk::graphene::Point::new(x as f32, y as f32))
+            .map(|p| (p.x() as f64, p.y() as f64))
             .unwrap_or((x, y));
 
         toplevel.begin_resize(

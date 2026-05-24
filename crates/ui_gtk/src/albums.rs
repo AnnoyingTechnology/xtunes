@@ -119,7 +119,7 @@ impl AlbumsView {
         self.selected_album.set(None);
         self.artwork_cache.borrow_mut().clear();
         self.visible_columns
-            .set(columns_for_width(self.scroller.allocated_width()));
+            .set(columns_for_width(self.scroller.width()));
         self.rebuild();
     }
 
@@ -204,7 +204,7 @@ impl AlbumsView {
     fn install_width_watcher(&self) {
         let view = self.clone();
         self.scroller.add_tick_callback(move |scroller, _clock| {
-            let width = scroller.allocated_width();
+            let width = scroller.width();
             if width > 0 && view.last_width.replace(width) != width {
                 let columns = columns_for_width(width);
                 if view.visible_columns.replace(columns) != columns {
@@ -720,7 +720,7 @@ fn album_detail_arrow(palette_provider: Option<&gtk::CssProvider>) -> gtk::Drawi
 
 fn album_detail_palette_provider(palette: ArtworkPalette) -> gtk::CssProvider {
     let provider = gtk::CssProvider::new();
-    provider.load_from_data(&album_detail_palette_css(palette));
+    provider.load_from_string(&album_detail_palette_css(palette));
     provider
 }
 

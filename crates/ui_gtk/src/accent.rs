@@ -66,7 +66,7 @@ fn accent_settings() -> Option<gio::Settings> {
 
 fn install_static_accent_css(display: &gdk::Display, palette: AccentPalette) {
     let provider = gtk::CssProvider::new();
-    provider.load_from_data(&accent_css(palette));
+    provider.load_from_string(&accent_css(palette));
     gtk::style_context_add_provider_for_display(
         display,
         &provider,
@@ -76,7 +76,7 @@ fn install_static_accent_css(display: &gdk::Display, palette: AccentPalette) {
 
 fn update_accent_css(provider: &gtk::CssProvider, settings: &gio::Settings) {
     let accent_name = settings.string(ACCENT_COLOR_KEY);
-    provider.load_from_data(&accent_css(accent_palette(&accent_name)));
+    provider.load_from_string(&accent_css(accent_palette(&accent_name)));
 }
 
 fn accent_palette(accent_name: &str) -> AccentPalette {

@@ -20,7 +20,7 @@ rust-version = "1.85"
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
-gtk = { package = "gtk4", version = "0.10", features = ["v4_10"] }
+gtk = { package = "gtk4", version = "0.10", features = ["v4_18"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
