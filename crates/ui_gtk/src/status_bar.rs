@@ -87,10 +87,8 @@ impl StatusBar {
     pub(crate) fn update_task(&self, status: &BackgroundTaskStatus) {
         self.task_box
             .set_visible(!matches!(status, BackgroundTaskStatus::Idle));
-        self.task_spinner
-            .set_visible(matches!(status, BackgroundTaskStatus::LibraryScanRunning));
-        self.task_spinner
-            .set_spinning(matches!(status, BackgroundTaskStatus::LibraryScanRunning));
+        self.task_spinner.set_visible(status.is_running());
+        self.task_spinner.set_spinning(status.is_running());
         self.task_label.set_text(&task_status_text(status));
     }
 
@@ -115,7 +113,46 @@ fn task_status_text(status: &BackgroundTaskStatus) -> String {
         BackgroundTaskStatus::LibraryScanRunning => "Scanning library...".to_owned(),
         BackgroundTaskStatus::LibraryScanCompleted(summary) => scan_summary_text(summary),
         BackgroundTaskStatus::LibraryScanFailed(error) => runtime_error_text(error).to_owned(),
+        BackgroundTaskStatus::LibraryImportRunning => "Adding tracks...".to_owned(),
+        BackgroundTaskStatus::LibraryImportCompleted(summary) => import_summary_text(summary),
+        BackgroundTaskStatus::LibraryImportFailed(error) => runtime_error_text(error).to_owned(),
+        BackgroundTaskStatus::LibraryConsolidationRunning => "Organizing library...".to_owned(),
+        BackgroundTaskStatus::LibraryConsolidationCompleted(summary) => {
+            consolidation_summary_text(summary)
+        }
+        BackgroundTaskStatus::LibraryConsolidationFailed(error) => {
+            runtime_error_text(error).to_owned()
+        }
     }
+}
+
+fn import_summary_text(summary: &super::LibraryImportSummary) -> String {
+    match (
+        summary.imported_tracks,
+        summary.duplicate_files,
+        summary.discovered_files,
+    ) {
+        (0, 0, 0) => "No audio files were found.".to_owned(),
+        (imported, 0, _) => format!("{imported} tracks added."),
+        (imported, duplicates, _) => {
+            format!("{imported} tracks added, {duplicates} duplicates skipped.")
+        }
+    }
+}
+
+fn consolidation_summary_text(summary: &super::LibraryConsolidationSummary) -> String {
+    if summary.cancelled {
+        return format!(
+            "Library organization stopped: {} moved, {} pending.",
+            summary.moved_tracks,
+            summary.planned_tracks.saturating_sub(summary.moved_tracks)
+        );
+    }
+
+    format!(
+        "Library organized: {} moved, {} already organized, {} missing.",
+        summary.moved_tracks, summary.already_organized_tracks, summary.missing_tracks
+    )
 }
 
 pub(crate) fn runtime_error_text(error: &ApplicationRuntimeError) -> &'static str {
@@ -124,6 +161,9 @@ pub(crate) fn runtime_error_text(error: &ApplicationRuntimeError) -> &'static st
             "Another background task is already running."
         }
         ApplicationRuntimeError::LibraryScanFailed => "The selected folder could not be scanned.",
+        ApplicationRuntimeError::LibraryConsolidationFailed => {
+            "The library could not be organized."
+        }
         ApplicationRuntimeError::LibraryServicesUnavailable => {
             "Library scanning is not available in this build."
         }

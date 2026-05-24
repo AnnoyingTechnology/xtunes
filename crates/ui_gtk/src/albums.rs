@@ -471,11 +471,7 @@ impl AlbumsView {
         shell.set_hexpand(true);
         shell.set_child(Some(&base));
 
-        let arrow_row = album_detail_arrow_row(
-            selected_column,
-            columns,
-            palette_provider.as_ref(),
-        );
+        let arrow_row = album_detail_arrow_row(selected_column, columns, palette_provider.as_ref());
         arrow_row.set_valign(gtk::Align::Start);
         arrow_row.set_can_target(false);
         shell.add_overlay(&arrow_row);

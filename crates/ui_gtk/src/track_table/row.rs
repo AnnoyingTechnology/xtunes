@@ -67,7 +67,8 @@ pub(crate) struct TrackTableRow {
 
 impl TrackTableRow {
     pub(crate) fn from_track(track: &Track, library_root: Option<&Path>) -> Self {
-        let absolute_path = track.location.absolute_path(library_root);
+        let absolute_path =
+            library_root.map(|library_root| track.location.absolute_path(library_root));
         let file_metadata = absolute_path
             .as_ref()
             .and_then(|path| std::fs::metadata(path).ok());

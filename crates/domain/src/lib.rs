@@ -40,6 +40,4 @@ pub use smart_playlist::{
 };
 pub use smart_playlist_evaluation::{matching_tracks, track_matches_rule, track_matches_rule_set};
 pub use statistics::PlayStatistics;
-pub use track::{
-    Track, TrackAvailability, TrackContentHash, TrackFilePath, TrackLocation, TrackRelativePath,
-};
+pub use track::{Track, TrackAvailability, TrackContentHash, TrackLocation, TrackRelativePath};

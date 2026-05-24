@@ -10,8 +10,10 @@ use main_window::build_main_window;
 
 pub use sustain_app_runtime::{
     ApplicationCommand, ApplicationQuery, ApplicationRuntime, ApplicationRuntimeError,
-    BackgroundTaskStatus, LibraryManagementMode, LibraryScanResult, LibraryScanSummary,
-    UserSettings, run_library_scan_task,
+    BackgroundTaskStatus, LibraryConsolidationResult, LibraryConsolidationSummary,
+    LibraryImportResult, LibraryImportSummary, LibraryManagementMode, LibraryScanResult,
+    LibraryScanSummary, UserSettings, run_library_consolidation_task, run_library_import_task,
+    run_library_scan_task,
 };
 
 mod accent;
@@ -20,6 +22,8 @@ mod app_css;
 mod artwork_color;
 mod command_controller;
 mod content_stack;
+mod library_consolidation;
+mod library_import;
 mod library_scan;
 mod main_window;
 mod mode_bar;

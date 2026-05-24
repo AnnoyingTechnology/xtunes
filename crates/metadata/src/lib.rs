@@ -53,7 +53,6 @@ pub trait MetadataService: Send + Sync {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScannedTrack {
     pub relative_path: TrackRelativePath,
-    pub content_hash: TrackContentHash,
     pub metadata: TrackMetadata,
     pub rating: Rating,
 }
@@ -162,17 +161,8 @@ where
                 return;
             }
         };
-        let content_hash = match hash_file_content(&path) {
-            Ok(content_hash) => content_hash,
-            Err(error) => {
-                scan.failures.push(ScanFailure { path, error });
-                return;
-            }
-        };
-
         scan.tracks.push(ScannedTrack {
             relative_path,
-            content_hash,
             metadata,
             rating,
         });

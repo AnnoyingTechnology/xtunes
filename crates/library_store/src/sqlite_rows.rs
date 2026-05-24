@@ -3,7 +3,6 @@
 
 use std::{
     num::NonZeroU32,
-    path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -64,28 +63,14 @@ pub(crate) fn track_from_row(row: &Row<'_>) -> StoreResult<Track> {
 
 fn track_location_from_row(row: &Row<'_>) -> StoreResult<TrackLocation> {
     let path = row.get::<_, String>(1).map_err(StoreError::from)?;
-    let kind = row.get::<_, String>(31).map_err(StoreError::from)?;
     let is_missing = row.get::<_, bool>(19).map_err(StoreError::from)?;
+    let relative_path =
+        TrackRelativePath::new(path.clone()).ok_or(StoreError::InvalidStoredPath(path))?;
 
-    match kind.as_str() {
-        "library_relative" => {
-            let relative_path =
-                TrackRelativePath::new(path.clone()).ok_or(StoreError::InvalidStoredPath(path))?;
-            if is_missing {
-                Ok(TrackLocation::missing(relative_path))
-            } else {
-                Ok(TrackLocation::available(relative_path))
-            }
-        }
-        "external" => {
-            let location = if is_missing {
-                TrackLocation::missing_external(PathBuf::from(&path))
-            } else {
-                TrackLocation::available_external(PathBuf::from(&path))
-            };
-            location.ok_or(StoreError::InvalidStoredPath(path))
-        }
-        _ => Err(StoreError::InvalidStoredEnum(kind)),
+    if is_missing {
+        Ok(TrackLocation::missing(relative_path))
+    } else {
+        Ok(TrackLocation::available(relative_path))
     }
 }
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use sustain_domain::ApplicationCommand;
+use sustain_domain::{ApplicationCommand, LibraryManagementMode};
 
 use crate::{ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult, library_scan};
 
@@ -12,6 +12,24 @@ impl ApplicationRuntime {
                 self.handle_playback_command(command)?;
             }
             ApplicationCommand::UpdateSettings(settings) => {
+                if self.background_task_status.is_running()
+                    && settings.library != self.settings.library
+                {
+                    let cancellation_allowed = self
+                        .background_task_status
+                        .is_library_consolidation_running()
+                        && self.settings.library.path == settings.library.path
+                        && self.settings.library.management_mode
+                            == LibraryManagementMode::CopyAddedFilesIntoLibrary
+                        && settings.library.management_mode
+                            == LibraryManagementMode::ReferenceFilesInPlace;
+
+                    if cancellation_allowed {
+                        self.request_library_consolidation_cancellation();
+                    } else {
+                        return Err(ApplicationRuntimeError::BackgroundTaskRunning);
+                    }
+                }
                 if let Some(settings_store) = &self.settings_store {
                     settings_store
                         .save_settings(settings.clone())

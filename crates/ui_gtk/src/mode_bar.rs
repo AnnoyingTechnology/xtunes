@@ -7,8 +7,9 @@ use gtk::prelude::*;
 
 use super::{
     ALBUMS_VIEW, MODE_BAR_HEIGHT, MODE_BUTTON_HEIGHT, PLAYLISTS_VIEW, SONGS_VIEW,
-    command_controller::SharedCommandController, library_scan::LibraryScanRequestedCallback,
-    preferences::settings_button,
+    command_controller::SharedCommandController,
+    library_consolidation::LibraryConsolidationRequestedCallback,
+    library_scan::LibraryScanRequestedCallback, preferences::settings_button,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,6 +33,7 @@ pub(crate) fn build_mode_bar(
     content_stack: &gtk::Stack,
     command_controller: SharedCommandController,
     scan_requested: LibraryScanRequestedCallback,
+    consolidation_requested: LibraryConsolidationRequestedCallback,
     on_view_mode_changed: ViewModeChangedCallback,
 ) -> ModeBar {
     let mode_bar = gtk::CenterBox::new();
@@ -78,7 +80,12 @@ pub(crate) fn build_mode_bar(
     mode_buttons.append(&playlists);
     mode_bar.set_center_widget(Some(&mode_buttons));
 
-    let settings = settings_button(window, command_controller, scan_requested);
+    let settings = settings_button(
+        window,
+        command_controller,
+        scan_requested,
+        consolidation_requested,
+    );
     mode_bar.set_end_widget(Some(&settings));
 
     let albums_for_callback = albums.clone();

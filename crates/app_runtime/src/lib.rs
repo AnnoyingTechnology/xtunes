@@ -5,7 +5,10 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 pub use sustain_domain::{
@@ -36,12 +39,14 @@ mod playlists;
 mod smart_playlists;
 
 pub use library_scan::run_library_scan_task;
+pub use managed_library::{run_library_consolidation_task, run_library_import_task};
 
 pub type ApplicationRuntimeResult<T> = Result<T, ApplicationRuntimeError>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ApplicationRuntimeError {
     LibraryPathUnavailable,
+    LibraryConsolidationFailed,
     LibraryImportFailed,
     LibraryScanFailed,
     LibraryServicesUnavailable,
@@ -83,11 +88,26 @@ pub enum BackgroundTaskStatus {
     LibraryScanRunning,
     LibraryScanCompleted(LibraryScanSummary),
     LibraryScanFailed(ApplicationRuntimeError),
+    LibraryImportRunning,
+    LibraryImportCompleted(LibraryImportSummary),
+    LibraryImportFailed(ApplicationRuntimeError),
+    LibraryConsolidationRunning,
+    LibraryConsolidationCompleted(LibraryConsolidationSummary),
+    LibraryConsolidationFailed(ApplicationRuntimeError),
 }
 
 impl BackgroundTaskStatus {
     pub fn is_running(&self) -> bool {
-        matches!(self, Self::LibraryScanRunning)
+        matches!(
+            self,
+            Self::LibraryScanRunning
+                | Self::LibraryImportRunning
+                | Self::LibraryConsolidationRunning
+        )
+    }
+
+    pub fn is_library_consolidation_running(&self) -> bool {
+        matches!(self, Self::LibraryConsolidationRunning)
     }
 }
 
@@ -105,10 +125,37 @@ pub struct LibraryScanTask {
     metadata_service: Arc<dyn MetadataService>,
 }
 
+pub struct LibraryImportTask {
+    paths: Vec<PathBuf>,
+    settings: UserSettings,
+    existing_tracks: Vec<Track>,
+    library_store: Arc<dyn LibraryStore>,
+    metadata_service: Arc<dyn MetadataService>,
+}
+
+pub struct LibraryConsolidationTask {
+    settings: UserSettings,
+    existing_tracks: Vec<Track>,
+    library_store: Arc<dyn LibraryStore>,
+    cancellation_requested: Arc<AtomicBool>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LibraryScanResult {
     pub tracks: Vec<Track>,
     pub summary: LibraryScanSummary,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LibraryImportResult {
+    pub tracks: Vec<Track>,
+    pub summary: LibraryImportSummary,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LibraryConsolidationResult {
+    pub tracks: Vec<Track>,
+    pub summary: LibraryConsolidationSummary,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -116,6 +163,15 @@ pub struct LibraryImportSummary {
     pub discovered_files: usize,
     pub imported_tracks: usize,
     pub duplicate_files: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LibraryConsolidationSummary {
+    pub planned_tracks: usize,
+    pub moved_tracks: usize,
+    pub already_organized_tracks: usize,
+    pub missing_tracks: usize,
+    pub cancelled: bool,
 }
 
 pub struct ApplicationRuntime {
@@ -132,7 +188,9 @@ pub struct ApplicationRuntime {
     last_scan_library_path: Option<PathBuf>,
     last_scan_summary: Option<LibraryScanSummary>,
     last_library_import_summary: Option<LibraryImportSummary>,
+    last_library_consolidation_summary: Option<LibraryConsolidationSummary>,
     background_task_status: BackgroundTaskStatus,
+    library_consolidation_cancellation: Option<Arc<AtomicBool>>,
 }
 
 impl ApplicationRuntime {
@@ -151,7 +209,9 @@ impl ApplicationRuntime {
             last_scan_library_path: None,
             last_scan_summary: None,
             last_library_import_summary: None,
+            last_library_consolidation_summary: None,
             background_task_status: BackgroundTaskStatus::Idle,
+            library_consolidation_cancellation: None,
         }
     }
 
@@ -176,7 +236,9 @@ impl ApplicationRuntime {
             last_scan_library_path: None,
             last_scan_summary: None,
             last_library_import_summary: None,
+            last_library_consolidation_summary: None,
             background_task_status: BackgroundTaskStatus::Idle,
+            library_consolidation_cancellation: None,
         })
     }
 
@@ -194,6 +256,12 @@ impl ApplicationRuntime {
         library_store: Arc<dyn LibraryStore>,
         metadata_service: Arc<dyn MetadataService>,
     ) -> ApplicationRuntimeResult<()> {
+        if let Some(library_path) = self.settings.library_path() {
+            managed_library::recover_library_consolidation_journal(
+                library_path,
+                library_store.as_ref(),
+            )?;
+        }
         self.library_tracks = library_scan::load_library_tracks(
             library_store.as_ref(),
             self.settings.library_path(),
@@ -249,8 +317,18 @@ impl ApplicationRuntime {
         self.last_library_import_summary.as_ref()
     }
 
+    pub fn last_library_consolidation_summary(&self) -> Option<&LibraryConsolidationSummary> {
+        self.last_library_consolidation_summary.as_ref()
+    }
+
     pub fn background_task_status(&self) -> &BackgroundTaskStatus {
         &self.background_task_status
+    }
+
+    pub fn request_library_consolidation_cancellation(&self) {
+        if let Some(cancellation_requested) = &self.library_consolidation_cancellation {
+            cancellation_requested.store(true, Ordering::SeqCst);
+        }
     }
 
     pub fn playback_state(&self) -> PlaybackState {
@@ -298,7 +376,9 @@ impl ApplicationRuntime {
     }
 
     pub fn absolute_track_path(&self, track: &Track) -> Option<PathBuf> {
-        track.location.absolute_path(self.settings.library_path())
+        self.settings
+            .library_path()
+            .map(|library_path| track.location.absolute_path(library_path))
     }
 
     pub fn smart_playlist_matching_tracks(
@@ -342,7 +422,10 @@ mod tests {
     use sustain_playback::NullPlaybackService;
     use sustain_settings::{SettingsError, SettingsResult, SettingsStore};
 
-    use super::{ApplicationRuntime, ApplicationRuntimeError, LibraryScanSummary, MetadataService};
+    use super::{
+        ApplicationRuntime, ApplicationRuntimeError, LibraryConsolidationSummary,
+        LibraryScanSummary, MetadataService, run_library_consolidation_task,
+    };
 
     #[test]
     fn runtime_starts_with_default_settings() {
@@ -590,6 +673,7 @@ mod tests {
         );
 
         assert_eq!(runtime.library_tracks().len(), 1);
+        assert_eq!(runtime.library_tracks()[0].content_hash, None);
         assert_eq!(
             runtime
                 .last_scan_summary()
@@ -752,11 +836,7 @@ mod tests {
         let tracks = runtime.library_tracks();
         assert_eq!(tracks.len(), 1);
         assert_eq!(
-            tracks[0]
-                .location
-                .library_relative_path()
-                .expect("managed import stores a library-relative path")
-                .as_path(),
+            tracks[0].location.relative_path.as_path(),
             std::path::Path::new("Unknown Artist/Unknown Album/Track.flac")
         );
         assert!(tracks[0].content_hash.is_some());
@@ -808,15 +888,61 @@ mod tests {
     }
 
     #[test]
-    fn unmanaged_external_import_indexes_files_in_place() {
+    fn managed_import_lazily_hashes_same_size_existing_tracks_for_duplicates() {
+        let library_root = unique_test_directory();
         let external_root = unique_test_directory();
+        std::fs::create_dir_all(&library_root).expect("create library root");
         std::fs::create_dir_all(&external_root).expect("create external root");
+        let existing_path = library_root.join("existing.flac");
         let source_path = external_root.join("source.flac");
-        std::fs::write(&source_path, b"audio bytes").expect("write external source");
+        std::fs::write(&existing_path, b"same audio").expect("write existing track");
+        std::fs::write(&source_path, b"same audio").expect("write external source");
+
+        let mut settings = UserSettings::with_library_path(Some(library_root.clone()));
+        settings.library.management_mode = LibraryManagementMode::CopyAddedFilesIntoLibrary;
         let store = Arc::new(InMemoryLibraryStore::new());
-        let mut runtime = ApplicationRuntime::new()
-            .with_library_services(store.clone(), Arc::new(TestMetadataService))
-            .expect("library services initialize");
+        let existing_track = test_track(track_id(7), "existing.flac");
+        assert_eq!(store.save_track(existing_track.clone()), Ok(()));
+        let mut runtime =
+            ApplicationRuntime::with_settings_store(Box::new(TestSettingsStore::new(settings)))
+                .expect("load settings")
+                .with_library_services(store, Arc::new(TestMetadataService))
+                .expect("library services initialize");
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::AddExternalLibraryItems {
+                paths: vec![source_path]
+            }),
+            Ok(())
+        );
+
+        assert_eq!(runtime.library_tracks(), &[existing_track]);
+        assert_eq!(
+            runtime.last_library_import_summary(),
+            Some(&super::LibraryImportSummary {
+                discovered_files: 1,
+                imported_tracks: 0,
+                duplicate_files: 1,
+            })
+        );
+
+        std::fs::remove_dir_all(library_root).expect("remove library root");
+        std::fs::remove_dir_all(external_root).expect("remove external root");
+    }
+
+    #[test]
+    fn unmanaged_external_import_indexes_library_files_in_place() {
+        let library_root = unique_test_directory();
+        std::fs::create_dir_all(&library_root).expect("create library root");
+        let source_path = library_root.join("source.flac");
+        std::fs::write(&source_path, b"audio bytes").expect("write source");
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(library_root.clone()))),
+        ))
+        .expect("load settings")
+        .with_library_services(store.clone(), Arc::new(TestMetadataService))
+        .expect("library services initialize");
 
         assert_eq!(
             runtime.handle_command(ApplicationCommand::AddExternalLibraryItems {
@@ -825,12 +951,13 @@ mod tests {
             Ok(())
         );
 
-        let canonical_source =
-            std::fs::canonicalize(&source_path).expect("canonical source path exists");
         let tracks = runtime.library_tracks();
         assert_eq!(tracks.len(), 1);
-        assert_eq!(tracks[0].location.path(), canonical_source.as_path());
-        assert!(tracks[0].content_hash.is_some());
+        assert_eq!(
+            tracks[0].location.relative_path.as_path(),
+            Path::new("source.flac")
+        );
+        assert_eq!(tracks[0].content_hash, None);
         assert_eq!(store.tracks().expect("store tracks"), tracks);
         assert_eq!(
             runtime.last_library_import_summary(),
@@ -841,7 +968,216 @@ mod tests {
             })
         );
 
+        std::fs::remove_dir_all(library_root).expect("remove library root");
+    }
+
+    #[test]
+    fn unmanaged_external_import_rejects_files_outside_library_path() {
+        let library_root = unique_test_directory();
+        let external_root = unique_test_directory();
+        std::fs::create_dir_all(&library_root).expect("create library root");
+        std::fs::create_dir_all(&external_root).expect("create external root");
+        let source_path = external_root.join("source.flac");
+        std::fs::write(&source_path, b"audio bytes").expect("write source");
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(library_root.clone()))),
+        ))
+        .expect("load settings")
+        .with_library_services(store.clone(), Arc::new(TestMetadataService))
+        .expect("library services initialize");
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::AddExternalLibraryItems {
+                paths: vec![source_path]
+            }),
+            Err(ApplicationRuntimeError::LibraryImportFailed)
+        );
+        assert_eq!(runtime.library_tracks(), &[]);
+        assert_eq!(store.tracks(), Ok(Vec::new()));
+
+        std::fs::remove_dir_all(library_root).expect("remove library root");
         std::fs::remove_dir_all(external_root).expect("remove external root");
+    }
+
+    #[test]
+    fn managed_consolidation_moves_existing_tracks_to_planned_paths() {
+        let library_root = unique_test_directory();
+        std::fs::create_dir_all(&library_root).expect("create library root");
+        let source_path = library_root.join("loose.flac");
+        std::fs::write(&source_path, b"audio bytes").expect("write existing file");
+
+        let track_id = track_id(21);
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut track = test_track(track_id, "loose.flac");
+        track.metadata.artist = Some("Artist".to_owned());
+        track.metadata.album = Some("Album".to_owned());
+        track.metadata.title = Some("Song".to_owned());
+        track.metadata.track_number = Some(1);
+        track.rating = Rating::new(5).expect("valid rating");
+        track.statistics.play_count = 9;
+        assert_eq!(store.save_track(track), Ok(()));
+
+        let mut settings = UserSettings::with_library_path(Some(library_root.clone()));
+        settings.library.management_mode = LibraryManagementMode::CopyAddedFilesIntoLibrary;
+        let mut runtime =
+            ApplicationRuntime::with_settings_store(Box::new(TestSettingsStore::new(settings)))
+                .expect("load settings")
+                .with_library_services(store.clone(), Arc::new(TestMetadataService))
+                .expect("library services initialize");
+
+        let task = runtime
+            .prepare_library_consolidation()
+            .expect("prepare consolidation");
+        let result = run_library_consolidation_task(task).expect("run consolidation");
+        runtime.apply_library_consolidation_result(result);
+
+        let destination_path = library_root.join("Artist/Album/01 Song.flac");
+        assert!(!source_path.exists());
+        assert_eq!(
+            std::fs::read(&destination_path).expect("destination exists"),
+            b"audio bytes"
+        );
+        assert_eq!(
+            runtime.last_library_consolidation_summary(),
+            Some(&LibraryConsolidationSummary {
+                planned_tracks: 1,
+                moved_tracks: 1,
+                already_organized_tracks: 0,
+                missing_tracks: 0,
+                cancelled: false,
+            })
+        );
+
+        let runtime_track = runtime
+            .library_tracks()
+            .iter()
+            .find(|track| track.id == track_id)
+            .expect("runtime track exists");
+        assert_eq!(
+            runtime_track.location.relative_path.as_path(),
+            Path::new("Artist/Album/01 Song.flac")
+        );
+        assert_eq!(runtime_track.rating, Rating::new(5).expect("valid rating"));
+        assert_eq!(runtime_track.statistics.play_count, 9);
+        assert_eq!(
+            store
+                .track(track_id)
+                .expect("load stored track")
+                .map(|track| track.location.relative_path.to_path_buf()),
+            Some(PathBuf::from("Artist/Album/01 Song.flac"))
+        );
+
+        std::fs::remove_dir_all(library_root).expect("remove library root");
+    }
+
+    #[test]
+    fn disabling_managed_mode_requests_consolidation_cancellation() {
+        let library_root = unique_test_directory();
+        std::fs::create_dir_all(&library_root).expect("create library root");
+        let source_path = library_root.join("loose.flac");
+        std::fs::write(&source_path, b"audio bytes").expect("write existing file");
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut track = test_track(track_id(22), "loose.flac");
+        track.metadata.title = Some("Song".to_owned());
+        assert_eq!(store.save_track(track), Ok(()));
+
+        let mut settings = UserSettings::with_library_path(Some(library_root.clone()));
+        settings.library.management_mode = LibraryManagementMode::CopyAddedFilesIntoLibrary;
+        let mut runtime =
+            ApplicationRuntime::with_settings_store(Box::new(TestSettingsStore::new(settings)))
+                .expect("load settings")
+                .with_library_services(store.clone(), Arc::new(TestMetadataService))
+                .expect("library services initialize");
+
+        let task = runtime
+            .prepare_library_consolidation()
+            .expect("prepare consolidation");
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::ScanLibrary {
+                library_path: library_root.clone()
+            }),
+            Err(ApplicationRuntimeError::BackgroundTaskRunning)
+        );
+
+        let mut updated_settings = runtime.settings().clone();
+        updated_settings.library.management_mode = LibraryManagementMode::ReferenceFilesInPlace;
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::UpdateSettings(updated_settings)),
+            Ok(())
+        );
+
+        let result = run_library_consolidation_task(task).expect("run cancelled consolidation");
+        runtime.apply_library_consolidation_result(result);
+
+        assert!(source_path.exists());
+        assert!(
+            !library_root
+                .join("Unknown Artist/Unknown Album/Song.flac")
+                .exists()
+        );
+        assert_eq!(
+            runtime.last_library_consolidation_summary(),
+            Some(&LibraryConsolidationSummary {
+                planned_tracks: 1,
+                moved_tracks: 0,
+                already_organized_tracks: 0,
+                missing_tracks: 0,
+                cancelled: true,
+            })
+        );
+        assert_eq!(
+            runtime.settings().library.management_mode,
+            LibraryManagementMode::ReferenceFilesInPlace
+        );
+
+        std::fs::remove_dir_all(library_root).expect("remove library root");
+    }
+
+    #[test]
+    fn consolidation_journal_recovery_retargets_moved_tracks_on_startup() {
+        let library_root = unique_test_directory();
+        std::fs::create_dir_all(library_root.join("Artist/Album"))
+            .expect("create destination directory");
+        let destination_path = library_root.join("Artist/Album/01 Song.flac");
+        std::fs::write(&destination_path, b"audio bytes").expect("write moved file");
+        std::fs::write(
+            library_root.join(".sustain-consolidation-journal"),
+            format!(
+                "# sustain managed library consolidation journal v1\nmove\t23\t{}\t{}\n",
+                hex_path("loose.flac"),
+                hex_path("Artist/Album/01 Song.flac")
+            ),
+        )
+        .expect("write journal");
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let track_id = track_id(23);
+        assert_eq!(store.save_track(test_track(track_id, "loose.flac")), Ok(()));
+        let mut settings = UserSettings::with_library_path(Some(library_root.clone()));
+        settings.library.management_mode = LibraryManagementMode::CopyAddedFilesIntoLibrary;
+
+        let runtime =
+            ApplicationRuntime::with_settings_store(Box::new(TestSettingsStore::new(settings)))
+                .expect("load settings")
+                .with_library_services(store.clone(), Arc::new(TestMetadataService))
+                .expect("library services initialize");
+
+        assert_eq!(
+            runtime.library_tracks()[0].location.relative_path.as_path(),
+            Path::new("Artist/Album/01 Song.flac")
+        );
+        assert!(!library_root.join(".sustain-consolidation-journal").exists());
+        assert_eq!(
+            store
+                .track(track_id)
+                .expect("load recovered track")
+                .map(|track| track.location.relative_path.to_path_buf()),
+            Some(PathBuf::from("Artist/Album/01 Song.flac"))
+        );
+
+        std::fs::remove_dir_all(library_root).expect("remove library root");
     }
 
     #[test]
@@ -1230,6 +1566,121 @@ mod tests {
         assert_eq!(stored.metadata.title.as_deref(), Some("New"));
         assert_eq!(stored.metadata.artist, None);
         assert_eq!(stored.metadata.year, Some(2001));
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
+    #[test]
+    fn managed_metadata_update_moves_file_when_planned_path_changes() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+        let source_path = root.join("loose.flac");
+        std::fs::write(&source_path, b"audio bytes").expect("write fake track");
+
+        let track_id = track_id(31);
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut track = test_track(track_id, "loose.flac");
+        track.metadata.title = Some("Old".to_owned());
+        track.metadata.artist = Some("Old Artist".to_owned());
+        track.metadata.album = Some("Old Album".to_owned());
+        assert_eq!(store.save_track(track), Ok(()));
+        let mut settings = UserSettings::with_library_path(Some(root.clone()));
+        settings.library.management_mode = LibraryManagementMode::CopyAddedFilesIntoLibrary;
+        let metadata_service = Arc::new(RecordingMetadataService::new(false));
+        let mut runtime =
+            ApplicationRuntime::with_settings_store(Box::new(TestSettingsStore::new(settings)))
+                .expect("load settings")
+                .with_library_services(store.clone(), metadata_service.clone())
+                .expect("library services initialize");
+        let change = MetadataChange {
+            title: FieldChange::Set("Song".to_owned()),
+            artist: FieldChange::Set("Artist".to_owned()),
+            album: FieldChange::Set("Album".to_owned()),
+            track_number: FieldChange::Set(3),
+            ..MetadataChange::default()
+        };
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::UpdateMetadata {
+                track_id,
+                change: Box::new(change.clone()),
+            }),
+            Ok(())
+        );
+
+        let destination_path = root.join("Artist/Album/03 Song.flac");
+        assert!(!source_path.exists());
+        assert_eq!(
+            std::fs::read(&destination_path).expect("destination exists"),
+            b"audio bytes"
+        );
+        assert_eq!(
+            metadata_service.metadata_writes(),
+            vec![(source_path.clone(), change)]
+        );
+        assert_eq!(
+            runtime.library_tracks()[0].location.relative_path.as_path(),
+            Path::new("Artist/Album/03 Song.flac")
+        );
+        assert_eq!(
+            store
+                .track(track_id)
+                .expect("load updated track")
+                .map(|track| track.location.relative_path.to_path_buf()),
+            Some(PathBuf::from("Artist/Album/03 Song.flac"))
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
+    #[test]
+    fn managed_metadata_update_keeps_file_in_place_for_non_path_fields() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+        let track_path = root.join("Artist/Album/01 Song.flac");
+        std::fs::create_dir_all(track_path.parent().expect("test path has parent"))
+            .expect("create album directory");
+        std::fs::write(&track_path, b"audio bytes").expect("write fake track");
+
+        let track_id = track_id(32);
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut track = test_track(track_id, "Artist/Album/01 Song.flac");
+        track.metadata.title = Some("Song".to_owned());
+        track.metadata.artist = Some("Artist".to_owned());
+        track.metadata.album = Some("Album".to_owned());
+        track.metadata.track_number = Some(1);
+        assert_eq!(store.save_track(track), Ok(()));
+        let mut settings = UserSettings::with_library_path(Some(root.clone()));
+        settings.library.management_mode = LibraryManagementMode::CopyAddedFilesIntoLibrary;
+        let metadata_service = Arc::new(RecordingMetadataService::new(false));
+        let mut runtime =
+            ApplicationRuntime::with_settings_store(Box::new(TestSettingsStore::new(settings)))
+                .expect("load settings")
+                .with_library_services(store.clone(), metadata_service.clone())
+                .expect("library services initialize");
+        let change = MetadataChange {
+            year: FieldChange::Set(1999),
+            genre: FieldChange::Set("Rock".to_owned()),
+            ..MetadataChange::default()
+        };
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::UpdateMetadata {
+                track_id,
+                change: Box::new(change.clone()),
+            }),
+            Ok(())
+        );
+
+        assert!(track_path.exists());
+        assert_eq!(
+            metadata_service.metadata_writes(),
+            vec![(track_path.clone(), change)]
+        );
+        assert_eq!(
+            runtime.library_tracks()[0].location.relative_path.as_path(),
+            Path::new("Artist/Album/01 Song.flac")
+        );
 
         std::fs::remove_dir_all(root).expect("remove test library");
     }
@@ -2110,6 +2561,13 @@ mod tests {
 
     fn relative_path(path: &str) -> super::TrackRelativePath {
         super::TrackRelativePath::new(PathBuf::from(path)).expect("test path is relative")
+    }
+
+    fn hex_path(path: &str) -> String {
+        path.as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 
     fn _assert_store_result_is_public<T>(result: StoreResult<T>) -> StoreResult<T> {

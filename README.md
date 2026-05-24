@@ -4,7 +4,7 @@
 
 ![Sustain interface screenshot dark](screenshot-light.png)
 
-Open Sustain is a Linux music player heavily inspired by old iTunes builds.
+Sustain (`open-sustain/sustain`) is a Linux music player heavily inspired by old iTunes builds.
 
 > I was an Apple fanboy during the iTunes golden era (2005-2015).
 > Each new release was a treat and what I still miss years after switching to Linux.
@@ -25,6 +25,13 @@ For example native _icons_ are used, so are native _accent color_.
 The library management has two modes, similar to what iTunes does :
 - "Don't touch my files" (default), which only scans a designated library folder. In this mode, your audio files can only be "enhanced" by populating more ID.3 tags. They are never moved or re-organized.
 - "Keep my library organized", which arranges and sorts the files cleanly by Artist and Album in the designated library folder. 
+
+Managed-library organization can depend on hard links to move files without
+copying file contents and without overwriting existing files. This is suitable
+for normal local Linux filesystems such as ext4, XFS, Btrfs, and ZFS, but it can
+fail on filesystems or mounts that do not support hard links, such as some SMB,
+FUSE, FAT/exFAT, or restricted network shares. In those cases Sustain fails the
+organization step rather than falling back to copy/delete.
 
 ## Stack
 

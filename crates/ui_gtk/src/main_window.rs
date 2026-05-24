@@ -23,6 +23,8 @@ use super::{
     app_css::install_app_css,
     command_controller::{SharedCommandController, UiCommandController},
     content_stack::build_content_stack,
+    library_consolidation::library_consolidation_requested_callback,
+    library_import::{install_file_drop_target, library_import_requested_callback},
     library_scan::library_scan_requested_callback,
     mode_bar::{ViewModeChangedCallback, build_mode_bar},
     now_playing::NowPlayingView,
@@ -213,11 +215,17 @@ pub(crate) fn build_main_window(
     library_changed_holder.replace(Some(library_changed.clone()));
     let scan_requested =
         library_scan_requested_callback(&runtime, library_changed.clone(), &status_bar);
+    let consolidation_requested =
+        library_consolidation_requested_callback(&runtime, library_changed.clone(), &status_bar);
+    let import_requested =
+        library_import_requested_callback(&runtime, library_changed.clone(), &status_bar);
+    install_file_drop_target(&songs_table.widget(), import_requested);
     install_preferences_action(
         app,
         &window,
         command_controller.clone(),
         scan_requested.clone(),
+        consolidation_requested.clone(),
     );
 
     let main_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -229,6 +237,7 @@ pub(crate) fn build_main_window(
         &content_stack,
         command_controller,
         scan_requested,
+        consolidation_requested,
         visible_summary_refresh,
     );
     let albums_view_for_reveal = albums_view.clone();

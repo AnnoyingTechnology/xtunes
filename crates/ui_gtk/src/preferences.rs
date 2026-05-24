@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use std::path::PathBuf;
+use std::{cell::Cell, path::PathBuf, rc::Rc};
 
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -9,6 +9,7 @@ use gtk::{gdk, gio, glib};
 use super::{
     ApplicationCommand, ApplicationRuntimeError, LibraryManagementMode, PREFERENCES_HEIGHT,
     PREFERENCES_WIDTH, WINDOW_SHADOW_MARGIN, command_controller::SharedCommandController,
+    library_consolidation::LibraryConsolidationRequestedCallback,
     library_scan::LibraryScanRequestedCallback,
 };
 
@@ -17,6 +18,7 @@ pub(crate) fn install_preferences_action(
     window: &gtk::ApplicationWindow,
     command_controller: SharedCommandController,
     scan_requested: LibraryScanRequestedCallback,
+    consolidation_requested: LibraryConsolidationRequestedCallback,
 ) {
     if app.lookup_action("preferences").is_some() {
         return;
@@ -26,8 +28,14 @@ pub(crate) fn install_preferences_action(
     let window = window.clone();
     let command_controller = command_controller.clone();
     let scan_requested = scan_requested.clone();
+    let consolidation_requested = consolidation_requested.clone();
     preferences.connect_activate(move |_action, _parameter| {
-        open_preferences_window(&window, command_controller.clone(), scan_requested.clone());
+        open_preferences_window(
+            &window,
+            command_controller.clone(),
+            scan_requested.clone(),
+            consolidation_requested.clone(),
+        );
     });
     app.add_action(&preferences);
     app.set_accels_for_action("app.preferences", &["<Primary>comma"]);
@@ -37,6 +45,7 @@ pub(crate) fn settings_button(
     window: &gtk::ApplicationWindow,
     command_controller: SharedCommandController,
     scan_requested: LibraryScanRequestedCallback,
+    consolidation_requested: LibraryConsolidationRequestedCallback,
 ) -> gtk::Button {
     let icon = gtk::Image::from_icon_name("preferences-system-symbolic");
     icon.set_pixel_size(18);
@@ -51,8 +60,14 @@ pub(crate) fn settings_button(
     let window = window.clone();
     let command_controller = command_controller.clone();
     let scan_requested = scan_requested.clone();
+    let consolidation_requested = consolidation_requested.clone();
     button.connect_clicked(move |_| {
-        open_preferences_window(&window, command_controller.clone(), scan_requested.clone());
+        open_preferences_window(
+            &window,
+            command_controller.clone(),
+            scan_requested.clone(),
+            consolidation_requested.clone(),
+        );
     });
 
     button
@@ -62,6 +77,7 @@ fn open_preferences_window(
     parent: &gtk::ApplicationWindow,
     command_controller: SharedCommandController,
     scan_requested: LibraryScanRequestedCallback,
+    consolidation_requested: LibraryConsolidationRequestedCallback,
 ) {
     let window = gtk::Window::builder()
         .title("Library Path")
@@ -138,6 +154,11 @@ fn open_preferences_window(
     let path_entry = gtk::Entry::new();
     path_entry.set_hexpand(true);
     path_entry.set_placeholder_text(Some("/home/julien/Music"));
+    let library_task_is_running = command_controller
+        .runtime()
+        .borrow()
+        .background_task_status()
+        .is_running();
     if let Some(library_path) = command_controller
         .runtime()
         .borrow()
@@ -156,6 +177,9 @@ fn open_preferences_window(
 
     let scan_button = gtk::Button::with_label("Scan");
     scan_button.set_tooltip_text(Some("Save library path and scan now"));
+    path_entry.set_sensitive(!library_task_is_running);
+    folder_button.set_sensitive(!library_task_is_running);
+    scan_button.set_sensitive(!library_task_is_running);
 
     let scan_status = gtk::Label::new(None);
     scan_status.add_css_class("preference-helper");
@@ -180,14 +204,39 @@ fn open_preferences_window(
     keep_organized_check.set_sensitive(library_path_is_valid);
 
     let organization_help = gtk::Label::new(Some(
-        "Newly added tracks are copied into clean artist, album, and track folders inside the library folder.",
+        "New tracks are copied into clean artist, album, and track folders. Existing tracks are organized in the background when this is turned on.",
     ));
     organization_help.add_css_class("preference-helper");
     organization_help.set_xalign(0.0);
     organization_help.set_wrap(true);
 
     let command_controller_for_organization = command_controller.clone();
+    let consolidation_requested_for_organization = consolidation_requested.clone();
+    let path_entry_for_organization = path_entry.clone();
+    let path_entry_for_organization_sensitivity = path_entry.clone();
+    let folder_button_for_organization_sensitivity = folder_button.clone();
+    let scan_button_for_organization_sensitivity = scan_button.clone();
+    let scan_status_for_organization = scan_status.clone();
+    let suppress_organization_toggle = Rc::new(Cell::new(false));
+    let suppress_organization_toggle_for_callback = suppress_organization_toggle.clone();
     keep_organized_check.connect_toggled(move |check_button| {
+        if suppress_organization_toggle_for_callback.get() {
+            return;
+        }
+
+        if check_button.is_active()
+            && let Err(error) = save_library_path_from_entry(
+                &command_controller_for_organization,
+                &path_entry_for_organization,
+            )
+        {
+            scan_status_for_organization.set_text(scan_error_text(error));
+            suppress_organization_toggle_for_callback.set(true);
+            check_button.set_active(false);
+            suppress_organization_toggle_for_callback.set(false);
+            return;
+        }
+
         let mut settings = command_controller_for_organization
             .runtime()
             .borrow()
@@ -198,18 +247,80 @@ fn open_preferences_window(
         } else {
             LibraryManagementMode::ReferenceFilesInPlace
         };
-        let _result = command_controller_for_organization
-            .dispatch(ApplicationCommand::UpdateSettings(settings));
+        match command_controller_for_organization
+            .dispatch(ApplicationCommand::UpdateSettings(settings))
+        {
+            Ok(()) if check_button.is_active() => {
+                match consolidation_requested_for_organization() {
+                    Ok(()) => {
+                        path_entry_for_organization_sensitivity.set_sensitive(false);
+                        folder_button_for_organization_sensitivity.set_sensitive(false);
+                        scan_button_for_organization_sensitivity.set_sensitive(false);
+                        scan_status_for_organization.set_text(
+                            "Library organization started. Progress is shown in the status bar.",
+                        );
+                    }
+                    Err(error) => {
+                        scan_status_for_organization.set_text(scan_error_text(error));
+                        let mut settings = command_controller_for_organization
+                            .runtime()
+                            .borrow()
+                            .settings()
+                            .clone();
+                        settings.library.management_mode =
+                            LibraryManagementMode::ReferenceFilesInPlace;
+                        let _result = command_controller_for_organization
+                            .dispatch(ApplicationCommand::UpdateSettings(settings));
+                        suppress_organization_toggle_for_callback.set(true);
+                        check_button.set_active(false);
+                        suppress_organization_toggle_for_callback.set(false);
+                    }
+                }
+            }
+            Ok(()) => {
+                if command_controller_for_organization
+                    .runtime()
+                    .borrow()
+                    .background_task_status()
+                    .is_library_consolidation_running()
+                {
+                    scan_status_for_organization
+                        .set_text("Library organization will stop after the current file.");
+                } else {
+                    scan_status_for_organization.set_text("");
+                }
+            }
+            Err(error) => {
+                scan_status_for_organization.set_text(scan_error_text(error));
+                let active = command_controller_for_organization
+                    .runtime()
+                    .borrow()
+                    .settings()
+                    .library
+                    .management_mode
+                    == LibraryManagementMode::CopyAddedFilesIntoLibrary;
+                suppress_organization_toggle_for_callback.set(true);
+                check_button.set_active(active);
+                suppress_organization_toggle_for_callback.set(false);
+            }
+        }
     });
 
     organization_group.append(&keep_organized_check);
     organization_group.append(&organization_help);
 
     let keep_organized_for_path_change = keep_organized_check.clone();
+    let command_controller_for_path_change = command_controller.clone();
     path_entry.connect_changed(move |entry| {
         let path_is_valid = library_path_entry_is_valid(entry);
+        let library_task_is_running = command_controller_for_path_change
+            .runtime()
+            .borrow()
+            .background_task_status()
+            .is_running();
         keep_organized_for_path_change.set_sensitive(path_is_valid);
-        if !path_is_valid && keep_organized_for_path_change.is_active() {
+        if !library_task_is_running && !path_is_valid && keep_organized_for_path_change.is_active()
+        {
             keep_organized_for_path_change.set_active(false);
         }
     });
@@ -359,6 +470,9 @@ fn request_library_scan_from_entry(
 fn scan_error_text(error: ApplicationRuntimeError) -> &'static str {
     match error {
         ApplicationRuntimeError::LibraryScanFailed => "The selected folder could not be scanned.",
+        ApplicationRuntimeError::LibraryConsolidationFailed => {
+            "The library could not be organized."
+        }
         ApplicationRuntimeError::LibraryServicesUnavailable => {
             "Library scanning is not available in this build."
         }

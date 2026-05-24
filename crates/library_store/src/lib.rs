@@ -159,8 +159,7 @@ impl SqliteLibraryStore {
 
                 CREATE TABLE IF NOT EXISTS tracks (
                     id INTEGER PRIMARY KEY,
-                    location_kind TEXT NOT NULL,
-                    location_path TEXT NOT NULL,
+                    relative_path TEXT NOT NULL UNIQUE,
                     title TEXT,
                     artist TEXT,
                     album TEXT,
@@ -189,8 +188,7 @@ impl SqliteLibraryStore {
                     sample_rate_hz INTEGER,
                     channels INTEGER,
                     lyrics TEXT,
-                    content_hash TEXT,
-                    UNIQUE(location_kind, location_path)
+                    content_hash TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS tracks_content_hash_idx
@@ -275,15 +273,13 @@ fn default_database_path() -> Option<std::path::PathBuf> {
 fn save_track_with_connection(connection: &Connection, track: &Track) -> StoreResult<()> {
     let metadata = &track.metadata;
     let statistics = &track.statistics;
-    let location_kind = track.location.file_path.storage_kind();
-    let location_path = track.location.path().to_string_lossy();
+    let relative_path = track.location.relative_path.as_path().to_string_lossy();
     connection
         .execute(
             r#"
             INSERT INTO tracks (
                 id,
-                location_kind,
-                location_path,
+                relative_path,
                 title,
                 artist,
                 album,
@@ -317,12 +313,10 @@ fn save_track_with_connection(connection: &Connection, track: &Track) -> StoreRe
             VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                 ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-                ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-                ?31, ?32
+                ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31
             )
             ON CONFLICT(id) DO UPDATE SET
-                location_kind = excluded.location_kind,
-                location_path = excluded.location_path,
+                relative_path = excluded.relative_path,
                 title = excluded.title,
                 artist = excluded.artist,
                 album = excluded.album,
@@ -355,8 +349,7 @@ fn save_track_with_connection(connection: &Connection, track: &Track) -> StoreRe
             "#,
             params![
                 track.id.get(),
-                location_kind,
-                location_path,
+                relative_path,
                 metadata.title.as_deref(),
                 metadata.artist.as_deref(),
                 metadata.album.as_deref(),
@@ -421,7 +414,7 @@ impl LibraryStore for SqliteLibraryStore {
                 r#"
                 SELECT
                     id,
-                    location_path,
+                    relative_path,
                     title,
                     artist,
                     album,
@@ -450,8 +443,7 @@ impl LibraryStore for SqliteLibraryStore {
                     sample_rate_hz,
                     channels,
                     lyrics,
-                    content_hash,
-                    location_kind
+                    content_hash
                 FROM tracks
                 WHERE id = ?1
                 "#,
@@ -477,7 +469,7 @@ impl LibraryStore for SqliteLibraryStore {
                 r#"
                 SELECT
                     id,
-                    location_path,
+                    relative_path,
                     title,
                     artist,
                     album,
@@ -506,8 +498,7 @@ impl LibraryStore for SqliteLibraryStore {
                     sample_rate_hz,
                     channels,
                     lyrics,
-                    content_hash,
-                    location_kind
+                    content_hash
                 FROM tracks
                 WHERE content_hash = ?1
                 ORDER BY id
@@ -532,7 +523,7 @@ impl LibraryStore for SqliteLibraryStore {
                 r#"
                 SELECT
                     id,
-                    location_path,
+                    relative_path,
                     title,
                     artist,
                     album,
@@ -561,8 +552,7 @@ impl LibraryStore for SqliteLibraryStore {
                     sample_rate_hz,
                     channels,
                     lyrics,
-                    content_hash,
-                    location_kind
+                    content_hash
                 FROM tracks
                 ORDER BY id
                 "#,
@@ -1050,19 +1040,6 @@ mod tests {
         let store = SqliteLibraryStore::open_in_memory().expect("open in-memory sqlite store");
         let mut track = track(1, "missing.flac");
         track.location = TrackLocation::missing(relative_path("missing.flac"));
-
-        assert_eq!(store.save_track(track.clone()), Ok(()));
-
-        assert_eq!(store.track(track.id), Ok(Some(track.clone())));
-        assert_eq!(store.tracks(), Ok(vec![track]));
-    }
-
-    #[test]
-    fn sqlite_store_saves_and_loads_external_track_locations() {
-        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory sqlite store");
-        let mut track = track(1, "placeholder.flac");
-        track.location = TrackLocation::available_external("/home/user/Music/source.flac")
-            .expect("absolute external path");
 
         assert_eq!(store.save_track(track.clone()), Ok(()));
 

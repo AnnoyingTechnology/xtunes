@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use sustain_domain::{MetadataChange, Rating, TrackId};
+use sustain_domain::{LibraryManagementMode, MetadataChange, Rating, TrackId};
 
 use crate::{
     ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult,
+    managed_library::{metadata_change_affects_managed_path, save_managed_metadata_update},
     playback::{playback_shuffle_seed, playback_track_id},
 };
 
@@ -14,6 +15,7 @@ impl ApplicationRuntime {
         track_id: TrackId,
         rating: Rating,
     ) -> ApplicationRuntimeResult<()> {
+        self.ensure_no_background_library_task()?;
         let library_store = self
             .library_store
             .clone()
@@ -50,6 +52,7 @@ impl ApplicationRuntime {
         track_id: TrackId,
         change: MetadataChange,
     ) -> ApplicationRuntimeResult<()> {
+        self.ensure_no_background_library_task()?;
         let library_store = self
             .library_store
             .clone()
@@ -73,9 +76,26 @@ impl ApplicationRuntime {
 
         let mut track = self.library_tracks[track_index].clone();
         track.metadata.apply_change(&change);
-        library_store
-            .save_track(track.clone())
-            .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
+        let track = if self.settings.library.management_mode
+            == LibraryManagementMode::CopyAddedFilesIntoLibrary
+            && metadata_change_affects_managed_path(&change)
+        {
+            let library_path = self
+                .settings
+                .library_path()
+                .ok_or(ApplicationRuntimeError::LibraryPathUnavailable)?;
+            save_managed_metadata_update(
+                library_path,
+                library_store.as_ref(),
+                &self.library_tracks,
+                track,
+            )?
+        } else {
+            library_store
+                .save_track(track.clone())
+                .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
+            track
+        };
         self.library_tracks[track_index] = track;
 
         Ok(())
@@ -86,6 +106,7 @@ impl ApplicationRuntime {
         track_id: TrackId,
         artwork: Option<Vec<u8>>,
     ) -> ApplicationRuntimeResult<()> {
+        self.ensure_no_background_library_task()?;
         let metadata_service = self
             .metadata_service
             .clone()
@@ -106,6 +127,7 @@ impl ApplicationRuntime {
     }
 
     pub(super) fn reset_play_count(&mut self, track_id: TrackId) -> ApplicationRuntimeResult<()> {
+        self.ensure_no_background_library_task()?;
         let library_store = self
             .library_store
             .clone()
@@ -133,6 +155,7 @@ impl ApplicationRuntime {
         &mut self,
         track_id: TrackId,
     ) -> ApplicationRuntimeResult<()> {
+        self.ensure_no_background_library_task()?;
         self.stop_playback_if_playing(track_id);
         let library_store = self
             .library_store
@@ -151,6 +174,7 @@ impl ApplicationRuntime {
         &mut self,
         track_id: TrackId,
     ) -> ApplicationRuntimeResult<()> {
+        self.ensure_no_background_library_task()?;
         let track = self
             .library_tracks
             .iter()
@@ -176,5 +200,13 @@ impl ApplicationRuntime {
         if playback_track_id(&service.state()) == Some(track_id) {
             let _ = service.stop();
         }
+    }
+
+    fn ensure_no_background_library_task(&self) -> ApplicationRuntimeResult<()> {
+        if self.background_task_status.is_running() {
+            return Err(ApplicationRuntimeError::BackgroundTaskRunning);
+        }
+
+        Ok(())
     }
 }
