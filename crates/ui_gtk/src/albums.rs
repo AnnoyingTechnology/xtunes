@@ -6,7 +6,6 @@ use std::{
     collections::BTreeMap,
     path::PathBuf,
     rc::Rc,
-    time::Duration,
 };
 
 use gtk::prelude::*;
@@ -15,8 +14,7 @@ use sustain_app_runtime::{ApplicationCommand, PlaybackCommand, Track, TrackId};
 
 use super::{
     PlaybackChangedCallback, SharedRuntime, artwork_color::ArtworkPalette,
-    command_controller::SharedCommandController, height_reveal::HeightReveal,
-    track_context::TrackRowContextMenu,
+    command_controller::SharedCommandController, track_context::TrackRowContextMenu,
 };
 use model::{
     AlbumTrackViewModel, AlbumViewModel, album_subtitle, duration_text, group_albums,
@@ -72,7 +70,6 @@ const ALBUM_GRID_MARGIN: i32 = 14;
 const ALBUM_GRID_ROW_SPACING: i32 = 12;
 const ALBUM_GRID_COLUMN_SPACING: i32 = 16;
 const ALBUM_DETAIL_ARTWORK_SIZE: i32 = ALBUM_TILE_COVER_SIZE * 3;
-const ALBUM_DETAIL_ANIMATION_MS: u32 = 250;
 const ALBUM_DETAIL_ARROW_WIDTH: i32 = 36;
 const ALBUM_DETAIL_ARROW_HEIGHT: i32 = 18;
 const ALBUM_COVER_PLACEHOLDER_ICON: &str = "image-missing-symbolic";
@@ -127,7 +124,7 @@ impl AlbumsView {
         self.artwork_cache.borrow_mut().clear();
         self.visible_columns
             .set(columns_for_width(self.scroller.allocated_width()));
-        self.rebuild(false);
+        self.rebuild();
     }
 
     /// Selects the album containing the given track, expands its detail panel,
@@ -144,16 +141,58 @@ impl AlbumsView {
             return false;
         };
         self.selected_album.set(Some(album_index));
-        self.rebuild(true);
-        // GTK assigns layout/allocation on the next frame, so defer the focus
-        // grab. GtkScrolledWindow auto-scrolls to keep the focused descendant
-        // visible.
+        self.rebuild();
+        self.scroll_selected_tile_to_top();
         if let Some(tile) = self.selected_tile.borrow().clone() {
+            // Keep keyboard focus in the grid after a context-menu reveal so
+            // arrow-key nav has a starting point. Scroll is handled above.
             glib::idle_add_local_once(move || {
                 tile.grab_focus();
             });
         }
         true
+    }
+
+    /// Scrolls the grid so the selected album's tile row sits at the top of
+    /// the viewport, leaving the full screen below for the expanded detail
+    /// panel.
+    ///
+    /// Hooks the frame clock's `after-paint` signal so the tile's bounds are
+    /// read after the current frame's UPDATE → LAYOUT → PAINT cycle has
+    /// completed. An idle callback is not deterministic enough here: it can
+    /// fire before the next frame's LAYOUT phase depending on whether a
+    /// frame happens to be due, and in that pre-layout window
+    /// `compute_bounds` on a freshly-added widget returns a zero-sized rect
+    /// that would silently scroll the viewport to `value = 0`.
+    // SUSPECTED FLAKINESS: occasional reports of the viewport still landing
+    // at the top under rapid clicks; the assumption that `after-paint`
+    // always fires with a finalized allocation has not been independently
+    // verified, and a concurrent rebuild (e.g. width watcher) could swap
+    // the tile out between registration and emission.
+    fn scroll_selected_tile_to_top(&self) {
+        let Some(tile) = self.selected_tile.borrow().clone() else {
+            return;
+        };
+        let Some(frame_clock) = self.scroller.frame_clock() else {
+            return;
+        };
+        let scroller = self.scroller.clone();
+        let container = self.container.clone();
+
+        let handler: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::new(RefCell::new(None));
+        let handler_for_callback = handler.clone();
+        let id = frame_clock.connect_after_paint(move |fc| {
+            if let Some(id) = handler_for_callback.borrow_mut().take() {
+                fc.disconnect(id);
+            }
+            let Some(bounds) = tile.compute_bounds(&container) else {
+                return;
+            };
+            scroller
+                .vadjustment()
+                .set_value(f64::from(bounds.y()).max(0.0));
+        });
+        *handler.borrow_mut() = Some(id);
     }
 
     fn install_width_watcher(&self) {
@@ -163,7 +202,7 @@ impl AlbumsView {
             if width > 0 && view.last_width.replace(width) != width {
                 let columns = columns_for_width(width);
                 if view.visible_columns.replace(columns) != columns {
-                    view.rebuild(false);
+                    view.rebuild();
                 }
             }
 
@@ -171,7 +210,7 @@ impl AlbumsView {
         });
     }
 
-    fn rebuild(&self, animate_detail: bool) {
+    fn rebuild(&self) {
         self.selected_tile.replace(None);
         clear_container(&self.container);
 
@@ -202,7 +241,6 @@ impl AlbumsView {
                         &albums[selected_index],
                         selected_index - row_start,
                         columns,
-                        animate_detail,
                     );
                     self.container.append(&detail);
                 }
@@ -283,7 +321,8 @@ impl AlbumsView {
         let view = self.clone();
         button.connect_clicked(move |_| {
             view.selected_album.set(Some(album_index));
-            view.rebuild(true);
+            view.rebuild();
+            view.scroll_selected_tile_to_top();
         });
 
         button
@@ -294,8 +333,7 @@ impl AlbumsView {
         album: &AlbumViewModel,
         selected_column: usize,
         columns: usize,
-        animate: bool,
-    ) -> HeightReveal {
+    ) -> gtk::Box {
         let content = gtk::Box::new(gtk::Orientation::Horizontal, 18);
         content.add_css_class("album-detail");
         content.set_hexpand(true);
@@ -405,12 +443,7 @@ impl AlbumsView {
         content.append(&left);
         content.append(&artwork_column);
 
-        let reveal = HeightReveal::new(&shell);
-        reveal.reveal(
-            animate,
-            Duration::from_millis(u64::from(ALBUM_DETAIL_ANIMATION_MS)),
-        );
-        reveal
+        shell
     }
 
     fn album_artwork(&self, album: &AlbumViewModel) -> CachedArtwork {

@@ -20,7 +20,6 @@ mod app_css;
 mod artwork_color;
 mod command_controller;
 mod content_stack;
-mod height_reveal;
 mod library_scan;
 mod main_window;
 mod mode_bar;
