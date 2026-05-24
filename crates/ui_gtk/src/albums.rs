@@ -302,7 +302,13 @@ impl AlbumsView {
         is_selected: bool,
     ) -> gtk::Button {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        content.set_width_request(ALBUM_TILE_WIDTH);
+        // No `set_width_request` here on purpose: pinning the content's min to
+        // `ALBUM_TILE_WIDTH` would make a row's min width equal the threshold
+        // used by `columns_for_width`, leaving no slack for GTK to allocate a
+        // slightly narrower row before the column count needs to drop. The
+        // cover's own size_request provides the floor (covers stay
+        // `ALBUM_TILE_COVER_SIZE`-wide), and the tile cell still renders at
+        // `ALBUM_TILE_WIDTH` naturally because the row is homogeneous.
         content.set_halign(gtk::Align::Center);
 
         let artwork = self.album_artwork(album);
