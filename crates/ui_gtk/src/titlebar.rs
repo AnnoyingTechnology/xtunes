@@ -25,6 +25,8 @@ use super::{
 /// last-second adjustment is never lost.
 const VOLUME_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 
+pub(crate) type SearchChangedCallback = Rc<dyn Fn(String)>;
+
 #[derive(Clone)]
 pub(crate) struct Titlebar {
     pub(crate) widget: gtk::WindowHandle,
@@ -33,6 +35,7 @@ pub(crate) struct Titlebar {
     play_pause: gtk::Button,
     next: gtk::Button,
     volume: gtk::Scale,
+    search: gtk::SearchEntry,
     volume_pending_save: Rc<RefCell<Option<glib::SourceId>>>,
     volume_save_callback: Rc<RefCell<Option<Rc<dyn Fn(VolumePercent)>>>>,
 }
@@ -107,9 +110,22 @@ pub(crate) fn build_titlebar(now_playing: gtk::Box, initial_volume: VolumePercen
         play_pause_icon,
         next,
         volume,
+        search,
         volume_pending_save: Rc::new(RefCell::new(None)),
         volume_save_callback: Rc::new(RefCell::new(None)),
     }
+}
+
+/// Wires the topbar SearchEntry to the supplied callback. Fires on every
+/// keystroke with the trimmed query text (`""` when empty/cleared). The
+/// callback runs synchronously: filtering ~10k in-memory tracks is
+/// microseconds, so no debounce is needed in the first cut. If real
+/// libraries reveal jank we wrap this in a `glib::timeout_add_local_once`
+/// the same way [`schedule_volume_save`] does.
+pub(crate) fn connect_titlebar_search(titlebar: &Titlebar, callback: SearchChangedCallback) {
+    titlebar.search.connect_search_changed(move |entry| {
+        callback(entry.text().trim().to_owned());
+    });
 }
 
 pub(crate) fn connect_titlebar_playback_controls(

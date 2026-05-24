@@ -38,6 +38,29 @@ pub fn track_matches_search_text(track: &Track, search_text: &str) -> bool {
         .any(|field| normalize(field).contains(&normalized_search))
 }
 
+/// Album-level search: matches against the album's title, artist, and year.
+/// Used by the Albums grid view, which intentionally does NOT search track
+/// titles — typing a track title in Albums view returning no albums is the
+/// agreed behavior (the user can switch to Songs view for that).
+///
+/// Caller passes the raw album-level fields so this function does not have
+/// to know about the GTK view-model type.
+pub fn album_matches_search_text(
+    album_title: &str,
+    album_artist: &str,
+    album_year: Option<i32>,
+    search_text: &str,
+) -> bool {
+    let normalized_search = normalize(search_text);
+    if normalized_search.is_empty() {
+        return true;
+    }
+    let year_text = album_year.map(|year| year.to_string()).unwrap_or_default();
+    [album_title, album_artist, year_text.as_str()]
+        .iter()
+        .any(|field| normalize(field).contains(&normalized_search))
+}
+
 pub fn sort_tracks(mut tracks: Vec<Track>, sort: TrackSort) -> SearchResult<Vec<Track>> {
     if sort.column == TrackSortColumn::PlaylistPosition {
         return Ok(tracks);
@@ -124,7 +147,8 @@ mod tests {
     };
 
     use super::{
-        SearchError, filter_tracks_by_search_text, sort_tracks, track_matches_search_text,
+        SearchError, album_matches_search_text, filter_tracks_by_search_text, sort_tracks,
+        track_matches_search_text,
     };
     use crate::Track;
     use crate::{SortDirection, TrackSort, TrackSortColumn};
@@ -167,6 +191,69 @@ mod tests {
             filter_tracks_by_search_text(&tracks, "port"),
             vec![track(2, "Roads", "Portishead")]
         );
+    }
+
+    #[test]
+    fn album_blank_search_matches_anything() {
+        assert!(album_matches_search_text(
+            "Mezzanine",
+            "Massive Attack",
+            Some(1998),
+            "   "
+        ));
+    }
+
+    #[test]
+    fn album_search_matches_title_case_insensitively() {
+        assert!(album_matches_search_text(
+            "Mezzanine",
+            "Massive Attack",
+            Some(1998),
+            "MEZZ",
+        ));
+    }
+
+    #[test]
+    fn album_search_matches_artist() {
+        assert!(album_matches_search_text(
+            "Mezzanine",
+            "Massive Attack",
+            Some(1998),
+            "massive",
+        ));
+    }
+
+    #[test]
+    fn album_search_matches_year() {
+        assert!(album_matches_search_text(
+            "Mezzanine",
+            "Massive Attack",
+            Some(1998),
+            "1998",
+        ));
+    }
+
+    #[test]
+    fn album_search_does_not_match_track_titles() {
+        // The caller deliberately does not pass track-level info; this
+        // function only knows about album-level fields. Confirms the
+        // documented contract.
+        assert!(!album_matches_search_text(
+            "Mezzanine",
+            "Massive Attack",
+            Some(1998),
+            "angel",
+        ));
+    }
+
+    #[test]
+    fn album_search_excludes_non_matching_album() {
+        assert!(!album_matches_search_text(
+            "Mezzanine",
+            "Massive Attack",
+            Some(1998),
+            "portishead",
+        ));
     }
 
     #[test]

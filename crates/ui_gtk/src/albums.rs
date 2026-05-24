@@ -10,7 +10,9 @@ use std::{
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
-use sustain_app_runtime::{ApplicationCommand, PlaybackCommand, Track, TrackId};
+use sustain_app_runtime::{
+    ApplicationCommand, PlaybackCommand, Track, TrackId, album_matches_search_text,
+};
 
 use super::{
     PlaybackChangedCallback, SharedRuntime, artwork_color::ArtworkPalette,
@@ -31,7 +33,15 @@ pub(crate) struct AlbumsView {
     command_controller: SharedCommandController,
     playback_changed: PlaybackChangedCallback,
     context_menu: TrackRowContextMenu,
+    /// All grouped albums from the most recent `replace_tracks` call,
+    /// unfiltered. `albums` (below) is derived from this by `apply_search`.
+    all_albums: Rc<RefCell<Vec<AlbumViewModel>>>,
+    /// Albums currently shown in the grid, after the active search filter.
+    /// The renderer, `reveal_album_for_track`, and selection indexing all
+    /// operate on this filtered view — selection by index becomes meaningless
+    /// across a search change, so `apply_search` clears the selection.
     albums: Rc<RefCell<Vec<AlbumViewModel>>>,
+    search_text: Rc<RefCell<String>>,
     selected_album: Rc<Cell<Option<usize>>>,
     selected_tile: Rc<RefCell<Option<gtk::Button>>>,
     visible_columns: Rc<Cell<usize>>,
@@ -101,7 +111,9 @@ impl AlbumsView {
             command_controller,
             playback_changed,
             context_menu,
+            all_albums: Rc::new(RefCell::new(Vec::new())),
             albums: Rc::new(RefCell::new(Vec::new())),
+            search_text: Rc::new(RefCell::new(String::new())),
             selected_album: Rc::new(Cell::new(None)),
             selected_tile: Rc::new(RefCell::new(None)),
             visible_columns: Rc::new(Cell::new(1)),
@@ -120,11 +132,39 @@ impl AlbumsView {
     }
 
     pub(crate) fn replace_tracks(&self, tracks: Vec<Track>) {
-        self.albums.replace(group_albums(&tracks));
-        self.selected_album.set(None);
+        *self.all_albums.borrow_mut() = group_albums(&tracks);
         self.artwork_cache.borrow_mut().clear();
         self.visible_columns
             .set(columns_for_width(self.scroller.width()));
+        self.apply_search();
+    }
+
+    /// Update the active search filter and re-derive the visible album set.
+    /// Calling with the same string as the current one is a no-op.
+    pub(crate) fn set_search_text(&self, search_text: String) {
+        if *self.search_text.borrow() == search_text {
+            return;
+        }
+        *self.search_text.borrow_mut() = search_text;
+        self.apply_search();
+    }
+
+    /// Re-derive `albums` from `all_albums` according to the active search,
+    /// clear selection (positional indices become meaningless across a
+    /// filter change), and rebuild the grid.
+    fn apply_search(&self) {
+        let search_text = self.search_text.borrow().clone();
+        let filtered: Vec<AlbumViewModel> = self
+            .all_albums
+            .borrow()
+            .iter()
+            .filter(|album| {
+                album_matches_search_text(&album.title, &album.artist, album.year, &search_text)
+            })
+            .cloned()
+            .collect();
+        *self.albums.borrow_mut() = filtered;
+        self.selected_album.set(None);
         self.rebuild();
     }
 

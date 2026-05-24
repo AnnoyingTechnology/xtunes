@@ -27,6 +27,9 @@ use sustain_library_store::LibraryStore;
 use sustain_metadata::MetadataService;
 use sustain_playback::PlaybackService;
 pub use sustain_playback::TrackEndedCallback;
+pub use sustain_search::{
+    album_matches_search_text, filter_tracks_by_search_text, track_matches_search_text,
+};
 use sustain_settings::SettingsStore;
 
 mod commands;

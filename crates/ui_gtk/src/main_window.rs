@@ -13,6 +13,7 @@ use gtk::{gdk, glib};
 use sustain_app_runtime::{
     PlaybackCommand, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId,
     PlaylistItem, Rating, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
+    filter_tracks_by_search_text, track_matches_search_text,
 };
 
 use super::{
@@ -41,7 +42,8 @@ use super::{
     smart_playlist_editor::{SmartPlaylistEditorMode, open_smart_playlist_editor},
     status_bar::StatusBar,
     titlebar::{
-        Titlebar, build_titlebar, connect_titlebar_playback_controls, sync_play_pause_icon,
+        Titlebar, build_titlebar, connect_titlebar_playback_controls, connect_titlebar_search,
+        sync_play_pause_icon,
     },
     track_context::{
         AddToPlaylistCallback, AddToPlaylistEntry, AddToPlaylistProvider, TrackActionCallback,
@@ -76,7 +78,13 @@ pub(crate) fn build_main_window(
     install_app_css();
     install_accent_css();
 
-    let library_tracks = runtime_library_table_rows(&runtime.borrow());
+    // Shared current-search-text state. Lives only in memory: per the
+    // agreed product decision, the query never persists across restarts —
+    // a populated search field on launch would silently hide most of the
+    // library and confuse the user. Captured by all view-rebuild paths.
+    let current_search_text: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+
+    let library_tracks = runtime_library_table_rows(&runtime.borrow(), "");
     let status_bar = StatusBar::new(&library_tracks);
     let command_controller: SharedCommandController = Rc::new(UiCommandController::new(
         runtime.clone(),
@@ -189,8 +197,13 @@ pub(crate) fn build_main_window(
         &albums_view.widget(),
         &playlists_table.widget(),
     );
-    let visible_summary_refresh =
-        visible_summary_refresh_callback(&runtime, &content_stack, &sidebar, &status_bar);
+    let visible_summary_refresh = visible_summary_refresh_callback(
+        &runtime,
+        &content_stack,
+        &sidebar,
+        &status_bar,
+        &current_search_text,
+    );
     let library_changed = library_changed_callback(
         &runtime,
         &songs_table,
@@ -198,12 +211,24 @@ pub(crate) fn build_main_window(
         &playlists_table,
         &sidebar,
         visible_summary_refresh.clone(),
+        &current_search_text,
     );
     sidebar.set_selection_changed(sidebar_selection_changed_callback(
         &runtime,
         &playlists_table,
         visible_summary_refresh.clone(),
+        &current_search_text,
     ));
+    install_search_wiring(
+        &titlebar,
+        &current_search_text,
+        &runtime,
+        &songs_table,
+        &albums_view,
+        &playlists_table,
+        &sidebar,
+        visible_summary_refresh.clone(),
+    );
     sidebar.install_context_menu(SidebarContextMenu::new(sidebar_action_callback(
         &window,
         &command_controller,
@@ -323,19 +348,26 @@ fn library_changed_callback(
     playlists_table: &TrackTable,
     sidebar: &PlaylistSidebar,
     visible_summary_refresh: ViewModeChangedCallback,
+    current_search_text: &Rc<RefCell<String>>,
 ) -> LibraryChangedCallback {
     let runtime = runtime.clone();
     let songs_table = songs_table.clone();
     let albums_view = albums_view.clone();
     let playlists_table = playlists_table.clone();
     let sidebar = sidebar.clone();
+    let current_search_text = current_search_text.clone();
 
     Rc::new(move || {
-        let rows = runtime_library_table_rows(&runtime.borrow());
+        let search_text = current_search_text.borrow().clone();
+        let rows = runtime_library_table_rows(&runtime.borrow(), &search_text);
         songs_table.replace_rows(rows);
+        // AlbumsView's internal apply_search() re-derives the visible album
+        // set from the new track list using the search text it already
+        // holds, so we don't need to call set_search_text here.
         albums_view.replace_tracks(runtime.borrow().library_tracks().to_vec());
         sidebar.refresh();
-        let playlist_rows = playlist_table_rows_for(&runtime.borrow(), sidebar.current_selection());
+        let playlist_rows =
+            playlist_table_rows_for(&runtime.borrow(), sidebar.current_selection(), &search_text);
         playlists_table.replace_rows(playlist_rows);
         visible_summary_refresh();
     })
@@ -346,17 +378,21 @@ fn visible_summary_refresh_callback(
     content_stack: &gtk::Stack,
     sidebar: &PlaylistSidebar,
     status_bar: &StatusBar,
+    current_search_text: &Rc<RefCell<String>>,
 ) -> ViewModeChangedCallback {
     let runtime = runtime.clone();
     let content_stack = content_stack.clone();
     let sidebar = sidebar.clone();
     let status_bar = status_bar.clone();
+    let current_search_text = current_search_text.clone();
 
     Rc::new(move || {
+        let search_text = current_search_text.borrow().clone();
         let rows = visible_view_rows(
             &runtime.borrow(),
             &content_stack,
             sidebar.current_selection(),
+            &search_text,
         );
         status_bar.update_summary(&rows);
     })
@@ -366,11 +402,12 @@ fn visible_view_rows(
     runtime: &ApplicationRuntime,
     content_stack: &gtk::Stack,
     sidebar_selection: Option<SidebarSelection>,
+    search_text: &str,
 ) -> Vec<TrackTableRow> {
     if content_stack.visible_child_name().as_deref() == Some(PLAYLISTS_VIEW) {
-        playlist_table_rows_for(runtime, sidebar_selection)
+        playlist_table_rows_for(runtime, sidebar_selection, search_text)
     } else {
-        runtime_library_table_rows(runtime)
+        runtime_library_table_rows(runtime, search_text)
     }
 }
 
@@ -640,19 +677,115 @@ fn sidebar_selection_changed_callback(
     runtime: &SharedRuntime,
     playlists_table: &TrackTable,
     visible_summary_refresh: ViewModeChangedCallback,
+    current_search_text: &Rc<RefCell<String>>,
 ) -> super::sidebar::SidebarSelectionChangedCallback {
     let runtime = runtime.clone();
     let playlists_table = playlists_table.clone();
+    let current_search_text = current_search_text.clone();
 
     Rc::new(move |selection| {
         if let Some(layout) = layout_for_selection(&runtime.borrow(), selection) {
             playlists_table.apply_layout(&layout);
         }
-        let rows = playlist_table_rows_for(&runtime.borrow(), selection);
+        let search_text = current_search_text.borrow().clone();
+        let rows = playlist_table_rows_for(&runtime.borrow(), selection, &search_text);
         playlists_table.replace_rows(rows);
         visible_summary_refresh();
     })
 }
+
+/// Wires the topbar SearchEntry to a debounced callback that re-filters
+/// all three view modes (Songs, Albums, Playlists) plus the status-bar
+/// summary against the new query. All three views are rebuilt on each
+/// fire so that switching modes mid-query never shows stale unfiltered
+/// content.
+///
+/// Filtering follows the agreed product semantics:
+/// - Songs view filters across the 7 track-level fields covered by
+///   [`track_matches_search_text`].
+/// - Albums view filters by album-level fields only (title, artist,
+///   year) via [`AlbumsView::set_search_text`].
+/// - Playlists view filters within the currently selected playlist /
+///   smart playlist / Library pseudo-entry, again on track fields.
+///
+/// Debouncing: rebuilding the visible track table on every keystroke is
+/// expensive — not because of the in-memory filter (microseconds) but
+/// because [`TrackTable::replace_rows`] rewrites the underlying
+/// `gio::ListStore`, which fires GTK list-model events that the sorter
+/// and selection model both have to process. The same effect shows up
+/// on the album grid. We therefore cancel any in-flight rebuild and
+/// schedule a fresh one [`SEARCH_REBUILD_DEBOUNCE`] in the future on
+/// every keystroke, collapsing a typing burst into one rebuild when
+/// the user pauses. No flush-on-close: search state is purely
+/// in-memory and never persisted, so dropping a pending rebuild at
+/// shutdown loses nothing.
+fn install_search_wiring(
+    titlebar: &Titlebar,
+    current_search_text: &Rc<RefCell<String>>,
+    runtime: &SharedRuntime,
+    songs_table: &TrackTable,
+    albums_view: &AlbumsView,
+    playlists_table: &TrackTable,
+    sidebar: &PlaylistSidebar,
+    visible_summary_refresh: ViewModeChangedCallback,
+) {
+    let current_search_text = current_search_text.clone();
+    let runtime = runtime.clone();
+    let songs_table = songs_table.clone();
+    let albums_view = albums_view.clone();
+    let playlists_table = playlists_table.clone();
+    let sidebar = sidebar.clone();
+    let pending_rebuild: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+
+    connect_titlebar_search(
+        titlebar,
+        Rc::new(move |new_text| {
+            if *current_search_text.borrow() == new_text {
+                return;
+            }
+            *current_search_text.borrow_mut() = new_text.clone();
+
+            // Cancel any pending rebuild scheduled for the previous
+            // keystroke; only the most recent query should run.
+            if let Some(previous) = pending_rebuild.borrow_mut().take() {
+                previous.remove();
+            }
+
+            let runtime = runtime.clone();
+            let songs_table = songs_table.clone();
+            let albums_view = albums_view.clone();
+            let playlists_table = playlists_table.clone();
+            let sidebar = sidebar.clone();
+            let visible_summary_refresh = visible_summary_refresh.clone();
+            let pending_rebuild_clear = pending_rebuild.clone();
+            let source_id = glib::timeout_add_local_once(SEARCH_REBUILD_DEBOUNCE, move || {
+                pending_rebuild_clear.borrow_mut().take();
+
+                let songs_rows = runtime_library_table_rows(&runtime.borrow(), &new_text);
+                songs_table.replace_rows(songs_rows);
+
+                albums_view.set_search_text(new_text.clone());
+
+                let playlist_rows = playlist_table_rows_for(
+                    &runtime.borrow(),
+                    sidebar.current_selection(),
+                    &new_text,
+                );
+                playlists_table.replace_rows(playlist_rows);
+
+                visible_summary_refresh();
+            });
+            *pending_rebuild.borrow_mut() = Some(source_id);
+        }),
+    );
+}
+
+/// Debounce window for search-driven view rebuilds. 100ms is short enough
+/// that a single keystroke followed by a pause feels instantaneous, and
+/// long enough to swallow a burst of typing at any realistic speed
+/// (40ms per keystroke at 25 WPM, ~20ms at very fast typing) into one
+/// rebuild when the user stops.
+const SEARCH_REBUILD_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Wires the persisted-layout machinery for both track tables.
 ///
@@ -727,11 +860,15 @@ fn layout_for_selection(
         .flatten()
 }
 
-fn runtime_library_table_rows(runtime: &ApplicationRuntime) -> Vec<TrackTableRow> {
+fn runtime_library_table_rows(
+    runtime: &ApplicationRuntime,
+    search_text: &str,
+) -> Vec<TrackTableRow> {
     let library_root = runtime.settings().library_path();
     runtime
         .library_tracks()
         .iter()
+        .filter(|track| search_text.is_empty() || track_matches_search_text(track, search_text))
         .map(|track| TrackTableRow::from_track(track, library_root))
         .collect()
 }
@@ -739,9 +876,11 @@ fn runtime_library_table_rows(runtime: &ApplicationRuntime) -> Vec<TrackTableRow
 fn playlist_table_rows_for(
     runtime: &ApplicationRuntime,
     selection: Option<SidebarSelection>,
+    search_text: &str,
 ) -> Vec<TrackTableRow> {
-    match selection {
-        Some(SidebarSelection::Library) => runtime_library_table_rows(runtime),
+    let library_root = runtime.settings().library_path();
+    let candidate_tracks: Vec<Track> = match selection {
+        Some(SidebarSelection::Library) => runtime.library_tracks().to_vec(),
         Some(SidebarSelection::Item(PlaylistItem::Playlist(playlist_id))) => {
             let Some(playlist) = runtime
                 .playlists()
@@ -750,27 +889,32 @@ fn playlist_table_rows_for(
             else {
                 return Vec::new();
             };
-            let library_root = runtime.settings().library_path();
             let tracks_by_id: HashMap<TrackId, &Track> = runtime
                 .library_tracks()
                 .iter()
                 .map(|track| (track.id, track))
                 .collect();
             playlist_entries_in_order(playlist)
-                .filter_map(|track_id| tracks_by_id.get(&track_id).copied())
-                .map(|track| TrackTableRow::from_track(track, library_root))
+                .filter_map(|track_id| tracks_by_id.get(&track_id).copied().cloned())
                 .collect()
         }
-        Some(SidebarSelection::Item(PlaylistItem::SmartPlaylist(smart_playlist_id))) => {
-            let library_root = runtime.settings().library_path();
-            runtime
-                .smart_playlist_matching_tracks(smart_playlist_id, SystemTime::now())
-                .into_iter()
-                .map(|track| TrackTableRow::from_track(track, library_root))
-                .collect()
-        }
-        _ => Vec::new(),
-    }
+        Some(SidebarSelection::Item(PlaylistItem::SmartPlaylist(smart_playlist_id))) => runtime
+            .smart_playlist_matching_tracks(smart_playlist_id, SystemTime::now())
+            .into_iter()
+            .cloned()
+            .collect(),
+        _ => return Vec::new(),
+    };
+
+    let filtered = if search_text.is_empty() {
+        candidate_tracks
+    } else {
+        filter_tracks_by_search_text(&candidate_tracks, search_text)
+    };
+    filtered
+        .iter()
+        .map(|track| TrackTableRow::from_track(track, library_root))
+        .collect()
 }
 
 fn sidebar_tracks_drop_callback(

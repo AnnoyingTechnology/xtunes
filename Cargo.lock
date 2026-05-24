@@ -1133,6 +1133,7 @@ dependencies = [
  "sustain-library-store",
  "sustain-metadata",
  "sustain-playback",
+ "sustain-search",
  "sustain-settings",
  "trash",
 ]
