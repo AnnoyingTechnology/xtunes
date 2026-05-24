@@ -13,7 +13,7 @@ use rusqlite::{Connection, params};
 use sustain_domain::SmartPlaylistRuleSet;
 pub use sustain_domain::{
     LibraryQuery, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, Rating, SmartPlaylist,
-    SmartPlaylistId, Track, TrackId,
+    SmartPlaylistId, Track, TrackColumnEntry, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
 };
 
 mod memory;
@@ -78,6 +78,16 @@ pub trait LibraryStore: Send + Sync {
     ) -> StoreResult<Option<SmartPlaylist>>;
     fn smart_playlists(&self) -> StoreResult<Vec<SmartPlaylist>>;
     fn delete_smart_playlist(&self, smart_playlist_id: SmartPlaylistId) -> StoreResult<()>;
+    fn load_track_column_layout(
+        &self,
+        scope: TrackColumnLayoutScope,
+    ) -> StoreResult<Option<TrackColumnLayout>>;
+    fn save_track_column_layout(
+        &self,
+        scope: TrackColumnLayoutScope,
+        layout: &TrackColumnLayout,
+    ) -> StoreResult<()>;
+    fn delete_track_column_layout(&self, scope: TrackColumnLayoutScope) -> StoreResult<()>;
 
     fn tracks_matching(&self, query: LibraryQuery) -> StoreResult<Vec<Track>> {
         let mut tracks = if let Some(playlist_id) = query.playlist_id {
@@ -244,6 +254,33 @@ impl SqliteLibraryStore {
                     date_unix INTEGER,
                     days_value INTEGER,
                     PRIMARY KEY (smart_playlist_id, position),
+                    FOREIGN KEY (smart_playlist_id) REFERENCES smart_playlists(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS track_column_layout_default (
+                    column_id TEXT PRIMARY KEY,
+                    position  INTEGER NOT NULL,
+                    visible   INTEGER NOT NULL,
+                    width_px  INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS track_column_layout_playlist_override (
+                    playlist_id INTEGER NOT NULL,
+                    column_id   TEXT    NOT NULL,
+                    position    INTEGER NOT NULL,
+                    visible     INTEGER NOT NULL,
+                    width_px    INTEGER NOT NULL,
+                    PRIMARY KEY (playlist_id, column_id),
+                    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS track_column_layout_smart_playlist_override (
+                    smart_playlist_id INTEGER NOT NULL,
+                    column_id         TEXT    NOT NULL,
+                    position          INTEGER NOT NULL,
+                    visible           INTEGER NOT NULL,
+                    width_px          INTEGER NOT NULL,
+                    PRIMARY KEY (smart_playlist_id, column_id),
                     FOREIGN KEY (smart_playlist_id) REFERENCES smart_playlists(id) ON DELETE CASCADE
                 );
                 "#,
@@ -912,6 +949,174 @@ impl LibraryStore for SqliteLibraryStore {
             .map(|_| ())
             .map_err(StoreError::from)
     }
+
+    fn load_track_column_layout(
+        &self,
+        scope: TrackColumnLayoutScope,
+    ) -> StoreResult<Option<TrackColumnLayout>> {
+        let connection = self.connection_guard()?;
+        let entries = match scope {
+            TrackColumnLayoutScope::Default => load_layout_rows(
+                &connection,
+                "SELECT column_id, visible, width_px \
+                 FROM track_column_layout_default \
+                 ORDER BY position",
+                params![],
+            )?,
+            TrackColumnLayoutScope::Playlist(playlist_id) => load_layout_rows(
+                &connection,
+                "SELECT column_id, visible, width_px \
+                 FROM track_column_layout_playlist_override \
+                 WHERE playlist_id = ?1 \
+                 ORDER BY position",
+                params![playlist_id.get()],
+            )?,
+            TrackColumnLayoutScope::SmartPlaylist(smart_playlist_id) => load_layout_rows(
+                &connection,
+                "SELECT column_id, visible, width_px \
+                 FROM track_column_layout_smart_playlist_override \
+                 WHERE smart_playlist_id = ?1 \
+                 ORDER BY position",
+                params![smart_playlist_id.get()],
+            )?,
+        };
+
+        if entries.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(TrackColumnLayout::new(entries)))
+        }
+    }
+
+    fn save_track_column_layout(
+        &self,
+        scope: TrackColumnLayoutScope,
+        layout: &TrackColumnLayout,
+    ) -> StoreResult<()> {
+        let mut connection = self.connection_guard()?;
+        let transaction = connection.transaction().map_err(StoreError::from)?;
+
+        match scope {
+            TrackColumnLayoutScope::Default => {
+                transaction
+                    .execute("DELETE FROM track_column_layout_default", params![])
+                    .map_err(StoreError::from)?;
+                for (position, entry) in layout.entries.iter().enumerate() {
+                    transaction
+                        .execute(
+                            "INSERT INTO track_column_layout_default \
+                             (column_id, position, visible, width_px) \
+                             VALUES (?1, ?2, ?3, ?4)",
+                            params![
+                                entry.column_id,
+                                position as i64,
+                                i64::from(entry.visible),
+                                i64::from(entry.width_px),
+                            ],
+                        )
+                        .map_err(StoreError::from)?;
+                }
+            }
+            TrackColumnLayoutScope::Playlist(playlist_id) => {
+                transaction
+                    .execute(
+                        "DELETE FROM track_column_layout_playlist_override \
+                         WHERE playlist_id = ?1",
+                        params![playlist_id.get()],
+                    )
+                    .map_err(StoreError::from)?;
+                for (position, entry) in layout.entries.iter().enumerate() {
+                    transaction
+                        .execute(
+                            "INSERT INTO track_column_layout_playlist_override \
+                             (playlist_id, column_id, position, visible, width_px) \
+                             VALUES (?1, ?2, ?3, ?4, ?5)",
+                            params![
+                                playlist_id.get(),
+                                entry.column_id,
+                                position as i64,
+                                i64::from(entry.visible),
+                                i64::from(entry.width_px),
+                            ],
+                        )
+                        .map_err(StoreError::from)?;
+                }
+            }
+            TrackColumnLayoutScope::SmartPlaylist(smart_playlist_id) => {
+                transaction
+                    .execute(
+                        "DELETE FROM track_column_layout_smart_playlist_override \
+                         WHERE smart_playlist_id = ?1",
+                        params![smart_playlist_id.get()],
+                    )
+                    .map_err(StoreError::from)?;
+                for (position, entry) in layout.entries.iter().enumerate() {
+                    transaction
+                        .execute(
+                            "INSERT INTO track_column_layout_smart_playlist_override \
+                             (smart_playlist_id, column_id, position, visible, width_px) \
+                             VALUES (?1, ?2, ?3, ?4, ?5)",
+                            params![
+                                smart_playlist_id.get(),
+                                entry.column_id,
+                                position as i64,
+                                i64::from(entry.visible),
+                                i64::from(entry.width_px),
+                            ],
+                        )
+                        .map_err(StoreError::from)?;
+                }
+            }
+        }
+
+        transaction.commit().map_err(StoreError::from)
+    }
+
+    fn delete_track_column_layout(&self, scope: TrackColumnLayoutScope) -> StoreResult<()> {
+        let connection = self.connection_guard()?;
+        match scope {
+            TrackColumnLayoutScope::Default => connection
+                .execute("DELETE FROM track_column_layout_default", params![])
+                .map(|_| ())
+                .map_err(StoreError::from),
+            TrackColumnLayoutScope::Playlist(playlist_id) => connection
+                .execute(
+                    "DELETE FROM track_column_layout_playlist_override WHERE playlist_id = ?1",
+                    params![playlist_id.get()],
+                )
+                .map(|_| ())
+                .map_err(StoreError::from),
+            TrackColumnLayoutScope::SmartPlaylist(smart_playlist_id) => connection
+                .execute(
+                    "DELETE FROM track_column_layout_smart_playlist_override \
+                     WHERE smart_playlist_id = ?1",
+                    params![smart_playlist_id.get()],
+                )
+                .map(|_| ())
+                .map_err(StoreError::from),
+        }
+    }
+}
+
+fn load_layout_rows(
+    connection: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> StoreResult<Vec<TrackColumnEntry>> {
+    let mut statement = connection.prepare(sql).map_err(StoreError::from)?;
+    let mut rows = statement.query(params).map_err(StoreError::from)?;
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next().map_err(StoreError::from)? {
+        let column_id: String = row.get(0).map_err(StoreError::from)?;
+        let visible_flag: i64 = row.get(1).map_err(StoreError::from)?;
+        let width_px: i64 = row.get(2).map_err(StoreError::from)?;
+        entries.push(TrackColumnEntry {
+            column_id,
+            visible: visible_flag != 0,
+            width_px: width_px.max(0) as u32,
+        });
+    }
+    Ok(entries)
 }
 
 #[cfg(test)]
@@ -931,6 +1136,7 @@ mod tests {
     use super::{
         InMemoryLibraryStore, LibraryQuery, LibraryStore, Playlist, PlaylistFolder,
         PlaylistFolderId, SmartPlaylist, SmartPlaylistId, SqliteLibraryStore, Track,
+        TrackColumnEntry, TrackColumnLayout, TrackColumnLayoutScope,
     };
     use crate::{PlaylistId, StoreResult, TrackId};
 
@@ -1581,5 +1787,136 @@ mod tests {
 
     fn _assert_store_result_is_public<T>(result: StoreResult<T>) -> StoreResult<T> {
         result
+    }
+
+    fn sample_layout() -> TrackColumnLayout {
+        TrackColumnLayout::new(vec![
+            TrackColumnEntry {
+                column_id: "track_name".to_owned(),
+                visible: true,
+                width_px: 240,
+            },
+            TrackColumnEntry {
+                column_id: "artist".to_owned(),
+                visible: false,
+                width_px: 160,
+            },
+            TrackColumnEntry {
+                column_id: "rating".to_owned(),
+                visible: true,
+                width_px: 100,
+            },
+        ])
+    }
+
+    #[test]
+    fn in_memory_store_layout_round_trips_for_each_scope() {
+        let store = InMemoryLibraryStore::new();
+        let layout = sample_layout();
+
+        for scope in [
+            TrackColumnLayoutScope::Default,
+            TrackColumnLayoutScope::Playlist(playlist_id(1)),
+            TrackColumnLayoutScope::SmartPlaylist(smart_id(2)),
+        ] {
+            assert_eq!(store.load_track_column_layout(scope), Ok(None));
+            assert_eq!(store.save_track_column_layout(scope, &layout), Ok(()));
+            assert_eq!(
+                store.load_track_column_layout(scope),
+                Ok(Some(layout.clone()))
+            );
+            assert_eq!(store.delete_track_column_layout(scope), Ok(()));
+            assert_eq!(store.load_track_column_layout(scope), Ok(None));
+        }
+    }
+
+    #[test]
+    fn sqlite_store_layout_round_trips_for_each_scope() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory sqlite store");
+        let playlist = playlist(1, "Favorites", Vec::new());
+        assert_eq!(store.save_playlist(playlist.clone()), Ok(()));
+        let smart = smart_playlist_with_rules(7, "Top Rated", None, 0, simple_text_rule_set());
+        assert_eq!(store.save_smart_playlist(smart.clone()), Ok(()));
+
+        let layout = sample_layout();
+        for scope in [
+            TrackColumnLayoutScope::Default,
+            TrackColumnLayoutScope::Playlist(playlist.id),
+            TrackColumnLayoutScope::SmartPlaylist(smart.id),
+        ] {
+            assert_eq!(store.load_track_column_layout(scope), Ok(None));
+            assert_eq!(store.save_track_column_layout(scope, &layout), Ok(()));
+            assert_eq!(
+                store.load_track_column_layout(scope),
+                Ok(Some(layout.clone()))
+            );
+            assert_eq!(store.delete_track_column_layout(scope), Ok(()));
+            assert_eq!(store.load_track_column_layout(scope), Ok(None));
+        }
+    }
+
+    #[test]
+    fn sqlite_store_layout_save_replaces_existing_rows() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory sqlite store");
+        let scope = TrackColumnLayoutScope::Default;
+        let initial = sample_layout();
+        assert_eq!(store.save_track_column_layout(scope, &initial), Ok(()));
+
+        let replacement = TrackColumnLayout::new(vec![TrackColumnEntry {
+            column_id: "album".to_owned(),
+            visible: true,
+            width_px: 200,
+        }]);
+        assert_eq!(store.save_track_column_layout(scope, &replacement), Ok(()));
+
+        assert_eq!(store.load_track_column_layout(scope), Ok(Some(replacement)));
+    }
+
+    #[test]
+    fn sqlite_store_playlist_layout_cascades_on_playlist_delete() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory sqlite store");
+        let playlist = playlist(1, "Favorites", Vec::new());
+        assert_eq!(store.save_playlist(playlist.clone()), Ok(()));
+        let scope = TrackColumnLayoutScope::Playlist(playlist.id);
+        assert_eq!(
+            store.save_track_column_layout(scope, &sample_layout()),
+            Ok(())
+        );
+
+        assert_eq!(store.delete_playlist(playlist.id), Ok(()));
+
+        assert_eq!(store.load_track_column_layout(scope), Ok(None));
+    }
+
+    #[test]
+    fn sqlite_store_smart_playlist_layout_cascades_on_smart_playlist_delete() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory sqlite store");
+        let smart = smart_playlist_with_rules(3, "Recent", None, 0, simple_text_rule_set());
+        assert_eq!(store.save_smart_playlist(smart.clone()), Ok(()));
+        let scope = TrackColumnLayoutScope::SmartPlaylist(smart.id);
+        assert_eq!(
+            store.save_track_column_layout(scope, &sample_layout()),
+            Ok(())
+        );
+
+        assert_eq!(store.delete_smart_playlist(smart.id), Ok(()));
+
+        assert_eq!(store.load_track_column_layout(scope), Ok(None));
+    }
+
+    #[test]
+    fn in_memory_store_playlist_layout_cleared_on_playlist_delete() {
+        let store = InMemoryLibraryStore::new();
+        let playlist = playlist(1, "Favorites", Vec::new());
+        assert_eq!(store.save_playlist(playlist.clone()), Ok(()));
+        let scope = TrackColumnLayoutScope::Playlist(playlist.id);
+        assert_eq!(
+            store.save_track_column_layout(scope, &sample_layout()),
+            Ok(())
+        );
+
+        assert_eq!(store.delete_playlist(playlist.id), Ok(()));
+
+        assert_eq!(store.load_track_column_layout(scope), Ok(None));
     }
 }

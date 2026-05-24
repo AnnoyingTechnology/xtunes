@@ -12,7 +12,10 @@ use std::{
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
-pub use sustain_domain::{LibraryManagementMode, LibrarySettings, UserSettings};
+pub use sustain_domain::{
+    DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings, PlaybackSettings,
+    UserSettings, VolumePercent,
+};
 
 pub type SettingsResult<T> = Result<T, SettingsError>;
 
@@ -113,7 +116,10 @@ impl SettingsStore for TomlSettingsStore {
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct SettingsDocument {
+    #[serde(default)]
     library: LibrarySettingsDocument,
+    #[serde(default)]
+    playback: PlaybackSettingsDocument,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -121,6 +127,27 @@ struct LibrarySettingsDocument {
     path: Option<PathBuf>,
     #[serde(default)]
     management_mode: LibraryManagementModeDocument,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PlaybackSettingsDocument {
+    /// Percent (0..=100). Defaults to [`DEFAULT_PLAYBACK_VOLUME_PERCENT`]
+    /// when absent from disk, and is clamped on read so a hand-edited TOML
+    /// with an out-of-range value can never crash the app at startup.
+    #[serde(default = "default_volume_percent")]
+    volume_percent: u8,
+}
+
+impl Default for PlaybackSettingsDocument {
+    fn default() -> Self {
+        Self {
+            volume_percent: DEFAULT_PLAYBACK_VOLUME_PERCENT,
+        }
+    }
+}
+
+fn default_volume_percent() -> u8 {
+    DEFAULT_PLAYBACK_VOLUME_PERCENT
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -140,6 +167,9 @@ impl SettingsDocument {
                     settings.library.management_mode,
                 ),
             },
+            playback: PlaybackSettingsDocument {
+                volume_percent: settings.playback.volume.get(),
+            },
         }
     }
 
@@ -148,6 +178,9 @@ impl SettingsDocument {
             library: LibrarySettings {
                 path: self.library.path,
                 management_mode: self.library.management_mode.into_domain(),
+            },
+            playback: PlaybackSettings {
+                volume: VolumePercent::from_clamped(self.playback.volume_percent),
             },
         }
     }
@@ -174,8 +207,8 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     use super::{
-        InMemorySettingsStore, LibraryManagementMode, SettingsStore, TomlSettingsStore,
-        UserSettings,
+        DEFAULT_PLAYBACK_VOLUME_PERCENT, InMemorySettingsStore, LibraryManagementMode,
+        SettingsStore, TomlSettingsStore, UserSettings, VolumePercent,
     };
 
     #[test]
@@ -212,6 +245,64 @@ mod tests {
 
         assert_eq!(store.save_settings(settings.clone()), Ok(()));
         assert_eq!(store.load_settings(), Ok(settings));
+
+        let root = path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .expect("test path has two parents");
+        fs::remove_dir_all(root).expect("remove test settings directory");
+    }
+
+    #[test]
+    fn toml_settings_store_round_trips_playback_volume() {
+        let path = unique_settings_path();
+        let store = TomlSettingsStore::new(&path);
+        let mut settings = UserSettings::default();
+        settings.playback.volume = VolumePercent::from_clamped(37);
+
+        assert_eq!(store.save_settings(settings.clone()), Ok(()));
+        assert_eq!(store.load_settings(), Ok(settings));
+
+        let root = path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .expect("test path has two parents");
+        fs::remove_dir_all(root).expect("remove test settings directory");
+    }
+
+    #[test]
+    fn toml_settings_store_defaults_volume_when_section_is_missing() {
+        let path = unique_settings_path();
+        let store = TomlSettingsStore::new(&path);
+        fs::create_dir_all(path.parent().expect("settings path has parent"))
+            .expect("create settings dir");
+        fs::write(&path, "[library]\npath = \"/music\"\n").expect("write settings");
+
+        let settings = store.load_settings().expect("settings load");
+
+        assert_eq!(
+            settings.playback.volume,
+            VolumePercent::from_clamped(DEFAULT_PLAYBACK_VOLUME_PERCENT)
+        );
+
+        let root = path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .expect("test path has two parents");
+        fs::remove_dir_all(root).expect("remove test settings directory");
+    }
+
+    #[test]
+    fn toml_settings_store_clamps_out_of_range_volume_on_load() {
+        let path = unique_settings_path();
+        let store = TomlSettingsStore::new(&path);
+        fs::create_dir_all(path.parent().expect("settings path has parent"))
+            .expect("create settings dir");
+        fs::write(&path, "[playback]\nvolume_percent = 250\n").expect("write settings");
+
+        let settings = store.load_settings().expect("settings load");
+
+        assert_eq!(settings.playback.volume, VolumePercent::from_clamped(100));
 
         let root = path
             .parent()

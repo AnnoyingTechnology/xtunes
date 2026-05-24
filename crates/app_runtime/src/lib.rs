@@ -12,15 +12,16 @@ use std::{
 };
 
 pub use sustain_domain::{
-    ApplicationCommand, ApplicationQuery, FieldChange, LibraryManagementMode, LibrarySettings,
-    MetadataChange, PlayStatistics, PlaybackCommand, PlaybackOptions, PlaybackQueue,
-    PlaybackQueueSource, PlaybackState, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId,
-    PlaylistId, PlaylistItem, Rating, RepeatMode, SmartPlaylist, SmartPlaylistDateField,
-    SmartPlaylistId, SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind,
-    SmartPlaylistNumberField, SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet,
-    SmartPlaylistTextField, SmartPlaylistTextOperator, Track, TrackAvailability, TrackContentHash,
-    TrackId, TrackLocation, TrackMetadata, TrackPlaybackSource, TrackRelativePath, UserSettings,
-    VolumePercent, matching_tracks,
+    ApplicationCommand, ApplicationQuery, DEFAULT_PLAYBACK_VOLUME_PERCENT, FieldChange,
+    LibraryManagementMode, LibrarySettings, MetadataChange, PlayStatistics, PlaybackCommand,
+    PlaybackOptions, PlaybackQueue, PlaybackQueueSource, PlaybackSettings, PlaybackState, Playlist,
+    PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId, PlaylistItem, Rating, RepeatMode,
+    SmartPlaylist, SmartPlaylistDateField, SmartPlaylistId, SmartPlaylistLimit,
+    SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistNumberField,
+    SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField,
+    SmartPlaylistTextOperator, Track, TrackAvailability, TrackColumnEntry, TrackColumnLayout,
+    TrackColumnLayoutScope, TrackContentHash, TrackId, TrackLocation, TrackMetadata,
+    TrackPlaybackSource, TrackRelativePath, UserSettings, VolumePercent, matching_tracks,
 };
 use sustain_library_store::LibraryStore;
 use sustain_metadata::MetadataService;
@@ -379,6 +380,48 @@ impl ApplicationRuntime {
         self.settings
             .library_path()
             .map(|library_path| track.location.absolute_path(library_path))
+    }
+
+    /// Persist the playback volume preference. The audio path is updated
+    /// separately via `PlaybackCommand::SetVolume` (which the UI dispatches
+    /// immediately for responsive feedback) — this method only writes the
+    /// user setting so the choice survives a restart.
+    pub fn save_playback_volume(&mut self, volume: VolumePercent) -> ApplicationRuntimeResult<()> {
+        if self.settings.playback.volume == volume {
+            return Ok(());
+        }
+        self.settings.playback.volume = volume;
+        if let Some(store) = self.settings_store.as_ref() {
+            store
+                .save_settings(self.settings.clone())
+                .map_err(|_| ApplicationRuntimeError::SettingsSaveFailed)?;
+        }
+        Ok(())
+    }
+
+    pub fn load_track_column_layout(
+        &self,
+        scope: TrackColumnLayoutScope,
+    ) -> ApplicationRuntimeResult<Option<TrackColumnLayout>> {
+        let Some(store) = self.library_store.as_deref() else {
+            return Ok(None);
+        };
+        store
+            .load_track_column_layout(scope)
+            .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)
+    }
+
+    pub fn save_track_column_layout(
+        &self,
+        scope: TrackColumnLayoutScope,
+        layout: &TrackColumnLayout,
+    ) -> ApplicationRuntimeResult<()> {
+        let Some(store) = self.library_store.as_deref() else {
+            return Err(ApplicationRuntimeError::LibraryStoreFailed);
+        };
+        store
+            .save_track_column_layout(scope, layout)
+            .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)
     }
 
     pub fn smart_playlist_matching_tracks(

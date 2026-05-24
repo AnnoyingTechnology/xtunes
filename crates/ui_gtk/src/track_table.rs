@@ -4,10 +4,11 @@
 use gtk::glib::variant::ToVariant;
 use gtk::prelude::*;
 use gtk::{gio, glib};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering as CmpOrdering;
+use std::collections::HashSet;
 use std::rc::Rc;
-use sustain_app_runtime::{Rating, TrackId};
+use sustain_app_runtime::{Rating, TrackColumnEntry, TrackColumnLayout, TrackId};
 
 use super::track_context::TrackRowContextMenu;
 use cells::{
@@ -23,6 +24,16 @@ mod row;
 
 pub(crate) type TrackActivatedCallback = Rc<dyn Fn(TrackId)>;
 pub(crate) type RatingChangedCallback = Rc<dyn Fn(TrackId, Rating) -> bool>;
+pub(crate) type LayoutChangedCallback = Rc<dyn Fn(TrackColumnLayout)>;
+
+/// A track column that participates in the persisted layout. Status and
+/// filler columns are intentionally structural — they never appear in a
+/// [`TrackColumnLayout`] and never move.
+#[derive(Clone)]
+struct ManagedColumn {
+    column_id: &'static str,
+    column: gtk::ColumnViewColumn,
+}
 
 #[derive(Clone)]
 pub(crate) struct TrackTable {
@@ -32,7 +43,21 @@ pub(crate) struct TrackTable {
     selection: gtk::MultiSelection,
     playing_track_id: Rc<Cell<Option<TrackId>>>,
     status_bindings: StatusBindings,
+    managed_columns: Rc<Vec<ManagedColumn>>,
+    applying_layout: Rc<Cell<bool>>,
+    layout_changed: Rc<RefCell<Option<LayoutChangedCallback>>>,
+    pending_save: Rc<RefCell<Option<glib::SourceId>>>,
 }
+
+/// Debounce window for coalescing column-layout changes into a single save.
+///
+/// `notify::fixed-width` fires repeatedly while the user drags a column
+/// boundary, so we must NOT write to SQLite on every property tick. 250 ms
+/// is long enough to swallow a continuous drag (motion events keep the timer
+/// resetting) yet short enough that a single visibility toggle feels
+/// instantaneous and a pending save survives realistic close-window races
+/// when [`TrackTable::flush_pending_layout_save`] is invoked on shutdown.
+const LAYOUT_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl TrackTable {
     pub(crate) fn widget(&self) -> gtk::ScrolledWindow {
@@ -88,6 +113,105 @@ impl TrackTable {
         }
         false
     }
+
+    /// Apply a persisted layout: reorder columns, set visibility, set widths.
+    /// Any managed column missing from `layout` keeps its factory defaults and
+    /// is appended after the explicit entries.
+    ///
+    /// The [`applying_layout`] guard is set for the duration so the resulting
+    /// `notify::*` and `items-changed` signals do not loop back into a save.
+    pub(crate) fn apply_layout(&self, layout: &TrackColumnLayout) {
+        let _guard = ApplyLayoutGuard::enter(self.applying_layout.clone());
+        let mut applied: HashSet<&'static str> = HashSet::new();
+        // Position 0 is the status column; managed columns start at 1, and the
+        // filler column is pushed to the end by the cascade of insert calls.
+        let mut insert_at: u32 = 1;
+        for entry in &layout.entries {
+            if let Some(managed) = self
+                .managed_columns
+                .iter()
+                .find(|managed| managed.column_id == entry.column_id.as_str())
+            {
+                managed.column.set_visible(entry.visible);
+                managed
+                    .column
+                    .set_fixed_width(i32::try_from(entry.width_px).unwrap_or(i32::MAX));
+                self.table.insert_column(insert_at, &managed.column);
+                insert_at += 1;
+                applied.insert(managed.column_id);
+            }
+        }
+        for managed in self.managed_columns.iter() {
+            if applied.contains(managed.column_id) {
+                continue;
+            }
+            self.table.insert_column(insert_at, &managed.column);
+            insert_at += 1;
+        }
+    }
+
+    pub(crate) fn set_layout_changed_callback(&self, callback: LayoutChangedCallback) {
+        *self.layout_changed.borrow_mut() = Some(callback);
+    }
+
+    /// Synchronously fires any pending debounced save. Call this from the
+    /// window-close handler so a column tweak made within
+    /// [`LAYOUT_SAVE_DEBOUNCE`] of shutdown is not lost.
+    pub(crate) fn flush_pending_layout_save(&self) {
+        let Some(source_id) = self.pending_save.borrow_mut().take() else {
+            return;
+        };
+        source_id.remove();
+        let Some(callback) = self.layout_changed.borrow().as_ref().cloned() else {
+            return;
+        };
+        callback(read_current_layout(&self.table, &self.managed_columns));
+    }
+}
+
+struct ApplyLayoutGuard {
+    applying: Rc<Cell<bool>>,
+}
+
+impl ApplyLayoutGuard {
+    fn enter(applying: Rc<Cell<bool>>) -> Self {
+        applying.set(true);
+        Self { applying }
+    }
+}
+
+impl Drop for ApplyLayoutGuard {
+    fn drop(&mut self) {
+        self.applying.set(false);
+    }
+}
+
+fn read_current_layout(
+    table: &gtk::ColumnView,
+    managed_columns: &[ManagedColumn],
+) -> TrackColumnLayout {
+    let columns_model = table.columns();
+    let mut entries = Vec::with_capacity(managed_columns.len());
+    for index in 0..columns_model.n_items() {
+        let Some(item) = columns_model.item(index) else {
+            continue;
+        };
+        let Ok(column) = item.downcast::<gtk::ColumnViewColumn>() else {
+            continue;
+        };
+        let Some(managed) = managed_columns
+            .iter()
+            .find(|managed| managed.column.as_ptr() as *const () == column.as_ptr() as *const ())
+        else {
+            continue;
+        };
+        entries.push(TrackColumnEntry {
+            column_id: managed.column_id.to_owned(),
+            visible: managed.column.is_visible(),
+            width_px: managed.column.fixed_width().max(0) as u32,
+        });
+    }
+    TrackColumnLayout::new(entries)
 }
 
 fn vertical_scroll_info() -> gtk::ScrollInfo {
@@ -139,6 +263,7 @@ pub(crate) fn build_track_table(
 
     let header_menu = build_column_visibility_menu();
     let column_actions = gio::SimpleActionGroup::new();
+    let mut managed_columns: Vec<ManagedColumn> = Vec::with_capacity(TRACK_TABLE_COLUMNS.len());
 
     for column in TRACK_TABLE_COLUMNS.iter().copied() {
         let table_column = build_table_column(
@@ -152,18 +277,41 @@ pub(crate) fn build_track_table(
             None,
             &column.default_visible().to_variant(),
         );
-        let table_column_for_action = table_column.clone();
-        action.connect_activate(move |action, _parameter| {
-            let visible = !table_column_for_action.is_visible();
-            table_column_for_action.set_visible(visible);
-            action.set_state(&visible.to_variant());
+        let column_for_action = table_column.clone();
+        action.connect_activate(move |_action, _parameter| {
+            let visible = !column_for_action.is_visible();
+            column_for_action.set_visible(visible);
+        });
+        // Keep the menu checkmark in sync whenever the column's visibility
+        // changes — whether the user toggled the action, dragged a separator,
+        // or apply_layout() set it programmatically.
+        let action_for_sync = action.clone();
+        table_column.connect_notify_local(Some("visible"), move |column, _spec| {
+            action_for_sync.set_state(&column.is_visible().to_variant());
         });
         column_actions.add_action(&action);
         table.append_column(&table_column);
+        managed_columns.push(ManagedColumn {
+            column_id: column.action_name(),
+            column: table_column,
+        });
     }
     table.append_column(&build_filler_column(context_menu.clone()));
 
     table.insert_action_group("columns", Some(&column_actions));
+
+    let managed_columns: Rc<Vec<ManagedColumn>> = Rc::new(managed_columns);
+    let applying_layout: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let layout_changed: Rc<RefCell<Option<LayoutChangedCallback>>> = Rc::new(RefCell::new(None));
+    let pending_save: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+
+    install_layout_change_listeners(
+        &table,
+        managed_columns.clone(),
+        applying_layout.clone(),
+        layout_changed.clone(),
+        pending_save.clone(),
+    );
 
     if let Some(track_activated) = track_activated {
         let selection_for_activate = selection.clone();
@@ -194,7 +342,76 @@ pub(crate) fn build_track_table(
         selection,
         playing_track_id,
         status_bindings,
+        managed_columns,
+        applying_layout,
+        layout_changed,
+        pending_save,
     }
+}
+
+fn install_layout_change_listeners(
+    table: &gtk::ColumnView,
+    managed_columns: Rc<Vec<ManagedColumn>>,
+    applying_layout: Rc<Cell<bool>>,
+    layout_changed: Rc<RefCell<Option<LayoutChangedCallback>>>,
+    pending_save: Rc<RefCell<Option<glib::SourceId>>>,
+) {
+    // Debounced scheduler. Each call cancels any prior pending save and queues
+    // a new one LAYOUT_SAVE_DEBOUNCE in the future, so a continuous resize
+    // drag (which fires notify::fixed-width per pixel) collapses to a single
+    // SQLite write when the drag stops.
+    let schedule: Rc<dyn Fn()> = {
+        let table = table.clone();
+        let managed_columns = managed_columns.clone();
+        let applying_layout = applying_layout.clone();
+        let layout_changed = layout_changed.clone();
+        let pending_save = pending_save.clone();
+        Rc::new(move || {
+            if applying_layout.get() {
+                return;
+            }
+            if let Some(previous) = pending_save.borrow_mut().take() {
+                previous.remove();
+            }
+            let table = table.clone();
+            let managed_columns = managed_columns.clone();
+            let layout_changed = layout_changed.clone();
+            let pending_save_clear = pending_save.clone();
+            let source_id = glib::timeout_add_local_once(LAYOUT_SAVE_DEBOUNCE, move || {
+                // The timer has now fired; release our handle to it before
+                // doing work so flush_pending_layout_save() can run cleanly
+                // even if the callback ends up triggering more changes.
+                pending_save_clear.borrow_mut().take();
+                let Some(callback) = layout_changed.borrow().as_ref().cloned() else {
+                    return;
+                };
+                callback(read_current_layout(&table, &managed_columns));
+            });
+            *pending_save.borrow_mut() = Some(source_id);
+        })
+    };
+
+    for managed in managed_columns.iter() {
+        let schedule_for_width = schedule.clone();
+        managed
+            .column
+            .connect_notify_local(Some("fixed-width"), move |_column, _spec| {
+                schedule_for_width();
+            });
+        let schedule_for_visible = schedule.clone();
+        managed
+            .column
+            .connect_notify_local(Some("visible"), move |_column, _spec| {
+                schedule_for_visible();
+            });
+    }
+
+    let schedule_for_reorder = schedule;
+    table
+        .columns()
+        .connect_items_changed(move |_model, _position, _removed, _added| {
+            schedule_for_reorder();
+        });
 }
 
 fn build_table_column(

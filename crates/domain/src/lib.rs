@@ -17,6 +17,7 @@ mod smart_playlist;
 mod smart_playlist_evaluation;
 mod statistics;
 mod track;
+mod track_column_layout;
 
 pub use command::{ApplicationCommand, ApplicationQuery};
 pub use id::{PlaylistFolderId, PlaylistId, SmartPlaylistId, TrackId};
@@ -32,7 +33,10 @@ pub use playlist::{Playlist, PlaylistEntry};
 pub use playlist_folder::{PlaylistFolder, PlaylistItem};
 pub use query::{LibraryQuery, SortDirection, TrackSort, TrackSortColumn};
 pub use rating::Rating;
-pub use settings::{LibraryManagementMode, LibrarySettings, UserSettings};
+pub use settings::{
+    DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings, PlaybackSettings,
+    UserSettings,
+};
 pub use smart_playlist::{
     SmartPlaylist, SmartPlaylistDateField, SmartPlaylistLimit, SmartPlaylistLimitSelection,
     SmartPlaylistMatchKind, SmartPlaylistNumberField, SmartPlaylistNumberOperator,
@@ -41,3 +45,4 @@ pub use smart_playlist::{
 pub use smart_playlist_evaluation::{matching_tracks, track_matches_rule, track_matches_rule_set};
 pub use statistics::PlayStatistics;
 pub use track::{Track, TrackAvailability, TrackContentHash, TrackLocation, TrackRelativePath};
+pub use track_column_layout::{TrackColumnEntry, TrackColumnLayout, TrackColumnLayoutScope};

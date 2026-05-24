@@ -12,7 +12,7 @@ use gtk::prelude::*;
 use gtk::{gdk, glib};
 use sustain_app_runtime::{
     PlaybackCommand, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId,
-    PlaylistItem, Rating, Track, TrackId,
+    PlaylistItem, Rating, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
 };
 
 use super::{
@@ -88,7 +88,8 @@ pub(crate) fn build_main_window(
     let playlists_table_holder: Rc<RefCell<Option<TrackTable>>> = Rc::new(RefCell::new(None));
 
     let now_playing = NowPlayingView::new(runtime.clone(), command_controller.clone());
-    let titlebar = build_titlebar(now_playing.widget());
+    let initial_volume = runtime.borrow().settings().playback.volume;
+    let titlebar = build_titlebar(now_playing.widget(), initial_volume);
     let playback_changed = playback_changed_callback(
         &runtime,
         &now_playing,
@@ -99,6 +100,7 @@ pub(crate) fn build_main_window(
     );
     connect_titlebar_playback_controls(
         &titlebar,
+        &runtime,
         command_controller.clone(),
         playback_changed.clone(),
     );
@@ -168,6 +170,7 @@ pub(crate) fn build_main_window(
         Some(rating_changed),
     );
     playlists_table_holder.replace(Some(playlists_table.clone()));
+    install_track_column_layout_persistence(&runtime, &songs_table, &playlists_table, &sidebar);
     playback_changed();
     let songs_drop_indicator = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     songs_drop_indicator.add_css_class(LIBRARY_DROP_INDICATOR_CLASS);
@@ -297,6 +300,18 @@ pub(crate) fn build_main_window(
     shell.set_child(Some(&window_frame));
     install_resize_handles(&shell, &window);
     window.set_child(Some(&shell));
+
+    // Any debounced save scheduled within the debounce window of shutdown
+    // would otherwise be lost: the timer's main loop never gets to fire.
+    let songs_table_for_close = songs_table.clone();
+    let playlists_table_for_close = playlists_table.clone();
+    let titlebar_for_close = titlebar.clone();
+    window.connect_close_request(move |_window| {
+        songs_table_for_close.flush_pending_layout_save();
+        playlists_table_for_close.flush_pending_layout_save();
+        titlebar_for_close.flush_pending_volume_save();
+        glib::Propagation::Proceed
+    });
 
     window
 }
@@ -630,10 +645,86 @@ fn sidebar_selection_changed_callback(
     let playlists_table = playlists_table.clone();
 
     Rc::new(move |selection| {
+        if let Some(layout) = layout_for_selection(&runtime.borrow(), selection) {
+            playlists_table.apply_layout(&layout);
+        }
         let rows = playlist_table_rows_for(&runtime.borrow(), selection);
         playlists_table.replace_rows(rows);
         visible_summary_refresh();
     })
+}
+
+/// Wires the persisted-layout machinery for both track tables.
+///
+/// - The Songs view always writes to the [`Default`] scope — it *is* the
+///   "general song list view" the user asked for.
+/// - The Playlists view writes to a per-playlist override only when a real
+///   playlist or smart playlist is selected. Library / Folder / empty
+///   selections are transient and never produce override rows (matches the
+///   "user owns their changes; we don't fabricate them" semantics).
+/// - The Songs view's initial layout is applied here. The Playlists view's
+///   initial layout is applied by the synthetic first call that
+///   [`PlaylistSidebar::set_selection_changed`] makes on its handler.
+fn install_track_column_layout_persistence(
+    runtime: &SharedRuntime,
+    songs_table: &TrackTable,
+    playlists_table: &TrackTable,
+    sidebar: &PlaylistSidebar,
+) {
+    let runtime_for_songs = runtime.clone();
+    songs_table.set_layout_changed_callback(Rc::new(move |layout| {
+        let _ = runtime_for_songs
+            .borrow()
+            .save_track_column_layout(TrackColumnLayoutScope::Default, &layout);
+    }));
+
+    let runtime_for_playlists = runtime.clone();
+    let sidebar_for_playlists = sidebar.clone();
+    playlists_table.set_layout_changed_callback(Rc::new(move |layout| {
+        let scope = match sidebar_for_playlists.current_selection() {
+            Some(SidebarSelection::Item(PlaylistItem::Playlist(id))) => {
+                TrackColumnLayoutScope::Playlist(id)
+            }
+            Some(SidebarSelection::Item(PlaylistItem::SmartPlaylist(id))) => {
+                TrackColumnLayoutScope::SmartPlaylist(id)
+            }
+            _ => return,
+        };
+        let _ = runtime_for_playlists
+            .borrow()
+            .save_track_column_layout(scope, &layout);
+    }));
+
+    if let Ok(Some(default)) = runtime
+        .borrow()
+        .load_track_column_layout(TrackColumnLayoutScope::Default)
+    {
+        songs_table.apply_layout(&default);
+    }
+}
+
+fn layout_for_selection(
+    runtime: &ApplicationRuntime,
+    selection: Option<SidebarSelection>,
+) -> Option<TrackColumnLayout> {
+    let override_scope = match selection {
+        Some(SidebarSelection::Item(PlaylistItem::Playlist(id))) => {
+            Some(TrackColumnLayoutScope::Playlist(id))
+        }
+        Some(SidebarSelection::Item(PlaylistItem::SmartPlaylist(id))) => {
+            Some(TrackColumnLayoutScope::SmartPlaylist(id))
+        }
+        _ => None,
+    };
+    if let Some(scope) = override_scope {
+        if let Ok(Some(layout)) = runtime.load_track_column_layout(scope) {
+            return Some(layout);
+        }
+    }
+    runtime
+        .load_track_column_layout(TrackColumnLayoutScope::Default)
+        .ok()
+        .flatten()
 }
 
 fn runtime_library_table_rows(runtime: &ApplicationRuntime) -> Vec<TrackTableRow> {

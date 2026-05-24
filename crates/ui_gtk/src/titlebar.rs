@@ -1,18 +1,31 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
+use gtk::glib;
 use gtk::prelude::*;
 use sustain_app_runtime::{ApplicationCommand, PlaybackCommand, PlaybackState, VolumePercent};
 
 use super::{
-    DEFAULT_VOLUME_PERCENT, MEDIA_ICON_SIZE, NOW_PLAYING_HORIZONTAL_MARGIN,
-    PlaybackChangedCallback, TITLEBAR_CONTROL_HEIGHT, TITLEBAR_HEIGHT, TITLEBAR_LEFT_PADDING,
-    TITLEBAR_RIGHT_PADDING, VOLUME_MAGNET_THRESHOLD, VOLUME_WIDTH,
-    command_controller::SharedCommandController,
+    MEDIA_ICON_SIZE, NOW_PLAYING_HORIZONTAL_MARGIN, PlaybackChangedCallback, SharedRuntime,
+    TITLEBAR_CONTROL_HEIGHT, TITLEBAR_HEIGHT, TITLEBAR_LEFT_PADDING, TITLEBAR_RIGHT_PADDING,
+    VOLUME_MAGNET_THRESHOLD, VOLUME_WIDTH, command_controller::SharedCommandController,
 };
 
+/// Debounce window for persisting the playback volume to TOML.
+///
+/// `value-changed` on the slider fires once per pixel of mouse motion during
+/// a drag. The TOML store rewrites the entire settings file on each save, so
+/// we coalesce all rapid changes into a single write 250 ms after the slider
+/// stops moving. A pending save is flushed synchronously on window close so a
+/// last-second adjustment is never lost.
+const VOLUME_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
+
+#[derive(Clone)]
 pub(crate) struct Titlebar {
     pub(crate) widget: gtk::WindowHandle,
     pub(crate) play_pause_icon: gtk::Image,
@@ -20,9 +33,11 @@ pub(crate) struct Titlebar {
     play_pause: gtk::Button,
     next: gtk::Button,
     volume: gtk::Scale,
+    volume_pending_save: Rc<RefCell<Option<glib::SourceId>>>,
+    volume_save_callback: Rc<RefCell<Option<Rc<dyn Fn(VolumePercent)>>>>,
 }
 
-pub(crate) fn build_titlebar(now_playing: gtk::Box) -> Titlebar {
+pub(crate) fn build_titlebar(now_playing: gtk::Box, initial_volume: VolumePercent) -> Titlebar {
     let topbar = gtk::CenterBox::new();
     topbar.add_css_class("titlebar");
     topbar.set_hexpand(true);
@@ -39,7 +54,7 @@ pub(crate) fn build_titlebar(now_playing: gtk::Box) -> Titlebar {
 
     let volume = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.01);
     volume.add_css_class("volume-slider");
-    volume.set_value(VolumePercent::from_clamped(DEFAULT_VOLUME_PERCENT).as_scalar());
+    volume.set_value(initial_volume.as_scalar());
     volume.set_width_request(VOLUME_WIDTH);
     volume.set_height_request(TITLEBAR_CONTROL_HEIGHT);
     volume.set_draw_value(false);
@@ -92,11 +107,14 @@ pub(crate) fn build_titlebar(now_playing: gtk::Box) -> Titlebar {
         play_pause_icon,
         next,
         volume,
+        volume_pending_save: Rc::new(RefCell::new(None)),
+        volume_save_callback: Rc::new(RefCell::new(None)),
     }
 }
 
 pub(crate) fn connect_titlebar_playback_controls(
     titlebar: &Titlebar,
+    runtime: &SharedRuntime,
     command_controller: SharedCommandController,
     playback_changed: PlaybackChangedCallback,
 ) {
@@ -130,9 +148,21 @@ pub(crate) fn connect_titlebar_playback_controls(
         }
     });
 
+    // The save callback rewrites settings.toml; we wrap it in the debounce
+    // scheduler below so a drag fires it once, not hundreds of times.
+    let save_volume: Rc<dyn Fn(VolumePercent)> = {
+        let runtime = runtime.clone();
+        Rc::new(move |volume| {
+            let _ = runtime.borrow_mut().save_playback_volume(volume);
+        })
+    };
+    *titlebar.volume_save_callback.borrow_mut() = Some(save_volume);
+
     let volume_syncing = Rc::new(Cell::new(false));
     let command_controller_for_volume = command_controller.clone();
     let volume_syncing_for_change = volume_syncing.clone();
+    let volume_pending_save = titlebar.volume_pending_save.clone();
+    let volume_save_callback = titlebar.volume_save_callback.clone();
     titlebar.volume.connect_value_changed(move |volume| {
         if volume_syncing_for_change.get() {
             return;
@@ -145,14 +175,68 @@ pub(crate) fn connect_titlebar_playback_controls(
             volume_syncing_for_change.set(false);
         }
 
+        let settled_volume = VolumePercent::from_scalar(value);
+
+        // Audio path: dispatch immediately so the speaker reacts to the
+        // slider in real time. No persistence here.
         let _result = command_controller_for_volume.dispatch(ApplicationCommand::Playback(
-            PlaybackCommand::SetVolume(VolumePercent::from_scalar(value)),
+            PlaybackCommand::SetVolume(settled_volume),
         ));
+
+        // Persistence path: replace any pending save with one scheduled for
+        // VOLUME_SAVE_DEBOUNCE in the future, so a continuous drag collapses
+        // to one TOML write.
+        schedule_volume_save(
+            settled_volume,
+            volume_pending_save.clone(),
+            volume_save_callback.clone(),
+        );
     });
 
+    // The startup volume value is whatever was persisted (or the default if
+    // no settings file exists yet). Push it through the audio path so the
+    // playback service is aligned with the slider before the first track
+    // plays.
+    let initial_volume = runtime.borrow().settings().playback.volume;
     let _result = command_controller.dispatch(ApplicationCommand::Playback(
-        PlaybackCommand::SetVolume(VolumePercent::from_clamped(DEFAULT_VOLUME_PERCENT)),
+        PlaybackCommand::SetVolume(initial_volume),
     ));
+}
+
+fn schedule_volume_save(
+    volume: VolumePercent,
+    pending_save: Rc<RefCell<Option<glib::SourceId>>>,
+    save_callback: Rc<RefCell<Option<Rc<dyn Fn(VolumePercent)>>>>,
+) {
+    if let Some(previous) = pending_save.borrow_mut().take() {
+        previous.remove();
+    }
+    let pending_save_clear = pending_save.clone();
+    let save_callback_for_timer = save_callback.clone();
+    let source_id = glib::timeout_add_local_once(VOLUME_SAVE_DEBOUNCE, move || {
+        pending_save_clear.borrow_mut().take();
+        let Some(callback) = save_callback_for_timer.borrow().as_ref().cloned() else {
+            return;
+        };
+        callback(volume);
+    });
+    *pending_save.borrow_mut() = Some(source_id);
+}
+
+impl Titlebar {
+    /// Cancel any pending debounced volume save and run it now. Invoked from
+    /// the window-close path so an adjustment made within
+    /// [`VOLUME_SAVE_DEBOUNCE`] of shutdown is still persisted.
+    pub(crate) fn flush_pending_volume_save(&self) {
+        let Some(source_id) = self.volume_pending_save.borrow_mut().take() else {
+            return;
+        };
+        source_id.remove();
+        let Some(callback) = self.volume_save_callback.borrow().as_ref().cloned() else {
+            return;
+        };
+        callback(VolumePercent::from_scalar(self.volume.value()));
+    }
 }
 
 pub(crate) fn sync_play_pause_icon(icon: &gtk::Image, state: &PlaybackState) {

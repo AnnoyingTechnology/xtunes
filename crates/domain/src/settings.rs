@@ -3,6 +3,13 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::VolumePercent;
+
+/// Volume picked the first time the app runs, before any persisted value
+/// exists. 80% matches the previous UI-side constant and is loud enough to
+/// be obviously audible without startling anyone with sensitive headphones.
+pub const DEFAULT_PLAYBACK_VOLUME_PERCENT: u8 = 80;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LibrarySettings {
     pub path: Option<PathBuf>,
@@ -16,9 +23,23 @@ pub enum LibraryManagementMode {
     CopyAddedFilesIntoLibrary,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlaybackSettings {
+    pub volume: VolumePercent,
+}
+
+impl Default for PlaybackSettings {
+    fn default() -> Self {
+        Self {
+            volume: VolumePercent::from_clamped(DEFAULT_PLAYBACK_VOLUME_PERCENT),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UserSettings {
     pub library: LibrarySettings,
+    pub playback: PlaybackSettings,
 }
 
 impl UserSettings {
@@ -28,6 +49,7 @@ impl UserSettings {
                 path: library_path,
                 management_mode: LibraryManagementMode::ReferenceFilesInPlace,
             },
+            playback: PlaybackSettings::default(),
         }
     }
 

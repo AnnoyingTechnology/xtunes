@@ -62,7 +62,6 @@ const SIDEBAR_MIN_WIDTH: i32 = 150;
 const SIDEBAR_MAX_WIDTH: i32 = 300;
 const STATUS_BAR_HEIGHT: i32 = 28;
 const VOLUME_WIDTH: i32 = 192;
-const DEFAULT_VOLUME_PERCENT: u8 = 80;
 const VOLUME_MAGNET_THRESHOLD: f64 = 0.90;
 const WINDOW_SHADOW_MARGIN: i32 = 14;
 const APP_ID: &str = "io.github.open_sustain.sustain";
