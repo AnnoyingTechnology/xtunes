@@ -5,6 +5,7 @@
 
 mod command;
 mod id;
+mod managed_library;
 mod metadata;
 mod playback;
 mod playlist;
@@ -19,6 +20,9 @@ mod track;
 
 pub use command::{ApplicationCommand, ApplicationQuery};
 pub use id::{PlaylistFolderId, PlaylistId, SmartPlaylistId, TrackId};
+pub use managed_library::{
+    ManagedTrackPathError, ManagedTrackPathInput, ManagedTrackPathPlan, ManagedTrackPathPlanner,
+};
 pub use metadata::{FieldChange, MetadataChange, TrackMetadata};
 pub use playback::{
     PlaybackCommand, PlaybackOptions, PlaybackQueue, PlaybackQueueSource, PlaybackState,
@@ -28,7 +32,7 @@ pub use playlist::{Playlist, PlaylistEntry};
 pub use playlist_folder::{PlaylistFolder, PlaylistItem};
 pub use query::{LibraryQuery, SortDirection, TrackSort, TrackSortColumn};
 pub use rating::Rating;
-pub use settings::{LibrarySettings, UserSettings};
+pub use settings::{LibraryManagementMode, LibrarySettings, UserSettings};
 pub use smart_playlist::{
     SmartPlaylist, SmartPlaylistDateField, SmartPlaylistLimit, SmartPlaylistLimitSelection,
     SmartPlaylistMatchKind, SmartPlaylistNumberField, SmartPlaylistNumberOperator,
@@ -36,4 +40,6 @@ pub use smart_playlist::{
 };
 pub use smart_playlist_evaluation::{matching_tracks, track_matches_rule, track_matches_rule_set};
 pub use statistics::PlayStatistics;
-pub use track::{Track, TrackAvailability, TrackLocation, TrackRelativePath};
+pub use track::{
+    Track, TrackAvailability, TrackContentHash, TrackFilePath, TrackLocation, TrackRelativePath,
+};

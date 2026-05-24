@@ -10,8 +10,8 @@ use main_window::build_main_window;
 
 pub use sustain_app_runtime::{
     ApplicationCommand, ApplicationQuery, ApplicationRuntime, ApplicationRuntimeError,
-    BackgroundTaskStatus, LibraryScanResult, LibraryScanSummary, UserSettings,
-    run_library_scan_task,
+    BackgroundTaskStatus, LibraryManagementMode, LibraryScanResult, LibraryScanSummary,
+    UserSettings, run_library_scan_task,
 };
 
 mod accent;
@@ -48,7 +48,7 @@ const NOW_PLAYING_HORIZONTAL_MARGIN: i32 = TITLEBAR_HEIGHT / 2;
 const NOW_PLAYING_ICON_SIZE: i32 = 16;
 const NOW_PLAYING_SIDE_WIDTH: i32 = 58;
 const NOW_PLAYING_WIDTH: i32 = 600;
-const PREFERENCES_HEIGHT: i32 = 230;
+const PREFERENCES_HEIGHT: i32 = 300;
 const PREFERENCES_WIDTH: i32 = 520;
 const SMART_PLAYLIST_EDITOR_WIDTH: i32 = 620;
 const SMART_PLAYLIST_EDITOR_HEIGHT: i32 = 360;

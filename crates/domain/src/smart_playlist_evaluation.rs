@@ -112,8 +112,7 @@ fn text_field_value(track: &Track, field: SmartPlaylistTextField) -> Option<Stri
         SmartPlaylistTextField::Genre => track.metadata.genre.clone(),
         SmartPlaylistTextField::FileName => track
             .location
-            .relative_path
-            .as_path()
+            .path()
             .file_name()
             .and_then(|os_str| os_str.to_str())
             .map(str::to_owned),
@@ -297,6 +296,7 @@ mod tests {
         Track {
             id: TrackId::new(id).expect("positive id"),
             location: TrackLocation::available(relative(&format!("track-{id}.flac"))),
+            content_hash: None,
             metadata: TrackMetadata {
                 title: Some(format!("Title {id}")),
                 artist: Some("Artist".to_owned()),

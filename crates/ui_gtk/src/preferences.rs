@@ -7,8 +7,8 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 
 use super::{
-    ApplicationCommand, ApplicationRuntimeError, PREFERENCES_HEIGHT, PREFERENCES_WIDTH,
-    UserSettings, WINDOW_SHADOW_MARGIN, command_controller::SharedCommandController,
+    ApplicationCommand, ApplicationRuntimeError, LibraryManagementMode, PREFERENCES_HEIGHT,
+    PREFERENCES_WIDTH, WINDOW_SHADOW_MARGIN, command_controller::SharedCommandController,
     library_scan::LibraryScanRequestedCallback,
 };
 
@@ -162,6 +162,58 @@ fn open_preferences_window(
     scan_status.set_xalign(0.0);
     scan_status.set_wrap(true);
 
+    let organization_group = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    organization_group.set_margin_top(4);
+
+    let keep_organized_check = gtk::CheckButton::with_label("Keep my library organized");
+    let library_path_is_valid = library_path_entry_is_valid(&path_entry);
+    let management_mode = command_controller
+        .runtime()
+        .borrow()
+        .settings()
+        .library
+        .management_mode;
+    keep_organized_check.set_active(
+        library_path_is_valid
+            && management_mode == LibraryManagementMode::CopyAddedFilesIntoLibrary,
+    );
+    keep_organized_check.set_sensitive(library_path_is_valid);
+
+    let organization_help = gtk::Label::new(Some(
+        "Newly added tracks are copied into clean artist, album, and track folders inside the library folder.",
+    ));
+    organization_help.add_css_class("preference-helper");
+    organization_help.set_xalign(0.0);
+    organization_help.set_wrap(true);
+
+    let command_controller_for_organization = command_controller.clone();
+    keep_organized_check.connect_toggled(move |check_button| {
+        let mut settings = command_controller_for_organization
+            .runtime()
+            .borrow()
+            .settings()
+            .clone();
+        settings.library.management_mode = if check_button.is_active() {
+            LibraryManagementMode::CopyAddedFilesIntoLibrary
+        } else {
+            LibraryManagementMode::ReferenceFilesInPlace
+        };
+        let _result = command_controller_for_organization
+            .dispatch(ApplicationCommand::UpdateSettings(settings));
+    });
+
+    organization_group.append(&keep_organized_check);
+    organization_group.append(&organization_help);
+
+    let keep_organized_for_path_change = keep_organized_check.clone();
+    path_entry.connect_changed(move |entry| {
+        let path_is_valid = library_path_entry_is_valid(entry);
+        keep_organized_for_path_change.set_sensitive(path_is_valid);
+        if !path_is_valid && keep_organized_for_path_change.is_active() {
+            keep_organized_for_path_change.set_active(false);
+        }
+    });
+
     let command_controller_for_entry = command_controller.clone();
     path_entry.connect_activate(move |entry| {
         let _result = save_library_path_from_entry(&command_controller_for_entry, entry);
@@ -210,6 +262,7 @@ fn open_preferences_window(
 
     content.append(&label_group);
     content.append(&path_row);
+    content.append(&organization_group);
     content.append(&scan_status);
     panel.append(&close_row);
     panel.append(&content);
@@ -272,9 +325,23 @@ fn save_library_path_from_entry(
     } else {
         Some(PathBuf::from(path_text))
     };
-    let settings = UserSettings::with_library_path(library_path);
+    let mut settings = command_controller.runtime().borrow().settings().clone();
+    settings.library.path = library_path;
+    if settings
+        .library
+        .path
+        .as_ref()
+        .is_none_or(|path| !path.is_dir())
+    {
+        settings.library.management_mode = LibraryManagementMode::ReferenceFilesInPlace;
+    }
 
     command_controller.dispatch(ApplicationCommand::UpdateSettings(settings))
+}
+
+fn library_path_entry_is_valid(path_entry: &gtk::Entry) -> bool {
+    let path_text = path_entry.text().trim().to_owned();
+    !path_text.is_empty() && PathBuf::from(path_text).is_dir()
 }
 
 fn request_library_scan_from_entry(
@@ -296,6 +363,10 @@ fn scan_error_text(error: ApplicationRuntimeError) -> &'static str {
             "Library scanning is not available in this build."
         }
         ApplicationRuntimeError::LibraryStoreFailed => "The library database could not be updated.",
+        ApplicationRuntimeError::LibraryPathUnavailable => "Choose a library folder first.",
+        ApplicationRuntimeError::LibraryImportFailed => {
+            "The files could not be added to the library."
+        }
         ApplicationRuntimeError::MetadataWriteFailed => "The track metadata could not be updated.",
         ApplicationRuntimeError::InvalidPlaylistName => "The playlist name is not valid.",
         ApplicationRuntimeError::InvalidPlaylistFolderName => "The folder name is not valid.",

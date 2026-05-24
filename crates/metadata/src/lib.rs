@@ -5,6 +5,7 @@
 
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -17,8 +18,11 @@ use lofty::{
         items::popularimeter::{Popularimeter, StarRating},
     },
 };
+use sha2::{Digest, Sha256};
 
-pub use sustain_domain::{FieldChange, MetadataChange, Rating, TrackMetadata, TrackRelativePath};
+pub use sustain_domain::{
+    FieldChange, MetadataChange, Rating, TrackContentHash, TrackMetadata, TrackRelativePath,
+};
 
 pub type MetadataResult<T> = Result<T, MetadataError>;
 
@@ -49,6 +53,7 @@ pub trait MetadataService: Send + Sync {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScannedTrack {
     pub relative_path: TrackRelativePath,
+    pub content_hash: TrackContentHash,
     pub metadata: TrackMetadata,
     pub rating: Rating,
 }
@@ -106,9 +111,16 @@ where
 
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                scan.failures.push(ScanFailure {
+                    path,
+                    error: MetadataError::ReadFailed,
+                });
+                continue;
+            };
+            if metadata.file_type().is_dir() {
                 self.scan_directory(library_path, &path, scan);
-            } else {
+            } else if metadata.file_type().is_file() {
                 self.scan_file(library_path, path, scan);
             }
         }
@@ -150,9 +162,17 @@ where
                 return;
             }
         };
+        let content_hash = match hash_file_content(&path) {
+            Ok(content_hash) => content_hash,
+            Err(error) => {
+                scan.failures.push(ScanFailure { path, error });
+                return;
+            }
+        };
 
         scan.tracks.push(ScannedTrack {
             relative_path,
+            content_hash,
             metadata,
             rating,
         });
@@ -342,6 +362,34 @@ pub fn audio_format_from_path(path: &Path) -> MetadataResult<AudioFormat> {
     }
 }
 
+pub fn hash_file_content(path: &Path) -> MetadataResult<TrackContentHash> {
+    let mut file = fs::File::open(path).map_err(|_| MetadataError::ReadFailed)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+
+    loop {
+        let bytes_read = file
+            .read(&mut buffer)
+            .map_err(|_| MetadataError::ReadFailed)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    TrackContentHash::new(lower_hex(&hasher.finalize())).ok_or(MetadataError::ReadFailed)
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
 fn ensure_primary_tag(tagged_file: &mut lofty::file::TaggedFile) {
     if tagged_file.primary_tag().is_some() {
         return;
@@ -430,7 +478,7 @@ mod tests {
 
     use super::{
         AudioFormat, LibraryScanner, MetadataError, MetadataResult, MetadataService, Rating,
-        audio_format_from_path,
+        audio_format_from_path, hash_file_content,
     };
 
     #[test]
@@ -499,6 +547,23 @@ mod tests {
         );
         assert_eq!(scan.skipped_unsupported_files, 1);
         assert_eq!(scan.failures, Vec::new());
+
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn hash_file_content_returns_sha256_hex() {
+        let root = unique_test_directory();
+        fs::create_dir_all(&root).expect("create test directory");
+        let path = root.join("track.flac");
+        fs::write(&path, b"abc").expect("write file");
+
+        let hash = hash_file_content(&path).expect("hash file");
+
+        assert_eq!(
+            hash.as_str(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
 
         fs::remove_dir_all(root).expect("remove test directory");
     }

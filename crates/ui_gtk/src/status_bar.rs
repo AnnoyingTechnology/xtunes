@@ -128,6 +128,10 @@ pub(crate) fn runtime_error_text(error: &ApplicationRuntimeError) -> &'static st
             "Library scanning is not available in this build."
         }
         ApplicationRuntimeError::LibraryStoreFailed => "The library database could not be updated.",
+        ApplicationRuntimeError::LibraryPathUnavailable => "Choose a library folder first.",
+        ApplicationRuntimeError::LibraryImportFailed => {
+            "The files could not be added to the library."
+        }
         ApplicationRuntimeError::MetadataWriteFailed => "The track metadata could not be updated.",
         ApplicationRuntimeError::InvalidPlaylistName => "The playlist name is not valid.",
         ApplicationRuntimeError::InvalidPlaylistFolderName => "The folder name is not valid.",

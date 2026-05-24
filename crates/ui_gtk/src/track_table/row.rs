@@ -67,8 +67,7 @@ pub(crate) struct TrackTableRow {
 
 impl TrackTableRow {
     pub(crate) fn from_track(track: &Track, library_root: Option<&Path>) -> Self {
-        let absolute_path =
-            library_root.map(|library_root| track.location.absolute_path(library_root));
+        let absolute_path = track.location.absolute_path(library_root);
         let file_metadata = absolute_path
             .as_ref()
             .and_then(|path| std::fs::metadata(path).ok());
@@ -77,7 +76,7 @@ impl TrackTableRow {
         Self {
             track_id: Some(track.id),
             track_name: non_empty_text(&track.metadata.title)
-                .or_else(|| file_stem_text(track.location.relative_path.as_path()))
+                .or_else(|| file_stem_text(track.location.path()))
                 .unwrap_or_default(),
             artist: non_empty_text(&track.metadata.artist).unwrap_or_default(),
             album: non_empty_text(&track.metadata.album).unwrap_or_default(),
@@ -85,7 +84,7 @@ impl TrackTableRow {
             year: track.metadata.year,
             bpm: None,
             bitrate_kbps: track.metadata.bitrate_kbps,
-            file_type: AudioFileType::from_path(track.location.relative_path.as_path()),
+            file_type: AudioFileType::from_path(track.location.path()),
             duration_seconds: track
                 .metadata
                 .duration

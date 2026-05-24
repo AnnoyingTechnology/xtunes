@@ -12,7 +12,7 @@ use std::{
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
-pub use sustain_domain::{LibrarySettings, UserSettings};
+pub use sustain_domain::{LibraryManagementMode, LibrarySettings, UserSettings};
 
 pub type SettingsResult<T> = Result<T, SettingsError>;
 
@@ -119,6 +119,16 @@ struct SettingsDocument {
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct LibrarySettingsDocument {
     path: Option<PathBuf>,
+    #[serde(default)]
+    management_mode: LibraryManagementModeDocument,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LibraryManagementModeDocument {
+    #[default]
+    ReferenceFilesInPlace,
+    CopyAddedFilesIntoLibrary,
 }
 
 impl SettingsDocument {
@@ -126,6 +136,9 @@ impl SettingsDocument {
         Self {
             library: LibrarySettingsDocument {
                 path: settings.library.path,
+                management_mode: LibraryManagementModeDocument::from_domain(
+                    settings.library.management_mode,
+                ),
             },
         }
     }
@@ -134,7 +147,24 @@ impl SettingsDocument {
         UserSettings {
             library: LibrarySettings {
                 path: self.library.path,
+                management_mode: self.library.management_mode.into_domain(),
             },
+        }
+    }
+}
+
+impl LibraryManagementModeDocument {
+    fn from_domain(mode: LibraryManagementMode) -> Self {
+        match mode {
+            LibraryManagementMode::ReferenceFilesInPlace => Self::ReferenceFilesInPlace,
+            LibraryManagementMode::CopyAddedFilesIntoLibrary => Self::CopyAddedFilesIntoLibrary,
+        }
+    }
+
+    fn into_domain(self) -> LibraryManagementMode {
+        match self {
+            Self::ReferenceFilesInPlace => LibraryManagementMode::ReferenceFilesInPlace,
+            Self::CopyAddedFilesIntoLibrary => LibraryManagementMode::CopyAddedFilesIntoLibrary,
         }
     }
 }
@@ -143,7 +173,10 @@ impl SettingsDocument {
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use super::{InMemorySettingsStore, SettingsStore, TomlSettingsStore, UserSettings};
+    use super::{
+        InMemorySettingsStore, LibraryManagementMode, SettingsStore, TomlSettingsStore,
+        UserSettings,
+    };
 
     #[test]
     fn in_memory_settings_store_defaults_to_no_library_path() {
@@ -174,10 +207,33 @@ mod tests {
     fn toml_settings_store_saves_and_loads_library_path() {
         let path = unique_settings_path();
         let store = TomlSettingsStore::new(&path);
-        let settings = UserSettings::with_library_path(Some(PathBuf::from("/music")));
+        let mut settings = UserSettings::with_library_path(Some(PathBuf::from("/music")));
+        settings.library.management_mode = LibraryManagementMode::CopyAddedFilesIntoLibrary;
 
         assert_eq!(store.save_settings(settings.clone()), Ok(()));
         assert_eq!(store.load_settings(), Ok(settings));
+
+        let root = path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .expect("test path has two parents");
+        fs::remove_dir_all(root).expect("remove test settings directory");
+    }
+
+    #[test]
+    fn toml_settings_store_defaults_management_mode_when_missing() {
+        let path = unique_settings_path();
+        let store = TomlSettingsStore::new(&path);
+        fs::create_dir_all(path.parent().expect("settings path has parent"))
+            .expect("create settings dir");
+        fs::write(&path, "[library]\npath = \"/music\"\n").expect("write settings");
+
+        let settings = store.load_settings().expect("settings load");
+
+        assert_eq!(
+            settings.library.management_mode,
+            LibraryManagementMode::ReferenceFilesInPlace
+        );
 
         let root = path
             .parent()

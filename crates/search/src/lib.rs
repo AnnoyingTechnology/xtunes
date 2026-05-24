@@ -100,14 +100,7 @@ fn searchable_fields(track: &Track) -> Vec<String> {
     push_optional(&mut fields, &metadata.album_artist);
     push_optional(&mut fields, &metadata.composer);
     push_optional(&mut fields, &metadata.genre);
-    fields.push(
-        track
-            .location
-            .relative_path
-            .as_path()
-            .to_string_lossy()
-            .into_owned(),
-    );
+    fields.push(track.location.path().to_string_lossy().into_owned());
 
     fields
 }
@@ -239,6 +232,7 @@ mod tests {
         Track {
             id: track_id(id),
             location: track_location(&format!("{title}.flac")),
+            content_hash: None,
             metadata: TrackMetadata {
                 title: Some(title.to_owned()),
                 artist: Some(artist.to_owned()),

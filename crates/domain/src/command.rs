@@ -85,6 +85,9 @@ pub enum ApplicationCommand {
     MoveTrackToTrash {
         track_id: TrackId,
     },
+    AddExternalLibraryItems {
+        paths: Vec<PathBuf>,
+    },
     UpdateSettings(UserSettings),
     ScanLibrary {
         library_path: PathBuf,

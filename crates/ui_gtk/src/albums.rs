@@ -274,7 +274,6 @@ impl AlbumsView {
         let button = gtk::Button::new();
         button.add_css_class("album-tile");
         if is_selected {
-            button.add_css_class("album-tile-selected");
             self.selected_tile.replace(Some(button.clone()));
         }
         button.set_child(Some(&content));
@@ -426,7 +425,11 @@ impl AlbumsView {
         else {
             return CachedArtwork::default();
         };
-        let artwork_path = root.join(&track.relative_path);
+        let artwork_path = if track.file_path.is_absolute() {
+            track.file_path.clone()
+        } else {
+            root.join(&track.file_path)
+        };
 
         if let Some(cached) = self.artwork_cache.borrow().get(&artwork_path) {
             return cached.clone();

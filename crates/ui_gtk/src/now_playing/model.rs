@@ -10,8 +10,7 @@ pub(super) fn track_title(track: &Track) -> String {
         .or_else(|| {
             track
                 .location
-                .relative_path
-                .as_path()
+                .path()
                 .file_stem()
                 .and_then(|file_stem| file_stem.to_str())
                 .map(str::trim)

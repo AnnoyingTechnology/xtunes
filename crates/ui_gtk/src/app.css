@@ -251,10 +251,6 @@ button.album-tile:focus {
     box-shadow: none;
 }
 
-button.album-tile-selected {
-    background-color: alpha(@theme_selected_bg_color, 0.18);
-}
-
 .album-cover,
 .album-detail-cover {
     background-color: alpha(@theme_fg_color, 0.10);
@@ -287,7 +283,7 @@ button.album-tile-selected {
 .album-detail {
     background-color: alpha(@theme_fg_color, 0.035);
     border: none;
-    padding: 18px;
+    padding: 32px;
 }
 
 .album-detail-title {

@@ -17,7 +17,7 @@ pub(super) struct AlbumViewModel {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct AlbumTrackViewModel {
     pub(super) id: TrackId,
-    pub(super) relative_path: PathBuf,
+    pub(super) file_path: PathBuf,
     pub(super) title: String,
     pub(super) disc_number: Option<u32>,
     pub(super) track_number: Option<u32>,
@@ -99,7 +99,7 @@ pub(super) fn duration_text(duration_seconds: u64) -> String {
 fn album_track(track: &Track) -> AlbumTrackViewModel {
     AlbumTrackViewModel {
         id: track.id,
-        relative_path: track.location.relative_path.to_path_buf(),
+        file_path: track.location.path().to_path_buf(),
         title: track_title(track),
         disc_number: track.metadata.disc_number,
         track_number: track.metadata.track_number,
@@ -143,8 +143,7 @@ fn track_title(track: &Track) -> String {
         .or_else(|| {
             track
                 .location
-                .relative_path
-                .as_path()
+                .path()
                 .file_stem()
                 .and_then(|file_stem| file_stem.to_str())
                 .map(str::trim)
@@ -206,6 +205,7 @@ mod tests {
         let albums = group_albums(&[Track {
             id: track_id(1),
             location: TrackLocation::available(relative_path("track.flac")),
+            content_hash: None,
             metadata: TrackMetadata::default(),
             rating: Rating::unrated(),
             statistics: PlayStatistics::default(),
@@ -241,6 +241,7 @@ mod tests {
         Track {
             id: track_id(id),
             location: TrackLocation::available(relative_path(path)),
+            content_hash: None,
             metadata: TrackMetadata {
                 title: Some(path.trim_end_matches(".flac").to_owned()),
                 artist: Some(artist.to_owned()),
@@ -258,7 +259,7 @@ mod tests {
     fn album_track(disc_number: Option<u32>, track_number: Option<u32>) -> AlbumTrackViewModel {
         AlbumTrackViewModel {
             id: track_id(1),
-            relative_path: PathBuf::from("track.flac"),
+            file_path: PathBuf::from("track.flac"),
             title: "Track".to_owned(),
             disc_number,
             track_number,

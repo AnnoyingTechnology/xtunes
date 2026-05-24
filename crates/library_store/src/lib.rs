@@ -36,6 +36,7 @@ pub type StoreResult<T> = Result<T, StoreError>;
 pub enum StoreError {
     Database(String),
     InvalidStoredId(i64),
+    InvalidStoredHash(String),
     InvalidStoredPath(String),
     InvalidStoredEnum(String),
     StoreUnavailable,
@@ -49,8 +50,18 @@ impl From<rusqlite::Error> for StoreError {
 
 pub trait LibraryStore: Send + Sync {
     fn save_track(&self, track: Track) -> StoreResult<()>;
+    fn save_tracks(&self, tracks: &[Track]) -> StoreResult<()> {
+        for track in tracks {
+            self.save_track(track.clone())?;
+        }
+        Ok(())
+    }
     fn delete_track(&self, track_id: TrackId) -> StoreResult<()>;
     fn track(&self, track_id: TrackId) -> StoreResult<Option<Track>>;
+    fn track_by_content_hash(
+        &self,
+        content_hash: &sustain_domain::TrackContentHash,
+    ) -> StoreResult<Option<Track>>;
     fn tracks(&self) -> StoreResult<Vec<Track>>;
     fn save_playlist(&self, playlist: Playlist) -> StoreResult<()>;
     fn playlist(&self, playlist_id: PlaylistId) -> StoreResult<Option<Playlist>>;
@@ -148,7 +159,8 @@ impl SqliteLibraryStore {
 
                 CREATE TABLE IF NOT EXISTS tracks (
                     id INTEGER PRIMARY KEY,
-                    relative_path TEXT NOT NULL UNIQUE,
+                    location_kind TEXT NOT NULL,
+                    location_path TEXT NOT NULL,
                     title TEXT,
                     artist TEXT,
                     album TEXT,
@@ -176,8 +188,14 @@ impl SqliteLibraryStore {
                     comments TEXT,
                     sample_rate_hz INTEGER,
                     channels INTEGER,
-                    lyrics TEXT
+                    lyrics TEXT,
+                    content_hash TEXT,
+                    UNIQUE(location_kind, location_path)
                 );
+
+                CREATE INDEX IF NOT EXISTS tracks_content_hash_idx
+                    ON tracks(content_hash)
+                    WHERE content_hash IS NOT NULL;
 
                 CREATE TABLE IF NOT EXISTS playlist_folders (
                     id INTEGER PRIMARY KEY,
@@ -254,116 +272,139 @@ fn default_database_path() -> Option<std::path::PathBuf> {
     })
 }
 
+fn save_track_with_connection(connection: &Connection, track: &Track) -> StoreResult<()> {
+    let metadata = &track.metadata;
+    let statistics = &track.statistics;
+    let location_kind = track.location.file_path.storage_kind();
+    let location_path = track.location.path().to_string_lossy();
+    connection
+        .execute(
+            r#"
+            INSERT INTO tracks (
+                id,
+                location_kind,
+                location_path,
+                title,
+                artist,
+                album,
+                album_artist,
+                composer,
+                genre,
+                track_number,
+                disc_number,
+                year,
+                duration_seconds,
+                bitrate_kbps,
+                rating,
+                play_count,
+                skip_count,
+                last_played_at_unix,
+                last_skipped_at_unix,
+                date_added_at_unix,
+                is_missing,
+                grouping,
+                track_total,
+                disc_total,
+                compilation,
+                bpm,
+                musical_key,
+                comments,
+                sample_rate_hz,
+                channels,
+                lyrics,
+                content_hash
+            )
+            VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+                ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
+                ?31, ?32
+            )
+            ON CONFLICT(id) DO UPDATE SET
+                location_kind = excluded.location_kind,
+                location_path = excluded.location_path,
+                title = excluded.title,
+                artist = excluded.artist,
+                album = excluded.album,
+                album_artist = excluded.album_artist,
+                composer = excluded.composer,
+                genre = excluded.genre,
+                track_number = excluded.track_number,
+                disc_number = excluded.disc_number,
+                year = excluded.year,
+                duration_seconds = excluded.duration_seconds,
+                bitrate_kbps = excluded.bitrate_kbps,
+                rating = excluded.rating,
+                play_count = excluded.play_count,
+                skip_count = excluded.skip_count,
+                last_played_at_unix = excluded.last_played_at_unix,
+                last_skipped_at_unix = excluded.last_skipped_at_unix,
+                date_added_at_unix = excluded.date_added_at_unix,
+                is_missing = excluded.is_missing,
+                grouping = excluded.grouping,
+                track_total = excluded.track_total,
+                disc_total = excluded.disc_total,
+                compilation = excluded.compilation,
+                bpm = excluded.bpm,
+                musical_key = excluded.musical_key,
+                comments = excluded.comments,
+                sample_rate_hz = excluded.sample_rate_hz,
+                channels = excluded.channels,
+                lyrics = excluded.lyrics,
+                content_hash = excluded.content_hash
+            "#,
+            params![
+                track.id.get(),
+                location_kind,
+                location_path,
+                metadata.title.as_deref(),
+                metadata.artist.as_deref(),
+                metadata.album.as_deref(),
+                metadata.album_artist.as_deref(),
+                metadata.composer.as_deref(),
+                metadata.genre.as_deref(),
+                metadata.track_number.map(i64::from),
+                metadata.disc_number.map(i64::from),
+                metadata.year.map(i64::from),
+                metadata.duration.map(duration_to_seconds),
+                metadata.bitrate_kbps.map(i64::from),
+                i64::from(track.rating.stars()),
+                statistics.play_count as i64,
+                statistics.skip_count as i64,
+                statistics.last_played_at.and_then(system_time_to_unix),
+                statistics.last_skipped_at.and_then(system_time_to_unix),
+                statistics.date_added_at.and_then(system_time_to_unix),
+                track.location.is_missing(),
+                metadata.grouping.as_deref(),
+                metadata.track_total.map(i64::from),
+                metadata.disc_total.map(i64::from),
+                metadata.compilation,
+                metadata.bpm.map(i64::from),
+                metadata.key.as_deref(),
+                metadata.comments.as_deref(),
+                metadata.sample_rate_hz.map(i64::from),
+                metadata.channels.map(i64::from),
+                metadata.lyrics.as_deref(),
+                track.content_hash.as_ref().map(|hash| hash.as_str()),
+            ],
+        )
+        .map(|_| ())
+        .map_err(StoreError::from)
+}
+
 impl LibraryStore for SqliteLibraryStore {
     fn save_track(&self, track: Track) -> StoreResult<()> {
-        let metadata = track.metadata;
-        let statistics = track.statistics;
-        self.connection_guard()?
-            .execute(
-                r#"
-                INSERT INTO tracks (
-                    id,
-                    relative_path,
-                    title,
-                    artist,
-                    album,
-                    album_artist,
-                    composer,
-                    genre,
-                    track_number,
-                    disc_number,
-                    year,
-                    duration_seconds,
-                    bitrate_kbps,
-                    rating,
-                    play_count,
-                    skip_count,
-                    last_played_at_unix,
-                    last_skipped_at_unix,
-                    date_added_at_unix,
-                    is_missing,
-                    grouping,
-                    track_total,
-                    disc_total,
-                    compilation,
-                    bpm,
-                    musical_key,
-                    comments,
-                    sample_rate_hz,
-                    channels,
-                    lyrics
-                )
-                VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-                    ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30
-                )
-                ON CONFLICT(id) DO UPDATE SET
-                    relative_path = excluded.relative_path,
-                    title = excluded.title,
-                    artist = excluded.artist,
-                    album = excluded.album,
-                    album_artist = excluded.album_artist,
-                    composer = excluded.composer,
-                    genre = excluded.genre,
-                    track_number = excluded.track_number,
-                    disc_number = excluded.disc_number,
-                    year = excluded.year,
-                    duration_seconds = excluded.duration_seconds,
-                    bitrate_kbps = excluded.bitrate_kbps,
-                    rating = excluded.rating,
-                    play_count = excluded.play_count,
-                    skip_count = excluded.skip_count,
-                    last_played_at_unix = excluded.last_played_at_unix,
-                    last_skipped_at_unix = excluded.last_skipped_at_unix,
-                    date_added_at_unix = excluded.date_added_at_unix,
-                    is_missing = excluded.is_missing,
-                    grouping = excluded.grouping,
-                    track_total = excluded.track_total,
-                    disc_total = excluded.disc_total,
-                    compilation = excluded.compilation,
-                    bpm = excluded.bpm,
-                    musical_key = excluded.musical_key,
-                    comments = excluded.comments,
-                    sample_rate_hz = excluded.sample_rate_hz,
-                    channels = excluded.channels,
-                    lyrics = excluded.lyrics
-                "#,
-                params![
-                    track.id.get(),
-                    track.location.relative_path.as_path().to_string_lossy(),
-                    metadata.title,
-                    metadata.artist,
-                    metadata.album,
-                    metadata.album_artist,
-                    metadata.composer,
-                    metadata.genre,
-                    metadata.track_number.map(i64::from),
-                    metadata.disc_number.map(i64::from),
-                    metadata.year.map(i64::from),
-                    metadata.duration.map(duration_to_seconds),
-                    metadata.bitrate_kbps.map(i64::from),
-                    i64::from(track.rating.stars()),
-                    statistics.play_count as i64,
-                    statistics.skip_count as i64,
-                    statistics.last_played_at.and_then(system_time_to_unix),
-                    statistics.last_skipped_at.and_then(system_time_to_unix),
-                    statistics.date_added_at.and_then(system_time_to_unix),
-                    track.location.is_missing(),
-                    metadata.grouping,
-                    metadata.track_total.map(i64::from),
-                    metadata.disc_total.map(i64::from),
-                    metadata.compilation,
-                    metadata.bpm.map(i64::from),
-                    metadata.key,
-                    metadata.comments,
-                    metadata.sample_rate_hz.map(i64::from),
-                    metadata.channels.map(i64::from),
-                    metadata.lyrics,
-                ],
-            )
-            .map(|_| ())
-            .map_err(StoreError::from)
+        let connection = self.connection_guard()?;
+        save_track_with_connection(&connection, &track)
+    }
+
+    fn save_tracks(&self, tracks: &[Track]) -> StoreResult<()> {
+        let mut connection = self.connection_guard()?;
+        let transaction = connection.transaction().map_err(StoreError::from)?;
+        for track in tracks {
+            save_track_with_connection(&transaction, track)?;
+        }
+        transaction.commit().map_err(StoreError::from)
     }
 
     fn delete_track(&self, track_id: TrackId) -> StoreResult<()> {
@@ -380,7 +421,7 @@ impl LibraryStore for SqliteLibraryStore {
                 r#"
                 SELECT
                     id,
-                    relative_path,
+                    location_path,
                     title,
                     artist,
                     album,
@@ -408,7 +449,9 @@ impl LibraryStore for SqliteLibraryStore {
                     comments,
                     sample_rate_hz,
                     channels,
-                    lyrics
+                    lyrics,
+                    content_hash,
+                    location_kind
                 FROM tracks
                 WHERE id = ?1
                 "#,
@@ -424,14 +467,17 @@ impl LibraryStore for SqliteLibraryStore {
             .transpose()
     }
 
-    fn tracks(&self) -> StoreResult<Vec<Track>> {
+    fn track_by_content_hash(
+        &self,
+        content_hash: &sustain_domain::TrackContentHash,
+    ) -> StoreResult<Option<Track>> {
         let connection = self.connection_guard()?;
         let mut statement = connection
             .prepare(
                 r#"
                 SELECT
                     id,
-                    relative_path,
+                    location_path,
                     title,
                     artist,
                     album,
@@ -459,7 +505,64 @@ impl LibraryStore for SqliteLibraryStore {
                     comments,
                     sample_rate_hz,
                     channels,
-                    lyrics
+                    lyrics,
+                    content_hash,
+                    location_kind
+                FROM tracks
+                WHERE content_hash = ?1
+                ORDER BY id
+                LIMIT 1
+                "#,
+            )
+            .map_err(StoreError::from)?;
+        let mut rows = statement
+            .query(params![content_hash.as_str()])
+            .map_err(StoreError::from)?;
+
+        rows.next()
+            .map_err(StoreError::from)?
+            .map(track_from_row)
+            .transpose()
+    }
+
+    fn tracks(&self) -> StoreResult<Vec<Track>> {
+        let connection = self.connection_guard()?;
+        let mut statement = connection
+            .prepare(
+                r#"
+                SELECT
+                    id,
+                    location_path,
+                    title,
+                    artist,
+                    album,
+                    album_artist,
+                    composer,
+                    genre,
+                    track_number,
+                    disc_number,
+                    year,
+                    duration_seconds,
+                    bitrate_kbps,
+                    rating,
+                    play_count,
+                    skip_count,
+                    last_played_at_unix,
+                    last_skipped_at_unix,
+                    date_added_at_unix,
+                    is_missing,
+                    grouping,
+                    track_total,
+                    disc_total,
+                    compilation,
+                    bpm,
+                    musical_key,
+                    comments,
+                    sample_rate_hz,
+                    channels,
+                    lyrics,
+                    content_hash,
+                    location_kind
                 FROM tracks
                 ORDER BY id
                 "#,
@@ -831,8 +934,8 @@ mod tests {
         PlayStatistics, PlaylistEntry, Rating, SmartPlaylistDateField, SmartPlaylistLimit,
         SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistNumberField,
         SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet,
-        SmartPlaylistTextField, SmartPlaylistTextOperator, SortDirection, TrackLocation,
-        TrackMetadata, TrackRelativePath, TrackSort, TrackSortColumn,
+        SmartPlaylistTextField, SmartPlaylistTextOperator, SortDirection, TrackContentHash,
+        TrackLocation, TrackMetadata, TrackRelativePath, TrackSort, TrackSortColumn,
     };
 
     use super::{
@@ -852,11 +955,16 @@ mod tests {
     #[test]
     fn in_memory_store_saves_and_loads_tracks() {
         let store = InMemoryLibraryStore::new();
-        let track = track(1, "a.flac");
+        let mut track = track(1, "a.flac");
+        track.content_hash = Some(test_hash(1));
 
         assert_eq!(store.save_track(track.clone()), Ok(()));
 
         assert_eq!(store.track(track.id), Ok(Some(track.clone())));
+        assert_eq!(
+            store.track_by_content_hash(track.content_hash.as_ref().expect("hash")),
+            Ok(Some(track.clone()))
+        );
         assert_eq!(store.tracks(), Ok(vec![track]));
     }
 
@@ -910,7 +1018,38 @@ mod tests {
         track.metadata.artist = Some("Artist".to_owned());
         track.metadata.bitrate_kbps = Some(1411);
         track.metadata.duration = Some(std::time::Duration::from_secs(245));
+        track.content_hash = Some(test_hash(42));
         track.rating = Rating::new(4).expect("valid test rating");
+
+        assert_eq!(store.save_track(track.clone()), Ok(()));
+
+        assert_eq!(store.track(track.id), Ok(Some(track.clone())));
+        assert_eq!(
+            store.track_by_content_hash(track.content_hash.as_ref().expect("hash")),
+            Ok(Some(track.clone()))
+        );
+        assert_eq!(store.tracks(), Ok(vec![track]));
+    }
+
+    #[test]
+    fn sqlite_store_rolls_back_batch_track_save_on_failure() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory sqlite store");
+        let first = track(1, "same.flac");
+        let duplicate_relative_path = track(2, "same.flac");
+
+        assert!(
+            store
+                .save_tracks(&[first, duplicate_relative_path])
+                .is_err()
+        );
+        assert_eq!(store.tracks(), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn sqlite_store_preserves_missing_track_location_state() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory sqlite store");
+        let mut track = track(1, "missing.flac");
+        track.location = TrackLocation::missing(relative_path("missing.flac"));
 
         assert_eq!(store.save_track(track.clone()), Ok(()));
 
@@ -919,10 +1058,11 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_store_preserves_missing_track_location_state() {
+    fn sqlite_store_saves_and_loads_external_track_locations() {
         let store = SqliteLibraryStore::open_in_memory().expect("open in-memory sqlite store");
-        let mut track = track(1, "missing.flac");
-        track.location = TrackLocation::missing(relative_path("missing.flac"));
+        let mut track = track(1, "placeholder.flac");
+        track.location = TrackLocation::available_external("/home/user/Music/source.flac")
+            .expect("absolute external path");
 
         assert_eq!(store.save_track(track.clone()), Ok(()));
 
@@ -1355,6 +1495,7 @@ mod tests {
         Track {
             id: track_id(id),
             location: TrackLocation::available(relative_path(path)),
+            content_hash: None,
             metadata: TrackMetadata::default(),
             rating: Rating::unrated(),
             statistics: PlayStatistics::default(),
@@ -1363,6 +1504,10 @@ mod tests {
 
     fn relative_path(path: &str) -> TrackRelativePath {
         TrackRelativePath::new(PathBuf::from(path)).expect("test path is relative")
+    }
+
+    fn test_hash(seed: u8) -> TrackContentHash {
+        TrackContentHash::new(format!("{seed:064x}")).expect("valid test hash")
     }
 
     fn playlist(id: i64, name: &str, entries: Vec<PlaylistEntry>) -> Playlist {

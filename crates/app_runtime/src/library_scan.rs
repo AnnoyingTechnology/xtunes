@@ -121,10 +121,12 @@ fn reconcile_library_scan(
     }
 
     let mut missing_tracks = 0;
-    for track in existing_tracks
-        .into_iter()
-        .filter(|track| !scanned_paths.contains(&track.location.relative_path))
-    {
+    for track in existing_tracks.into_iter().filter(|track| {
+        !track
+            .location
+            .library_relative_path()
+            .is_some_and(|relative_path| scanned_paths.contains(relative_path))
+    }) {
         let track = track_with_current_availability(library_path, track);
         if track.location.is_missing() {
             missing_tracks += 1;
@@ -150,7 +152,10 @@ fn reconcile_library_scan(
 fn tracks_by_path(tracks: Vec<Track>) -> BTreeMap<TrackRelativePath, Track> {
     tracks
         .into_iter()
-        .map(|track| (track.location.relative_path.clone(), track))
+        .filter_map(|track| {
+            let relative_path = track.location.library_relative_path().cloned()?;
+            Some((relative_path, track))
+        })
         .collect()
 }
 
@@ -179,6 +184,7 @@ fn track_from_scanned_track(
     Ok(Track {
         id,
         location: TrackLocation::available(scanned_track.relative_path),
+        content_hash: Some(scanned_track.content_hash),
         metadata: scanned_track.metadata,
         rating: scanned_track.rating,
         statistics,
@@ -189,11 +195,15 @@ pub(super) fn track_with_current_availability(library_path: &Path, track: Track)
     let Track {
         id,
         location,
+        content_hash,
         metadata,
         rating,
         statistics,
     } = track;
-    let availability = if location.absolute_path(library_path).exists() {
+    let availability = if location
+        .absolute_path(Some(library_path))
+        .is_some_and(|path| path.exists())
+    {
         TrackAvailability::Available
     } else {
         TrackAvailability::Missing
@@ -201,10 +211,8 @@ pub(super) fn track_with_current_availability(library_path: &Path, track: Track)
 
     Track {
         id,
-        location: match availability {
-            TrackAvailability::Available => TrackLocation::available(location.relative_path),
-            TrackAvailability::Missing => TrackLocation::missing(location.relative_path),
-        },
+        location: location.with_availability(availability),
+        content_hash,
         metadata,
         rating,
         statistics,
@@ -228,7 +236,7 @@ pub(super) fn load_library_tracks(
     })
 }
 
-fn next_track_id(existing_tracks: &[Track]) -> ApplicationRuntimeResult<i64> {
+pub(super) fn next_track_id(existing_tracks: &[Track]) -> ApplicationRuntimeResult<i64> {
     let next_id = existing_tracks
         .iter()
         .map(|track| track.id.get())

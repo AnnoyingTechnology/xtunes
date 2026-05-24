@@ -14,7 +14,7 @@ pub(crate) fn track_matches_search(track: &Track, search_text: &str) -> bool {
         track.metadata.album_artist.as_deref(),
         track.metadata.composer.as_deref(),
         track.metadata.genre.as_deref(),
-        track.location.relative_path.as_path().to_str(),
+        track.location.path().to_str(),
     ]
     .into_iter()
     .flatten()

@@ -182,6 +182,16 @@ The fuller candidate pattern is:
 $if2(%albumartist%,%artist%)/$if($ne(%albumartist%,),%album%/,)$if($gt(%totaldiscs%,1),%discnumber%-,)$if($ne(%albumartist%,),$num(%tracknumber%,2) ,)$if(%_multiartist%,%artist% - ,)%title%
 ```
 
+When `Keep my library organized` is active, the main songs list must accept
+drag-and-drop from the GNOME file manager as a first-class import path.
+Dropping one or more audio files on the songs list should copy each file
+into the managed library folder (using the active naming template) and
+index it. Once the copy has succeeded, ask the user whether to remove the
+original source files that lived outside the managed library folder.
+Concrete details (folder handling, dedupe rules, prompt defaults, behavior
+of the same gesture under `Don't touch my files`) are to be decided at
+implementation time.
+
 Do not implement managed-library organization in the first stage, but avoid
 scan and database assumptions that would make it painful later. In particular:
 
@@ -689,6 +699,25 @@ back below the danger range so the user cannot casually leave the player at an
 almost-maximum software volume. This protects a clean listening chain from
 unintentional non-unity gain behavior.
 
+## Keyboard Shortcuts
+
+Sustain must be keyboard-driven. The reference is the iTunes shortcut set,
+translated to Linux/GTK conventions (`Ctrl` instead of `Cmd`, GNOME-native
+modifiers). The goal is not a literal port but a familiar muscle-memory
+experience for ex-iTunes users on GNOME.
+
+The first required shortcut is **Jump to Current Track**: a single keypress
+that scrolls the main table to the currently playing track and selects its
+row. iTunes binds this to `Cmd+L`; on Linux this maps to `Ctrl+L`. This is
+the highest-priority shortcut — without it, a large library is unnavigable
+once playback has drifted away from the visible viewport.
+
+A broader shortcut pass for playback, navigation, selection/editing,
+playlists, and window management still needs to be specified. The full
+mapping (iTunes shortcuts → Linux/GTK equivalents, conflicts with GNOME
+conventions, in-app shortcut discoverability) is to be decided when that
+pass is scheduled.
+
 ## Later Statistics Views
 
 Add one or two library statistics views after the core table, playlist, search,
@@ -907,6 +936,88 @@ This feature is out of scope for the first vertical slice and should not be
 attempted before regular playback, ratings, play statistics, and playlist
 behavior are solid.
 
+## Deferred Feature Backlog
+
+The `README.md` feature list advertises a set of "_probably_ coming later"
+capabilities. The ones with their own dedicated sections in this plan
+(`## Duplicate Consolidation`, `## Metadata Backfill`, `## Smart Shuffle`)
+are tracked there. The remainder is consolidated here so the plan covers
+everything the README promises — none of these are first-vertical-slice
+material, but they must not be lost.
+
+### Library import (iTunes / Apple Music `.xml`, Rhythmbox)
+
+Importers are explicitly deferred. The product-level rationale is that early
+adopters can credibly use an LLM coding agent (Claude, Codex, etc.) to write
+a one-off importer against their specific source library, so we must not
+spend a significant slice of the first releases building polished import UIs.
+
+When we do invest engineering time, the shape should be a **CLI importer
+bundled with Sustain** rather than an in-app workflow — a GUI dialog can
+come later once the CLI path is solid. Concrete delivery shape (subcommand
+of `sustain` vs sibling binary, exact flags, etc.) is to be decided at
+implementation time.
+
+### Audio analysis (BPM detection, musical key detection)
+
+The library schema and table view already expose a BPM column, and BPM is
+cited as a Smart Shuffle input. What is missing is the **detection**
+pipeline itself: an offline analysis pass that populates BPM and musical key
+for tracks that lack them. Concrete shape (library/tool used, threading,
+how results are surfaced) is to be decided at implementation time.
+
+### Sync to Android / Export to XDJ (iPod-style device sync)
+
+Sync a selected set of playlists from the library to an external device.
+Two concrete targets:
+
+- Android phones/tablets
+- Pioneer XDJ controllers, in the spirit of the existing
+  [`rhythmbox-to-pioneer-xdj-exporter`](https://github.com/AnnoyingTechnology/rhythmbox-to-pioneer-xdj-exporter)
+  project
+
+Both are essentially the same workflow shape — the same one users used to
+get from iTunes for iPod sync: a GUI panel to pick which playlists go to
+the device, the player computes what needs to be written/removed, the user
+confirms. This is GUI-driven, not CLI-first. Concrete shape (transport per
+device, conflict handling, the panel UI itself) is to be decided at
+implementation time.
+
+One requirement is concrete already: Sustain must be able to reliably
+**recognise devices it has seen before** and recall the set of playlists
+that were ticked for each one, so the sync panel can come back up
+pre-populated instead of starting empty every time.
+
+The device itself only carries half of that information:
+
+- An XDJ USB drive carries the Pioneer `.pdb` database, which tells us
+  what tracks/playlists currently live on the drive — but not which
+  playlists the user had ticked in Sustain's sync panel for that drive.
+- An Android device exposes the files that are present on it, with the
+  same gap: we can see what's there, not what the user originally
+  selected.
+
+So the user-selection state has to live in Sustain, keyed by a stable
+identifier for the device. The best/most solid options for that
+identifier (USB serial, volume UUID, MTP device ID, fingerprint of the
+on-device database, etc.) and the storage shape for the cache are to be
+investigated at implementation time.
+
+### CD encoding
+
+Rip an audio CD into the library. Concrete shape (disc access library,
+metadata lookup source, default encoding format, placement in the library)
+is to be decided at implementation time.
+
+### Library format conversion
+
+Replace tracks in the library with a re-encoded copy in a different format —
+mainly to replace bulky WAV files with something lighter (e.g. FLAC, or
+MP3 320 kbps). The source files **are deleted** as part of the operation;
+this is a replace, not a duplicate. Concrete shape (selection UI, target
+format picker, batching, metadata preservation across the re-encode) is to
+be decided at implementation time.
+
 ## Developer Isolation (CLI Data Paths)
 
 Once Sustain is installed system-wide (e.g. via `.deb`), a developer working on
@@ -965,6 +1076,20 @@ Target Debian as the primary distribution platform. The project should produce a
 `.deb` package that installs cleanly on Debian stable and Ubuntu LTS without
 requiring users to build from source or add third-party repositories.
 
+Debian is not a generic deployment target — it is the maintainer's daily-driver
+distribution (Debian testing) and Sustain is intended to be their everyday
+music player. Two consequences flow from that:
+
+1. **An easy local-package path is required from day one.** The maintainer
+   must be able to produce an installable `.deb` of the current working
+   tree on their own machine without friction. The existing
+   `[package.metadata.deb]` block in `crates/app/Cargo.toml` is the
+   starting point.
+2. **Distribution through Debian's official channels is an explicit goal,
+   not an afterthought.** The packaging must be shaped so it can plausibly
+   reach the official Debian archive. Concrete process and policy
+   compliance details are to be worked out when we get there.
+
 Package deliverables:
 
 - a `debian/` directory with standard packaging metadata (`control`, `rules`,
@@ -981,3 +1106,8 @@ custom install scripts when standard `dh_install` suffices.
 Ubuntu compatibility should follow naturally from targeting Debian, but do not
 add Ubuntu-specific patches or PPA infrastructure in the first pass. A clean
 Debian source package that builds on both is the goal.
+
+## Pre-Release Security Audit
+
+A security audit of the codebase by LLM coding agents (Codex and Claude,
+run independently) is a hard gate before any public release.

@@ -57,6 +57,14 @@ impl LibraryStore for InMemoryLibraryStore {
         Ok(())
     }
 
+    fn save_tracks(&self, tracks: &[Track]) -> StoreResult<()> {
+        let mut stored_tracks = self.tracks_guard()?;
+        for track in tracks {
+            stored_tracks.insert(track.id, track.clone());
+        }
+        Ok(())
+    }
+
     fn delete_track(&self, track_id: TrackId) -> StoreResult<()> {
         let mut tracks = self.tracks_guard()?;
         tracks.remove(&track_id);
@@ -69,6 +77,17 @@ impl LibraryStore for InMemoryLibraryStore {
 
     fn track(&self, track_id: TrackId) -> StoreResult<Option<Track>> {
         Ok(self.tracks_guard()?.get(&track_id).cloned())
+    }
+
+    fn track_by_content_hash(
+        &self,
+        content_hash: &sustain_domain::TrackContentHash,
+    ) -> StoreResult<Option<Track>> {
+        Ok(self
+            .tracks_guard()?
+            .values()
+            .find(|track| track.content_hash.as_ref() == Some(content_hash))
+            .cloned())
     }
 
     fn tracks(&self) -> StoreResult<Vec<Track>> {
