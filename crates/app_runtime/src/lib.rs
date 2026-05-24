@@ -502,7 +502,7 @@ mod tests {
             (
                 ApplicationCommand::UpdateMetadata {
                     track_id,
-                    change: metadata_change.clone(),
+                    change: Box::new(metadata_change.clone()),
                 },
                 Err(ApplicationRuntimeError::LibraryServicesUnavailable),
             ),
@@ -1046,7 +1046,7 @@ mod tests {
         assert_eq!(
             runtime.handle_command(ApplicationCommand::UpdateMetadata {
                 track_id,
-                change: change.clone(),
+                change: Box::new(change.clone()),
             }),
             Ok(())
         );
@@ -1099,7 +1099,7 @@ mod tests {
         assert_eq!(
             runtime.handle_command(ApplicationCommand::UpdateMetadata {
                 track_id,
-                change: change.clone(),
+                change: Box::new(change.clone()),
             }),
             Err(ApplicationRuntimeError::MetadataWriteFailed)
         );

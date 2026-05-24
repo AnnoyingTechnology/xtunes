@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 AnnoyingTechnology
+
+use sustain_app_runtime::FieldChange;
+
+pub(super) fn text_diff(initial: Option<&str>, current: &str) -> FieldChange<String> {
+    let trimmed_current = current.trim();
+    match (initial, trimmed_current) {
+        (Some(value), candidate) if value == candidate => FieldChange::Unchanged,
+        (None, "") => FieldChange::Unchanged,
+        (_, "") => FieldChange::Clear,
+        (_, candidate) => FieldChange::Set(candidate.to_owned()),
+    }
+}
+
+/// Like `text_diff` but preserves internal whitespace (newlines, indentation).
+/// Used for free-form prose fields like lyrics where formatting matters.
+/// Empty/whitespace-only buffers still clear the tag.
+pub(super) fn text_diff_preserve_newlines(
+    initial: Option<&str>,
+    current: &str,
+) -> FieldChange<String> {
+    let trimmed = current.trim();
+    match (initial, trimmed) {
+        (None, "") => FieldChange::Unchanged,
+        (_, "") => FieldChange::Clear,
+        (Some(value), _) if value == current => FieldChange::Unchanged,
+        _ => FieldChange::Set(current.to_owned()),
+    }
+}
+
+pub(super) fn number_diff(initial: Option<u32>, current: &str) -> FieldChange<u32> {
+    let trimmed = current.trim();
+    if trimmed.is_empty() {
+        return if initial.is_some() {
+            FieldChange::Clear
+        } else {
+            FieldChange::Unchanged
+        };
+    }
+    let Ok(parsed) = trimmed.parse::<u32>() else {
+        return FieldChange::Unchanged;
+    };
+    if Some(parsed) == initial {
+        FieldChange::Unchanged
+    } else {
+        FieldChange::Set(parsed)
+    }
+}
+
+pub(super) fn signed_number_diff(initial: Option<i32>, current: &str) -> FieldChange<i32> {
+    let trimmed = current.trim();
+    if trimmed.is_empty() {
+        return if initial.is_some() {
+            FieldChange::Clear
+        } else {
+            FieldChange::Unchanged
+        };
+    }
+    let Ok(parsed) = trimmed.parse::<i32>() else {
+        return FieldChange::Unchanged;
+    };
+    if Some(parsed) == initial {
+        FieldChange::Unchanged
+    } else {
+        FieldChange::Set(parsed)
+    }
+}
+
+pub(super) fn bool_diff(initial: Option<bool>, current: bool) -> FieldChange<bool> {
+    if initial.unwrap_or(false) == current {
+        FieldChange::Unchanged
+    } else {
+        FieldChange::Set(current)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        bool_diff, number_diff, signed_number_diff, text_diff, text_diff_preserve_newlines,
+    };
+    use sustain_app_runtime::FieldChange;
+
+    #[test]
+    fn text_diff_preserves_unchanged_value() {
+        assert_eq!(text_diff(Some("hello"), "hello"), FieldChange::Unchanged);
+        assert_eq!(text_diff(None, ""), FieldChange::Unchanged);
+    }
+
+    #[test]
+    fn text_diff_clears_when_field_emptied() {
+        assert_eq!(text_diff(Some("hello"), ""), FieldChange::Clear);
+        assert_eq!(text_diff(Some("hello"), "   "), FieldChange::Clear);
+    }
+
+    #[test]
+    fn text_diff_sets_when_value_changes() {
+        assert_eq!(text_diff(Some("a"), "b"), FieldChange::Set("b".to_owned()));
+        assert_eq!(text_diff(None, "b"), FieldChange::Set("b".to_owned()));
+    }
+
+    #[test]
+    fn number_diff_handles_empty_and_invalid_inputs() {
+        assert_eq!(number_diff(None, ""), FieldChange::Unchanged);
+        assert_eq!(number_diff(Some(3), ""), FieldChange::Clear);
+        assert_eq!(number_diff(Some(3), "abc"), FieldChange::Unchanged);
+        assert_eq!(number_diff(Some(3), "3"), FieldChange::Unchanged);
+        assert_eq!(number_diff(Some(3), "4"), FieldChange::Set(4));
+    }
+
+    #[test]
+    fn signed_number_diff_handles_negatives() {
+        assert_eq!(signed_number_diff(Some(2000), "-1"), FieldChange::Set(-1));
+        assert_eq!(signed_number_diff(None, "1998"), FieldChange::Set(1998));
+        assert_eq!(signed_number_diff(Some(1998), ""), FieldChange::Clear);
+    }
+
+    #[test]
+    fn bool_diff_treats_none_as_false_baseline() {
+        assert_eq!(bool_diff(None, false), FieldChange::Unchanged);
+        assert_eq!(bool_diff(None, true), FieldChange::Set(true));
+        assert_eq!(bool_diff(Some(true), false), FieldChange::Set(false));
+        assert_eq!(bool_diff(Some(true), true), FieldChange::Unchanged);
+    }
+
+    #[test]
+    fn text_diff_preserve_newlines_keeps_internal_whitespace() {
+        assert_eq!(
+            text_diff_preserve_newlines(None, "line one\n\nline two"),
+            FieldChange::Set("line one\n\nline two".to_owned())
+        );
+        assert_eq!(
+            text_diff_preserve_newlines(Some("a\nb"), "a\nb"),
+            FieldChange::Unchanged
+        );
+        assert_eq!(
+            text_diff_preserve_newlines(Some("a\nb"), "  \n  \n"),
+            FieldChange::Clear
+        );
+        assert_eq!(
+            text_diff_preserve_newlines(None, ""),
+            FieldChange::Unchanged
+        );
+    }
+}

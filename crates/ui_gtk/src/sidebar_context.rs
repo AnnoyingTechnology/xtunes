@@ -12,33 +12,33 @@ pub(crate) const NEW_SMART_PLAYLIST_DEFAULT_NAME: &str = "untitled smart playlis
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SidebarContextAction {
-    NewPlaylist,
-    NewSmartPlaylist,
-    NewPlaylistFolder,
+    Playlist,
+    SmartPlaylist,
+    PlaylistFolder,
 }
 
 impl SidebarContextAction {
     fn label(self) -> &'static str {
         match self {
-            Self::NewPlaylist => "New Playlist",
-            Self::NewSmartPlaylist => "New Smart Playlist\u{2026}",
-            Self::NewPlaylistFolder => "New Playlist Folder",
+            Self::Playlist => "New Playlist",
+            Self::SmartPlaylist => "New Smart Playlist\u{2026}",
+            Self::PlaylistFolder => "New Playlist Folder",
         }
     }
 
     fn css_class(self) -> &'static str {
         match self {
-            Self::NewPlaylist => "sidebar-context-new-playlist",
-            Self::NewSmartPlaylist => "sidebar-context-new-smart-playlist",
-            Self::NewPlaylistFolder => "sidebar-context-new-playlist-folder",
+            Self::Playlist => "sidebar-context-new-playlist",
+            Self::SmartPlaylist => "sidebar-context-new-smart-playlist",
+            Self::PlaylistFolder => "sidebar-context-new-playlist-folder",
         }
     }
 }
 
 const SIDEBAR_CONTEXT_ACTIONS: &[SidebarContextAction] = &[
-    SidebarContextAction::NewPlaylist,
-    SidebarContextAction::NewSmartPlaylist,
-    SidebarContextAction::NewPlaylistFolder,
+    SidebarContextAction::Playlist,
+    SidebarContextAction::SmartPlaylist,
+    SidebarContextAction::PlaylistFolder,
 ];
 
 pub(crate) type SidebarActionCallback = Rc<dyn Fn(SidebarContextAction)>;
@@ -179,13 +179,13 @@ mod tests {
 
     #[test]
     fn action_labels_match_the_product_contract() {
-        assert_eq!(SidebarContextAction::NewPlaylist.label(), "New Playlist");
+        assert_eq!(SidebarContextAction::Playlist.label(), "New Playlist");
         assert_eq!(
-            SidebarContextAction::NewSmartPlaylist.label(),
+            SidebarContextAction::SmartPlaylist.label(),
             "New Smart Playlist\u{2026}"
         );
         assert_eq!(
-            SidebarContextAction::NewPlaylistFolder.label(),
+            SidebarContextAction::PlaylistFolder.label(),
             "New Playlist Folder"
         );
     }

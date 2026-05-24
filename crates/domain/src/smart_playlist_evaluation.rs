@@ -3,7 +3,7 @@
 
 use std::{
     cmp::Reverse,
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
@@ -26,7 +26,7 @@ pub fn matching_tracks<'a>(
         .collect();
 
     if let Some(limit) = rules.limit {
-        apply_limit(&mut matched, limit);
+        apply_limit(&mut matched, limit, now);
     }
 
     matched
@@ -181,15 +181,20 @@ fn evaluate_number(
     }
 }
 
-fn apply_limit(tracks: &mut Vec<&Track>, limit: SmartPlaylistLimit) {
-    sort_for_selection(tracks, limit.selection);
+fn apply_limit(tracks: &mut Vec<&Track>, limit: SmartPlaylistLimit, now: SystemTime) {
+    sort_for_selection(tracks, limit.selection, now);
     tracks.truncate(limit.count.get() as usize);
 }
 
-fn sort_for_selection(tracks: &mut [&Track], selection: SmartPlaylistLimitSelection) {
+fn sort_for_selection(
+    tracks: &mut [&Track],
+    selection: SmartPlaylistLimitSelection,
+    now: SystemTime,
+) {
     match selection {
         SmartPlaylistLimitSelection::Random => {
-            tracks.sort_by_key(|track| track.id.get());
+            let seed = random_seed(now);
+            tracks.sort_by_key(|track| pseudo_random_key(track.id.get(), seed));
         }
         SmartPlaylistLimitSelection::TitleAscending => {
             tracks.sort_by(|left, right| {
@@ -244,6 +249,25 @@ fn sort_for_selection(tracks: &mut [&Track], selection: SmartPlaylistLimitSelect
 
 fn ci_string(value: Option<&str>) -> String {
     value.unwrap_or("").to_lowercase()
+}
+
+fn random_seed(now: SystemTime) -> u64 {
+    let nanos = now
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    (nanos as u64) ^ ((nanos >> 64) as u64)
+}
+
+fn pseudo_random_key(track_id: i64, seed: u64) -> u64 {
+    splitmix64((track_id as u64) ^ seed)
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
 }
 
 #[cfg(test)]
@@ -510,5 +534,39 @@ mod tests {
         let matched_ids: Vec<i64> = matched.iter().map(|track| track.id.get()).collect();
 
         assert_eq!(matched_ids, vec![2, 3, 1]);
+    }
+
+    #[test]
+    fn random_limit_order_is_seeded_by_the_injected_clock() {
+        let tracks = vec![
+            track(1, Some("Jazz"), 0, None),
+            track(2, Some("Jazz"), 0, None),
+            track(3, Some("Jazz"), 0, None),
+            track(4, Some("Jazz"), 0, None),
+            track(5, Some("Jazz"), 0, None),
+        ];
+        let rules = SmartPlaylistRuleSet {
+            match_kind: SmartPlaylistMatchKind::All,
+            rules: vec![SmartPlaylistRule::Text {
+                field: SmartPlaylistTextField::Genre,
+                operator: SmartPlaylistTextOperator::Is,
+                value: "Jazz".to_owned(),
+            }],
+            limit: Some(SmartPlaylistLimit {
+                count: NonZeroU32::new(5).expect("positive count"),
+                selection: SmartPlaylistLimitSelection::Random,
+            }),
+        };
+
+        let first = matching_tracks(&tracks, &rules, unix(2_000));
+        let second = matching_tracks(&tracks, &rules, unix(2_000));
+        let later = matching_tracks(&tracks, &rules, unix(2_001));
+        let first_ids: Vec<i64> = first.iter().map(|track| track.id.get()).collect();
+        let second_ids: Vec<i64> = second.iter().map(|track| track.id.get()).collect();
+        let later_ids: Vec<i64> = later.iter().map(|track| track.id.get()).collect();
+
+        assert_eq!(first_ids, second_ids);
+        assert_ne!(first_ids, vec![1, 2, 3, 4, 5]);
+        assert_ne!(first_ids, later_ids);
     }
 }

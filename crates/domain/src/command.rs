@@ -70,7 +70,7 @@ pub enum ApplicationCommand {
     },
     UpdateMetadata {
         track_id: TrackId,
-        change: MetadataChange,
+        change: Box<MetadataChange>,
     },
     ResetPlayCount {
         track_id: TrackId,

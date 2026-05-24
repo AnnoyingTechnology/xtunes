@@ -109,7 +109,7 @@ impl ApplicationRuntime {
                 self.move_playlist_item(item, target_parent_folder_id, position)?;
             }
             ApplicationCommand::UpdateMetadata { track_id, change } => {
-                self.update_metadata(track_id, change)?;
+                self.update_metadata(track_id, *change)?;
             }
             ApplicationCommand::ResetPlayCount { track_id } => {
                 self.reset_play_count(track_id)?;

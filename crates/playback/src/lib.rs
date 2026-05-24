@@ -133,12 +133,9 @@ impl GStreamerPlaybackService {
             .build()
             .map_err(|_| PlaybackError::BackendUnavailable)?;
 
-        let on_track_ended: Rc<RefCell<Option<TrackEndedCallback>>> =
-            Rc::new(RefCell::new(None));
+        let on_track_ended: Rc<RefCell<Option<TrackEndedCallback>>> = Rc::new(RefCell::new(None));
 
-        let bus = playbin
-            .bus()
-            .ok_or(PlaybackError::BackendUnavailable)?;
+        let bus = playbin.bus().ok_or(PlaybackError::BackendUnavailable)?;
         let on_eos = on_track_ended.clone();
         let bus_watch = bus
             .add_watch_local(move |_bus, message| {

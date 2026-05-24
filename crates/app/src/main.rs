@@ -9,7 +9,9 @@ fn main() {
     let settings_store = match sustain_settings::TomlSettingsStore::open_default() {
         Ok(store) => store,
         Err(error) => {
-            eprintln!("Sustain: config directory unavailable ({error:?}). Cannot persist settings.");
+            eprintln!(
+                "Sustain: config directory unavailable ({error:?}). Cannot persist settings."
+            );
             process::exit(1);
         }
     };

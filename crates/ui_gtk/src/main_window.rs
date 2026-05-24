@@ -332,7 +332,7 @@ fn sidebar_action_callback(
     let sidebar = sidebar.clone();
 
     Rc::new(move |action| match action {
-        SidebarContextAction::NewPlaylist => {
+        SidebarContextAction::Playlist => {
             let (existing_ids, existing_names): (HashSet<PlaylistId>, Vec<String>) = {
                 let runtime = runtime.borrow();
                 let ids = runtime.playlists().iter().map(|p| p.id).collect();
@@ -360,7 +360,7 @@ fn sidebar_action_callback(
                 sidebar.refresh();
             }
         }
-        SidebarContextAction::NewPlaylistFolder => {
+        SidebarContextAction::PlaylistFolder => {
             let existing_names: Vec<String> = runtime
                 .borrow()
                 .playlist_folders()
@@ -375,7 +375,7 @@ fn sidebar_action_callback(
                 sidebar.refresh();
             }
         }
-        SidebarContextAction::NewSmartPlaylist => {
+        SidebarContextAction::SmartPlaylist => {
             let existing_names: Vec<String> = runtime
                 .borrow()
                 .smart_playlists()
@@ -960,7 +960,7 @@ fn track_mutation_callback(
     Rc::new(move |track_ids: Vec<TrackId>| {
         let commands = track_ids
             .into_iter()
-            .map(|track_id| command_builder(track_id))
+            .map(&command_builder)
             .collect::<Vec<_>>();
         let result = command_controller.dispatch_batch(commands);
         if result.succeeded == 0 {
