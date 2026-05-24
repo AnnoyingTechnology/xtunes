@@ -81,6 +81,7 @@ pub(crate) fn build_main_window(
     ));
 
     let songs_table_holder: Rc<RefCell<Option<TrackTable>>> = Rc::new(RefCell::new(None));
+    let albums_view_holder: Rc<RefCell<Option<AlbumsView>>> = Rc::new(RefCell::new(None));
 
     let now_playing = NowPlayingView::new(runtime.clone(), command_controller.clone());
     let titlebar = build_titlebar(now_playing.widget());
@@ -89,6 +90,7 @@ pub(crate) fn build_main_window(
         &now_playing,
         &titlebar,
         songs_table_holder.clone(),
+        albums_view_holder.clone(),
     );
     connect_titlebar_playback_controls(
         &titlebar,
@@ -158,6 +160,7 @@ pub(crate) fn build_main_window(
         playback_changed.clone(),
         context_menu,
     );
+    albums_view_holder.replace(Some(albums_view.clone()));
     let playlists_table = build_track_table(
         Vec::new(),
         Some(track_activated.clone()),
@@ -766,6 +769,7 @@ fn playback_changed_callback(
     now_playing: &NowPlayingView,
     titlebar: &Titlebar,
     songs_table_holder: Rc<RefCell<Option<TrackTable>>>,
+    albums_view_holder: Rc<RefCell<Option<AlbumsView>>>,
 ) -> PlaybackChangedCallback {
     let runtime = runtime.clone();
     let now_playing = now_playing.clone();
@@ -777,6 +781,9 @@ fn playback_changed_callback(
         let playing_track_id = now_playing_state.track.as_ref().map(|track| track.id);
         if let Some(songs_table) = songs_table_holder.borrow().as_ref() {
             songs_table.set_playing_track_id(playing_track_id);
+        }
+        if let Some(albums_view) = albums_view_holder.borrow().as_ref() {
+            albums_view.set_playing_track_id(playing_track_id);
         }
         now_playing.refresh(&now_playing_state);
     })

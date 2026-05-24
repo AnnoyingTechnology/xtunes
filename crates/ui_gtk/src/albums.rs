@@ -16,12 +16,11 @@ use super::{
     PlaybackChangedCallback, SharedRuntime, artwork_color::ArtworkPalette,
     command_controller::SharedCommandController, track_context::TrackRowContextMenu,
 };
-use model::{
-    AlbumTrackViewModel, AlbumViewModel, album_subtitle, duration_text, group_albums,
-    track_number_text,
-};
+use model::{AlbumViewModel, album_subtitle, group_albums};
+use track_list::AlbumTrackListView;
 
 mod model;
+mod track_list;
 
 #[derive(Clone)]
 pub(crate) struct AlbumsView {
@@ -37,23 +36,8 @@ pub(crate) struct AlbumsView {
     visible_columns: Rc<Cell<usize>>,
     last_width: Rc<Cell<i32>>,
     artwork_cache: Rc<RefCell<BTreeMap<PathBuf, CachedArtwork>>>,
-}
-
-fn install_track_row_context_menu(
-    widget: &impl IsA<gtk::Widget>,
-    track_id: TrackId,
-    context_menu: &TrackRowContextMenu,
-) {
-    let gesture = gtk::GestureClick::new();
-    gesture.set_button(gdk::BUTTON_SECONDARY);
-    gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
-
-    let context = context_menu.clone();
-    let anchor = widget.as_ref().clone();
-    gesture.connect_pressed(move |_gesture, _n_press, x, y| {
-        context.popup_at(vec![track_id], &anchor, x, y);
-    });
-    widget.as_ref().add_controller(gesture);
+    playing_track_id: Rc<Cell<Option<TrackId>>>,
+    live_track_lists: Rc<RefCell<Vec<AlbumTrackListView>>>,
 }
 
 #[derive(Clone, Default)]
@@ -118,6 +102,8 @@ impl AlbumsView {
             visible_columns: Rc::new(Cell::new(1)),
             last_width: Rc::new(Cell::new(0)),
             artwork_cache: Rc::new(RefCell::new(BTreeMap::new())),
+            playing_track_id: Rc::new(Cell::new(None)),
+            live_track_lists: Rc::new(RefCell::new(Vec::new())),
         };
         view.replace_tracks(view.runtime.borrow().library_tracks().to_vec());
         view.install_width_watcher();
@@ -135,6 +121,16 @@ impl AlbumsView {
         self.visible_columns
             .set(columns_for_width(self.scroller.allocated_width()));
         self.rebuild();
+    }
+
+    pub(crate) fn set_playing_track_id(&self, playing_track_id: Option<TrackId>) {
+        if self.playing_track_id.get() == playing_track_id {
+            return;
+        }
+        self.playing_track_id.set(playing_track_id);
+        for list in self.live_track_lists.borrow().iter() {
+            list.set_playing_track_id(playing_track_id);
+        }
     }
 
     /// Selects the album containing the given track, expands its detail panel,
@@ -234,6 +230,7 @@ impl AlbumsView {
         // update of the grid instead of a full clear-and-rebuild on
         // every selection change.
         self.selected_tile.replace(None);
+        self.live_track_lists.borrow_mut().clear();
         clear_container(&self.container);
 
         let albums = self.albums.borrow().clone();
@@ -355,7 +352,12 @@ impl AlbumsView {
         selected_column: usize,
         columns: usize,
     ) -> gtk::Overlay {
-        let content = gtk::Box::new(gtk::Orientation::Horizontal, 18);
+        // Spacing here is the gap between the title-block / track-lists
+        // column on the left and the artwork column on the right. Kept in
+        // sync with the inter-column spacing of `lists` so the
+        // right-half track column sits the same distance from the
+        // artwork as the two track columns sit from each other.
+        let content = gtk::Box::new(gtk::Orientation::Horizontal, 40);
         content.add_css_class("album-detail");
         content.set_hexpand(true);
         let artwork = self.album_artwork(album);
@@ -385,7 +387,7 @@ impl AlbumsView {
             "album-detail-palette-primary",
         );
         title.set_xalign(0.0);
-        title.set_hexpand(true);
+        title.set_hexpand(false);
         title.set_wrap(true);
         header.append(&title);
 
@@ -420,6 +422,13 @@ impl AlbumsView {
         });
         header.append(&shuffle_button);
 
+        // Trailing spacer absorbs the rest of the header row so title +
+        // buttons pile up at the start instead of buttons being pushed
+        // against the right edge by an hexpanding title.
+        let header_spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        header_spacer.set_hexpand(true);
+        header.append(&header_spacer);
+
         title_block.append(&header);
 
         let subtitle = gtk::Label::new(Some(&album_subtitle(album)));
@@ -433,8 +442,8 @@ impl AlbumsView {
         title_block.append(&subtitle);
         left.append(&title_block);
 
-        let track_lists = album_track_lists(album, palette_provider.as_ref(), &self.context_menu);
-        track_lists.set_margin_top(4);
+        let track_lists = self.album_track_lists(album, palette_provider.as_ref());
+        track_lists.set_margin_top(14);
         left.append(&track_lists);
 
         let artwork_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -480,6 +489,51 @@ impl AlbumsView {
         content.append(&artwork_column);
 
         shell
+    }
+
+    fn album_track_lists(
+        &self,
+        album: &AlbumViewModel,
+        palette_provider: Option<&gtk::CssProvider>,
+    ) -> gtk::Box {
+        let lists = gtk::Box::new(gtk::Orientation::Horizontal, 40);
+        lists.add_css_class("album-track-lists");
+        lists.set_hexpand(true);
+
+        let split_index = album.tracks.len().div_ceil(2);
+        let playing_track_id = self.playing_track_id.get();
+
+        let left = AlbumTrackListView::new(
+            &album.tracks[..split_index],
+            palette_provider,
+            self.context_menu.clone(),
+            self.command_controller.clone(),
+            self.playback_changed.clone(),
+            playing_track_id,
+        );
+        let right = AlbumTrackListView::new(
+            &album.tracks[split_index..],
+            palette_provider,
+            self.context_menu.clone(),
+            self.command_controller.clone(),
+            self.playback_changed.clone(),
+            playing_track_id,
+        );
+
+        let left_widget = left.widget();
+        let right_widget = right.widget();
+        left_widget.set_hexpand(true);
+        right_widget.set_hexpand(true);
+
+        {
+            let mut live = self.live_track_lists.borrow_mut();
+            live.push(left);
+            live.push(right);
+        }
+
+        lists.append(&left_widget);
+        lists.append(&right_widget);
+        lists
     }
 
     fn album_artwork(&self, album: &AlbumViewModel) -> CachedArtwork {
@@ -732,6 +786,14 @@ fn album_detail_palette_css(palette: ArtworkPalette) -> String {
         button.album-detail-palette-button:focus {{
             background-color: alpha({foreground}, 0.14);
         }}
+
+        .album-track-table .track-table-status-playing {{
+            color: {foreground};
+        }}
+
+        listview.album-track-table > row:focus-visible {{
+            outline-color: {foreground};
+        }}
         "#,
     )
 }
@@ -742,7 +804,7 @@ fn detail_icon_button(
     palette_provider: Option<&gtk::CssProvider>,
 ) -> gtk::Button {
     let icon = gtk::Image::from_icon_name(icon_name);
-    icon.set_pixel_size(14);
+    icon.set_pixel_size(18);
     apply_palette_style(&icon, palette_provider, "album-detail-palette-primary");
 
     let button = gtk::Button::new();
@@ -752,77 +814,6 @@ fn detail_icon_button(
     button.set_tooltip_text(Some(tooltip));
     button.set_valign(gtk::Align::Center);
     button
-}
-
-fn album_track_lists(
-    album: &AlbumViewModel,
-    palette_provider: Option<&gtk::CssProvider>,
-    context_menu: &TrackRowContextMenu,
-) -> gtk::Box {
-    let lists = gtk::Box::new(gtk::Orientation::Horizontal, 24);
-    lists.add_css_class("album-track-lists");
-    lists.set_hexpand(true);
-
-    let split_index = album.tracks.len().div_ceil(2);
-    let left = track_list_column(&album.tracks[..split_index], palette_provider, context_menu);
-    let right = track_list_column(&album.tracks[split_index..], palette_provider, context_menu);
-    lists.append(&left);
-    lists.append(&right);
-    lists
-}
-
-fn track_list_column(
-    tracks: &[AlbumTrackViewModel],
-    palette_provider: Option<&gtk::CssProvider>,
-    context_menu: &TrackRowContextMenu,
-) -> gtk::Grid {
-    let grid = gtk::Grid::new();
-    grid.add_css_class("album-track-list");
-    grid.set_column_spacing(10);
-    grid.set_row_spacing(2);
-    grid.set_column_homogeneous(false);
-    grid.set_hexpand(true);
-
-    for (index, track) in tracks.iter().enumerate() {
-        attach_track_row(&grid, track, index as i32, palette_provider, context_menu);
-    }
-
-    grid
-}
-
-fn attach_track_row(
-    grid: &gtk::Grid,
-    track: &AlbumTrackViewModel,
-    row: i32,
-    palette_provider: Option<&gtk::CssProvider>,
-    context_menu: &TrackRowContextMenu,
-) {
-    let number = gtk::Label::new(Some(&track_number_text(track)));
-    number.add_css_class("album-track-number");
-    apply_palette_style(&number, palette_provider, "album-detail-palette-muted");
-    number.set_xalign(0.0);
-    grid.attach(&number, 0, row, 1, 1);
-
-    let title = gtk::Label::new(Some(&track.title));
-    title.add_css_class("album-track-title");
-    apply_palette_style(&title, palette_provider, "album-detail-palette-primary");
-    if track.is_missing {
-        title.add_css_class("album-track-missing");
-    }
-    title.set_xalign(0.0);
-    title.set_hexpand(true);
-    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    grid.attach(&title, 1, row, 1, 1);
-
-    let duration = gtk::Label::new(Some(&duration_text(track.duration_seconds)));
-    duration.add_css_class("album-track-duration");
-    apply_palette_style(&duration, palette_provider, "album-detail-palette-muted");
-    duration.set_xalign(1.0);
-    grid.attach(&duration, 2, row, 1, 1);
-
-    install_track_row_context_menu(&number, track.id, context_menu);
-    install_track_row_context_menu(&title, track.id, context_menu);
-    install_track_row_context_menu(&duration, track.id, context_menu);
 }
 
 fn play_album(command_controller: &SharedCommandController, album: &AlbumViewModel) -> bool {

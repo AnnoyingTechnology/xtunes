@@ -291,8 +291,12 @@ button.album-tile:focus {
 }
 
 .album-detail-title {
-    font-size: 1.2em;
+    font-size: 1.5em;
     font-weight: bold;
+}
+
+.album-detail-subtitle {
+    font-size: 1.1em;
 }
 
 button.album-detail-icon-button {
@@ -321,6 +325,67 @@ button.album-detail-icon-button:focus {
 
 .album-track-missing {
     color: #e66100;
+}
+
+/* Album-view track list. A dense virtualized list living inside an
+   album-detail panel; the panel paints its own background (or an
+   artwork-derived palette tint), so the list must stay fully transparent.
+   Album-view rows are not selectable (nothing acts on a selection here),
+   so no selected-state styling is needed — only the speaker / warning
+   status icons, double-click activation and right-click context menus
+   surface state. */
+listview.album-track-table,
+listview.album-track-table > row,
+listview.album-track-table > row:hover,
+listview.album-track-table > row:active,
+listview.album-track-table > row:focus {
+    background: none;
+    background-color: transparent;
+    background-image: none;
+    border: none;
+    margin: 0;
+    padding: 0;
+    min-height: 0;
+    color: inherit;
+}
+
+.album-track-table-scroller {
+    background-color: transparent;
+}
+
+.album-track-row {
+    min-height: 32px;
+    /* Asymmetric right padding gives the duration column breathing room
+       against the listview's right edge, and combined with the focus
+       outline's uniform inset below, makes the focus ring visibly stand
+       off further from the right edge than from the other sides. */
+    padding: 0 6px 0 0;
+    /* Modest font bump (~+1pt at default 10pt base) so the dense album
+       track list is comfortable to read without dominating the rest of
+       the panel. font-size cascades to the label children. */
+    font-size: 1.1em;
+}
+
+/* Keyboard focus ring on album-view rows. Kept for accessibility (the
+   row can also be activated with Enter, so users need a focus cue), but
+   recoloured to the panel/artwork's contrast colour rather than the
+   accent so it reads on top of any background. The palette provider
+   (album_detail_palette_css) overrides outline-color with the artwork's
+   computed contrast colour. */
+listview.album-track-table > row:focus-visible {
+    outline: 1px solid @theme_fg_color;
+    outline-offset: -3px;
+}
+
+/* Speaker icon for the currently playing track in the Albums view. The
+   global accent rule in accent.rs paints `.track-table-status-playing`
+   with the system accent, but inside the album-detail panel the icon
+   must read against the panel/artwork surface, not against the accent.
+   Default surface uses the panel's foreground; the palette provider
+   (album_detail_palette_css) overrides this with the artwork's
+   computed contrast colour when a palette is present. */
+.album-track-table .track-table-status-playing {
+    color: @theme_fg_color;
 }
 
 .track-context-menu,
