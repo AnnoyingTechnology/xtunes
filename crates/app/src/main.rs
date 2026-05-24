@@ -48,5 +48,13 @@ fn main() {
         runtime = runtime.with_playback_service(Box::new(playback_service));
     }
 
+    // Known GTK/GDK runtime warning on some Wayland/Vulkan setups:
+    // `vkAcquireNextImageKHR(): ... VK_SUBOPTIMAL_KHR`.
+    // This is emitted below Sustain by GTK's Vulkan renderer when the swapchain
+    // becomes suboptimal, commonly around resize/scale/surface changes. Rendering
+    // can still present successfully, so we intentionally do not filter the log or
+    // force `GSK_RENDERER` here. If it becomes visually broken, prefer documenting
+    // `GSK_RENDERER=ngl` / `GSK_RENDERER=gl` as a user workaround before changing
+    // the app default.
     sustain_ui_gtk::run(runtime);
 }
