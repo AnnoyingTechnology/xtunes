@@ -72,6 +72,16 @@ const ALBUM_GRID_COLUMN_SPACING: i32 = 16;
 const ALBUM_DETAIL_ARTWORK_SIZE: i32 = ALBUM_TILE_COVER_SIZE * 3;
 const ALBUM_DETAIL_ARROW_WIDTH: i32 = 36;
 const ALBUM_DETAIL_ARROW_HEIGHT: i32 = 18;
+// One-pixel bleed below the triangle's base. The arrow row is laid out as
+// an overlay on top of the detail panel so this bleed extends one row of
+// arrow-coloured pixels into the panel's opaque background. Any sub-pixel
+// transparency at the arrow texture's bottom edge — common when the
+// scroller lands on a fractional offset — should then composite onto the
+// panel's same-coloured pixels instead of revealing the window
+// background.
+// NOTE: Claude failed to fully eliminate the seam — a faint line under
+// the arrow still appears intermittently, especially during scrolling.
+const ALBUM_DETAIL_ARROW_BLEED: i32 = 1;
 const ALBUM_COVER_PLACEHOLDER_ICON: &str = "image-missing-symbolic";
 
 impl AlbumsView {
@@ -211,6 +221,18 @@ impl AlbumsView {
     }
 
     fn rebuild(&self) {
+        // TODO: clicking an album currently scrolls the viewport back to
+        // the top. `clear_container` empties the grid before re-adding
+        // rows, and while the container is empty the ScrolledWindow's
+        // vadjustment is clamped to 0; the new content is then laid out
+        // from that position. The reveal-from-context-menu flow happens
+        // to want a scroll (it explicitly re-scrolls to the selected
+        // tile afterwards) but a plain tile click should keep the user
+        // where they were. Fix not attempted — Claude failed on the
+        // adjacent arrow-seam problem and the user pulled the trust to
+        // try again here. A robust fix likely needs an incremental
+        // update of the grid instead of a full clear-and-rebuild on
+        // every selection change.
         self.selected_tile.replace(None);
         clear_container(&self.container);
 
@@ -322,7 +344,6 @@ impl AlbumsView {
         button.connect_clicked(move |_| {
             view.selected_album.set(Some(album_index));
             view.rebuild();
-            view.scroll_selected_tile_to_top();
         });
 
         button
@@ -333,7 +354,7 @@ impl AlbumsView {
         album: &AlbumViewModel,
         selected_column: usize,
         columns: usize,
-    ) -> gtk::Box {
+    ) -> gtk::Overlay {
         let content = gtk::Box::new(gtk::Orientation::Horizontal, 18);
         content.add_css_class("album-detail");
         content.set_hexpand(true);
@@ -431,14 +452,33 @@ impl AlbumsView {
         );
         artwork_column.append(&detail_cover);
 
-        let shell = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        // Reserve vertical room above the panel for the arrow. The arrow
+        // is rendered as an overlay on top of this region so its texture's
+        // bottom edge overlaps the panel's top edge; any sub-pixel
+        // sampling artifact in the arrow's bottom row composites over the
+        // panel's opaque background (same color) instead of revealing the
+        // window's theme background. This holds even when the scroller
+        // translates the contents to a fractional pixel offset.
+        let arrow_spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        arrow_spacer.set_size_request(-1, ALBUM_DETAIL_ARROW_HEIGHT);
+
+        let base = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        base.set_hexpand(true);
+        base.append(&arrow_spacer);
+        base.append(&content);
+
+        let shell = gtk::Overlay::new();
         shell.set_hexpand(true);
-        shell.append(&album_detail_arrow_row(
+        shell.set_child(Some(&base));
+
+        let arrow_row = album_detail_arrow_row(
             selected_column,
             columns,
-            artwork.palette,
-        ));
-        shell.append(&content);
+            palette_provider.as_ref(),
+        );
+        arrow_row.set_valign(gtk::Align::Start);
+        arrow_row.set_can_target(false);
+        shell.add_overlay(&arrow_row);
 
         content.append(&left);
         content.append(&artwork_column);
@@ -559,13 +599,13 @@ fn album_cover_placeholder(size: i32) -> Option<gtk::Image> {
 fn album_detail_arrow_row(
     selected_column: usize,
     columns: usize,
-    palette: Option<ArtworkPalette>,
+    palette_provider: Option<&gtk::CssProvider>,
 ) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, ALBUM_GRID_COLUMN_SPACING);
     row.set_homogeneous(true);
     row.set_margin_start(ALBUM_GRID_MARGIN);
     row.set_margin_end(ALBUM_GRID_MARGIN);
-    row.set_height_request(ALBUM_DETAIL_ARROW_HEIGHT);
+    row.set_height_request(ALBUM_DETAIL_ARROW_HEIGHT + ALBUM_DETAIL_ARROW_BLEED);
 
     for column in 0..columns {
         let cell = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -573,7 +613,7 @@ fn album_detail_arrow_row(
         cell.set_hexpand(true);
 
         if column == selected_column {
-            cell.append(&album_detail_arrow(palette));
+            cell.append(&album_detail_arrow(palette_provider));
         }
 
         row.append(&cell);
@@ -582,33 +622,40 @@ fn album_detail_arrow_row(
     row
 }
 
-fn album_detail_arrow(palette: Option<ArtworkPalette>) -> gtk::DrawingArea {
+fn album_detail_arrow(palette_provider: Option<&gtk::CssProvider>) -> gtk::DrawingArea {
     let arrow = gtk::DrawingArea::new();
+    arrow.add_css_class("album-detail-arrow");
+    apply_palette_style(&arrow, palette_provider, "album-detail-palette-arrow");
     arrow.set_content_width(ALBUM_DETAIL_ARROW_WIDTH);
-    arrow.set_content_height(ALBUM_DETAIL_ARROW_HEIGHT);
+    arrow.set_content_height(ALBUM_DETAIL_ARROW_HEIGHT + ALBUM_DETAIL_ARROW_BLEED);
     arrow.set_halign(gtk::Align::Center);
     arrow.set_valign(gtk::Align::End);
-    arrow.set_draw_func(move |area, context, width, height| {
-        let (red, green, blue, alpha) = palette
-            .map(|palette| {
-                let (red, green, blue) = palette.background_rgb();
-                (red, green, blue, 1.0)
-            })
-            .unwrap_or_else(|| {
-                let color = area.color();
-                (
-                    f64::from(color.red()),
-                    f64::from(color.green()),
-                    f64::from(color.blue()),
-                    f64::from(color.alpha()),
-                )
-            });
+    arrow.set_draw_func(|area, context, width, _height| {
+        let color = area.color();
+        let arrow_width = f64::from(width);
+        let arrow_height = f64::from(ALBUM_DETAIL_ARROW_HEIGHT);
+        let bleed = f64::from(ALBUM_DETAIL_ARROW_BLEED);
 
-        context.set_source_rgba(red, green, blue, alpha);
-        context.move_to(f64::from(width) / 2.0, 0.0);
-        context.line_to(f64::from(width), f64::from(height));
-        context.line_to(0.0, f64::from(height));
+        // The arrow color is driven by CSS so it stays in sync with the
+        // panel: `.album-detail-arrow` matches the default panel tint, and
+        // `.album-detail-palette-arrow` (applied when artwork yields a
+        // palette) matches the palette background. Alpha is forced to 1.0
+        // so the panel's 1px overlap below can't composite onto a
+        // translucent fill and produce a darker stripe at the seam.
+        context.set_source_rgba(
+            f64::from(color.red()),
+            f64::from(color.green()),
+            f64::from(color.blue()),
+            1.0,
+        );
+
+        context.move_to(arrow_width / 2.0, 0.0);
+        context.line_to(arrow_width, arrow_height);
+        context.line_to(0.0, arrow_height);
         context.close_path();
+        let _result = context.fill();
+
+        context.rectangle(0.0, arrow_height, arrow_width, bleed);
         let _result = context.fill();
     });
 
@@ -660,6 +707,10 @@ fn album_detail_palette_css(palette: ArtworkPalette) -> String {
             background-color: {background};
             border: none;
             color: {foreground};
+        }}
+
+        .album-detail-palette-arrow {{
+            color: {background};
         }}
 
         .album-detail-palette-primary,

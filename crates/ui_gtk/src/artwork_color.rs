@@ -39,10 +39,6 @@ impl ArtworkPalette {
         self.background.css_hex()
     }
 
-    pub(crate) fn background_rgb(self) -> (f64, f64, f64) {
-        self.background.rgb_components()
-    }
-
     pub(crate) fn foreground_css(self) -> String {
         self.foreground.css_hex()
     }
@@ -200,14 +196,6 @@ impl RgbColor {
 
     fn css_hex(self) -> String {
         format!("#{:02x}{:02x}{:02x}", self.red, self.green, self.blue)
-    }
-
-    fn rgb_components(self) -> (f64, f64, f64) {
-        (
-            f64::from(self.red) / 255.0,
-            f64::from(self.green) / 255.0,
-            f64::from(self.blue) / 255.0,
-        )
     }
 }
 
