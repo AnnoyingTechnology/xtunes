@@ -456,6 +456,7 @@ impl AlbumsView {
 
         let shell = gtk::Overlay::new();
         shell.set_hexpand(true);
+        shell.set_margin_bottom(ALBUM_DETAIL_ARROW_HEIGHT);
         shell.set_child(Some(&base));
 
         let arrow_row = album_detail_arrow_row(selected_column, columns, palette_provider.as_ref());
