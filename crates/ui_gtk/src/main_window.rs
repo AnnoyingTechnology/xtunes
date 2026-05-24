@@ -16,8 +16,9 @@ use sustain_app_runtime::{
 };
 
 use super::{
-    APP_ID, ApplicationCommand, ApplicationRuntime, LibraryChangedCallback, LibraryChangedHolder,
-    PLAYLISTS_VIEW, PlaybackChangedCallback, SharedRuntime, ShowAlbumAction, ShowAlbumHolder,
+    ALBUMS_VIEW, APP_ID, ApplicationCommand, ApplicationRuntime, LibraryChangedCallback,
+    LibraryChangedHolder, PLAYLISTS_VIEW, PlaybackChangedCallback, SONGS_VIEW, SharedRuntime,
+    ShowAlbumAction, ShowAlbumHolder,
     accent::install_accent_css,
     albums::AlbumsView,
     app_css::install_app_css,
@@ -26,7 +27,7 @@ use super::{
     library_consolidation::library_consolidation_requested_callback,
     library_import::{install_file_drop_target, library_import_requested_callback},
     library_scan::library_scan_requested_callback,
-    mode_bar::{ViewModeChangedCallback, build_mode_bar},
+    mode_bar::{ShowSongsViewCallback, ViewModeChangedCallback, build_mode_bar},
     now_playing::NowPlayingView,
     preferences::install_preferences_action,
     sidebar::{PlaylistSidebar, SidebarSelection, build_content_area},
@@ -96,11 +97,6 @@ pub(crate) fn build_main_window(
     );
     connect_titlebar_playback_controls(
         &titlebar,
-        command_controller.clone(),
-        playback_changed.clone(),
-    );
-    install_keyboard_shortcuts(
-        &window,
         command_controller.clone(),
         playback_changed.clone(),
     );
@@ -237,6 +233,7 @@ pub(crate) fn build_main_window(
     let main_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     main_content.set_hexpand(true);
     main_content.set_vexpand(true);
+    let command_controller_for_shortcuts = command_controller.clone();
     let mode_bar = build_mode_bar(
         &window,
         &sidebar_widget,
@@ -253,6 +250,17 @@ pub(crate) fn build_main_window(
         albums_view_for_reveal.reveal_album_for_track(track_id);
     });
     show_album_holder.replace(Some(show_album_action));
+    install_keyboard_shortcuts(
+        &window,
+        command_controller_for_shortcuts,
+        playback_changed.clone(),
+        runtime.clone(),
+        songs_table.clone(),
+        playlists_table.clone(),
+        albums_view.clone(),
+        content_stack.clone(),
+        mode_bar.show_songs.clone(),
+    );
     main_content.append(&mode_bar.widget);
     main_content.append(&content_stack);
 
@@ -1000,24 +1008,115 @@ fn install_keyboard_shortcuts(
     window: &gtk::ApplicationWindow,
     command_controller: SharedCommandController,
     playback_changed: PlaybackChangedCallback,
+    runtime: SharedRuntime,
+    songs_table: TrackTable,
+    playlists_table: TrackTable,
+    albums_view: AlbumsView,
+    content_stack: gtk::Stack,
+    show_songs: ShowSongsViewCallback,
 ) {
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
 
     let window_for_focus = window.clone();
-    key_controller.connect_key_pressed(move |_controller, key, _keycode, _state| {
-        if key != gdk::Key::space || focus_accepts_text(&window_for_focus) {
-            return glib::Propagation::Proceed;
+    key_controller.connect_key_pressed(move |_controller, key, _keycode, state| {
+        let typing = focus_accepts_text(&window_for_focus);
+
+        if key == gdk::Key::space && !typing {
+            if command_controller.dispatch_succeeded(ApplicationCommand::Playback(
+                PlaybackCommand::TogglePlayPause,
+            )) {
+                playback_changed();
+            }
+            return glib::Propagation::Stop;
         }
 
-        if command_controller.dispatch_succeeded(ApplicationCommand::Playback(
-            PlaybackCommand::TogglePlayPause,
-        )) {
-            playback_changed();
+        if matches!(key, gdk::Key::l | gdk::Key::L)
+            && state.contains(gdk::ModifierType::CONTROL_MASK)
+            && !typing
+        {
+            jump_to_current_track(
+                &runtime,
+                &songs_table,
+                &playlists_table,
+                &albums_view,
+                &content_stack,
+                &show_songs,
+            );
+            return glib::Propagation::Stop;
         }
-        glib::Propagation::Stop
+
+        glib::Propagation::Proceed
     });
     window.add_controller(key_controller);
+}
+
+/// Reveal the currently playing track in the active view, or fall back to
+/// Songs if the active view cannot show it. Does nothing when nothing has
+/// ever played (no current `now_playing.track`). Paused tracks still
+/// qualify — they remain the current track until something else loads.
+///
+/// KNOWN HALF-BAKED — Ctrl-L is wired up but visibly imperfect. Document
+/// here so the next pass doesn't have to re-derive the situation:
+///
+/// 1. **"Wrong view" intent is ambiguous.** Today this stays in the active
+///    view when its model contains the playing track. In Playlists view
+///    with the "Library" sidebar entry selected, that means the song is
+///    revealed in the Playlists table (since Library mirrors the full
+///    library), which the user has flagged as wrong — they expect a switch
+///    to Songs. A real fix needs the Playlists branch to check whether a
+///    *real* playlist is selected (vs. the Library pseudo-entry), or to
+///    abandon the per-view reveal entirely and always route through Songs.
+///    Not done here because the right design is unclear.
+///
+/// 2. **Albums view scroll lands wrong on first press.** `reveal_album_for_track`
+///    rebuilds the view and defers the scroll to `after-paint`; the
+///    `scroll_selected_tile_to_top` helper already carries a SUSPECTED
+///    FLAKINESS note about the viewport occasionally landing at y=0. The
+///    user reports 4–5 Ctrl-L presses are typically needed before the
+///    selected tile centers. Root cause is in the Albums view, not in this
+///    handler. A GTK 4.18 upgrade is planned in parallel and is expected to
+///    let us swap our manual adjustment math for `ColumnView::scroll_to`
+///    (added in GTK 4.12) and the Albums view's equivalent — at which
+///    point both quirks may dissolve.
+///
+/// 3. **Playlists view scroll occasionally needs a second press** despite
+///    the `idle_add_local_once` defer in `TrackTable::reveal_track`. The
+///    selection becomes visible immediately, but `vadjustment.upper` can
+///    still be stale on the idle tick after a recent layout change. Not
+///    addressed further per the user's "one attempt on UI fixes" rule.
+fn jump_to_current_track(
+    runtime: &SharedRuntime,
+    songs_table: &TrackTable,
+    playlists_table: &TrackTable,
+    albums_view: &AlbumsView,
+    content_stack: &gtk::Stack,
+    show_songs: &ShowSongsViewCallback,
+) {
+    let Some(track_id) = runtime
+        .borrow()
+        .now_playing()
+        .track
+        .as_ref()
+        .map(|track| track.id)
+    else {
+        return;
+    };
+
+    let active_view = content_stack.visible_child_name();
+    let revealed_in_active = match active_view.as_deref() {
+        Some(ALBUMS_VIEW) => albums_view.reveal_album_for_track(track_id),
+        Some(PLAYLISTS_VIEW) => playlists_table.reveal_track(track_id),
+        Some(SONGS_VIEW) => songs_table.reveal_track(track_id),
+        _ => false,
+    };
+
+    if revealed_in_active {
+        return;
+    }
+
+    show_songs();
+    songs_table.reveal_track(track_id);
 }
 
 fn focus_accepts_text(window: &gtk::ApplicationWindow) -> bool {

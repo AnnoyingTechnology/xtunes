@@ -28,6 +28,7 @@ pub(crate) type RatingChangedCallback = Rc<dyn Fn(TrackId, Rating) -> bool>;
 pub(crate) struct TrackTable {
     scroller: gtk::ScrolledWindow,
     store: gio::ListStore,
+    selection: gtk::MultiSelection,
     playing_track_id: Rc<Cell<Option<TrackId>>>,
     status_bindings: StatusBindings,
 }
@@ -51,6 +52,78 @@ impl TrackTable {
         self.playing_track_id.set(playing_track_id);
         self.status_bindings.refresh(playing_track_id);
     }
+
+    /// Finds the row whose track matches `track_id` in the current sort order,
+    /// selects it (clearing any prior selection), and scrolls it into the
+    /// viewport. Returns `false` when no row matches — callers use that as the
+    /// signal to fall back to a different view (Songs is the fallback for
+    /// Ctrl-L when the playing track is not in the current view's contents).
+    pub(crate) fn reveal_track(&self, track_id: TrackId) -> bool {
+        let n_items = self.selection.n_items();
+        for position in 0..n_items {
+            let Some(row_object) = self
+                .selection
+                .item(position)
+                .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+            else {
+                continue;
+            };
+            let Ok(row) = row_object.try_borrow::<TrackTableRow>() else {
+                continue;
+            };
+            if row.track_id != Some(track_id) {
+                continue;
+            }
+            drop(row);
+            self.selection.select_item(position, true);
+            // The scroll math reads `vadj.upper()` and the selection's
+            // `n_items` to derive row height. Right after a layout-triggering
+            // change (e.g. the Playlists table was just refreshed by the
+            // sidebar selection callback, or the user switched views) those
+            // can be stale within the same frame, producing a no-op scroll on
+            // the first Ctrl-L. Deferring to idle lets GTK finish the pending
+            // layout before we read the adjustment, so the first press lands.
+            let scroller = self.scroller.clone();
+            let selection = self.selection.clone();
+            glib::idle_add_local_once(move || {
+                scroll_row_into_view(&scroller, position, selection.n_items());
+            });
+            return true;
+        }
+        false
+    }
+}
+
+/// Centers row `position` in the viewport by setting the ScrolledWindow's
+/// vertical adjustment directly. GTK 4.12 added `ColumnView::scroll_to`, but
+/// the project targets GTK 4.10 (Debian-first); the adjustment math here
+/// derives row height from the live `upper / n_items` instead of hardcoding a
+/// pixel constant, so the result stays correct as the row CSS evolves.
+///
+/// KNOWN FLAKY: the Playlists view occasionally needs a second Ctrl-L for
+/// the scroll to take effect. The selection always lands on the first
+/// press, but `vadj.upper` can still be stale on the idle tick after a
+/// recent layout change (sidebar selection → `replace_rows` → ColumnView
+/// relayout). When the GTK 4.18 bump lands, replace this entire helper
+/// with `ColumnView::scroll_to(position, ListScrollFlags::SELECT)` and
+/// drop the manual idle defer in `TrackTable::reveal_track`.
+fn scroll_row_into_view(scroller: &gtk::ScrolledWindow, position: u32, n_items: u32) {
+    if n_items == 0 {
+        return;
+    }
+    let vadj = scroller.vadjustment();
+    let upper = vadj.upper();
+    let page = vadj.page_size();
+    if upper <= 0.0 || page <= 0.0 {
+        return;
+    }
+    let row_height = upper / n_items as f64;
+    let target_y = position as f64 * row_height;
+    let max_value = (upper - page).max(0.0);
+    let centered = (target_y - (page - row_height) / 2.0)
+        .max(0.0)
+        .min(max_value);
+    vadj.set_value(centered);
 }
 
 pub(crate) fn build_track_table(
@@ -146,6 +219,7 @@ pub(crate) fn build_track_table(
     TrackTable {
         scroller,
         store,
+        selection,
         playing_track_id,
         status_bindings,
     }
