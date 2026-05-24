@@ -355,11 +355,11 @@ listview.album-track-table > row:focus {
 
 .album-track-row {
     min-height: 32px;
-    /* Asymmetric right padding gives the duration column breathing room
-       against the listview's right edge, and combined with the focus
-       outline's uniform inset below, makes the focus ring visibly stand
-       off further from the right edge than from the other sides. */
-    padding: 0 6px 0 0;
+    /* Symmetric left/right padding gives the track number and duration
+       columns breathing room from the listview edges, and (combined
+       with the uniform focus-outline inset below) leaves the focus
+       ring visibly standing off from the row's content on both sides. */
+    padding: 0 6px;
     /* Modest font bump (~+1pt at default 10pt base) so the dense album
        track list is comfortable to read without dominating the rest of
        the panel. font-size cascades to the label children. */
@@ -371,7 +371,9 @@ listview.album-track-table > row:focus {
    recoloured to the panel/artwork's contrast colour rather than the
    accent so it reads on top of any background. The palette provider
    (album_detail_palette_css) overrides outline-color with the artwork's
-   computed contrast colour. */
+   computed contrast colour. No border-radius: GTK4's outline rendering
+   draws rectangular corners regardless of border-radius, so requesting
+   one is just dead CSS. */
 listview.album-track-table > row:focus-visible {
     outline: 1px solid @theme_fg_color;
     outline-offset: -3px;

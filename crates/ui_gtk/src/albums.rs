@@ -750,6 +750,7 @@ fn install_palette_provider(widget: &impl IsA<gtk::Widget>, provider: Option<&gt
 fn album_detail_palette_css(palette: ArtworkPalette) -> String {
     let background = palette.background_css();
     let foreground = palette.foreground_css();
+    let secondary = palette.secondary_css();
 
     format!(
         r#"
@@ -769,12 +770,15 @@ fn album_detail_palette_css(palette: ArtworkPalette) -> String {
             color: {foreground};
         }}
 
-        .album-detail-palette-secondary {{
-            color: alpha({foreground}, 0.78);
-        }}
-
+        /* Artist name (subtitle), track number, and duration share the
+           artwork-derived secondary colour so the muted text reads as
+           part of the cover's palette instead of as a uniformly faded
+           white/black. The track-playing speaker icon is intentionally
+           not in this set: it keeps the strict-contrast foreground so
+           the "now playing" cue is unmissable on any artwork. */
+        .album-detail-palette-secondary,
         .album-detail-palette-muted {{
-            color: alpha({foreground}, 0.62);
+            color: {secondary};
         }}
 
         .album-detail-palette-surface {{

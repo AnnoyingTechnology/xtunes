@@ -9,6 +9,7 @@ use gtk::gdk_pixbuf;
 pub(crate) struct ArtworkPalette {
     background: RgbColor,
     foreground: RgbColor,
+    secondary: RgbColor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -32,7 +33,15 @@ struct RgbColor {
 
 impl ArtworkPalette {
     pub(crate) fn from_pixbuf(pixbuf: &gdk_pixbuf::Pixbuf) -> Option<Self> {
-        dominant_color_from_pixbuf(pixbuf).map(Self::from_background)
+        let buckets = scored_buckets_from_pixbuf(pixbuf)?;
+        let background = buckets.first()?.average()?;
+        let foreground = readable_foreground(background);
+        let secondary = pick_secondary(&buckets, background, foreground);
+        Some(Self {
+            background,
+            foreground,
+            secondary,
+        })
     }
 
     pub(crate) fn background_css(self) -> String {
@@ -43,15 +52,44 @@ impl ArtworkPalette {
         self.foreground.css_hex()
     }
 
+    /// A second artwork-derived colour, picked so it stands off from the
+    /// dominant background and stays at least mildly readable on top of
+    /// it. Used for the artist name, track number, and duration so those
+    /// labels inherit some of the cover's palette instead of being a
+    /// uniform alpha-faded white/black. The track-playing speaker icon
+    /// must stay on the strict-contrast `foreground` so it remains
+    /// instantly readable regardless of artwork.
+    pub(crate) fn secondary_css(self) -> String {
+        self.secondary.css_hex()
+    }
+
+    #[cfg(test)]
     fn from_background(background: RgbColor) -> Self {
+        let foreground = readable_foreground(background);
+        let secondary = blend_toward(foreground, background, SECONDARY_FALLBACK_BLEND);
         Self {
             background,
-            foreground: readable_foreground(background),
+            foreground,
+            secondary,
         }
     }
 }
 
-fn dominant_color_from_pixbuf(pixbuf: &gdk_pixbuf::Pixbuf) -> Option<RgbColor> {
+/// Minimum RGB euclidean distance a candidate secondary colour must
+/// keep from the dominant background so the two read as distinct.
+const SECONDARY_MIN_DISTANCE: f64 = 60.0;
+/// Minimum WCAG-style contrast ratio a candidate secondary colour must
+/// achieve against the dominant background. Lower than the AA body-text
+/// threshold (4.5) because this colour is used for muted accents, not
+/// primary copy.
+const SECONDARY_MIN_CONTRAST: f64 = 2.2;
+/// When no artwork-derived secondary survives the distance + contrast
+/// filters, blend the strict-contrast foreground this far toward the
+/// background to soften it. Keeps the muted text on-palette without
+/// pretending the artwork had a chromatic accent it didn't have.
+const SECONDARY_FALLBACK_BLEND: f64 = 0.35;
+
+fn scored_buckets_from_pixbuf(pixbuf: &gdk_pixbuf::Pixbuf) -> Option<Vec<ColorBucket>> {
     let width = usize::try_from(pixbuf.width()).ok()?;
     let height = usize::try_from(pixbuf.height()).ok()?;
     let channels = usize::try_from(pixbuf.n_channels()).ok()?;
@@ -87,10 +125,10 @@ fn dominant_color_from_pixbuf(pixbuf: &gdk_pixbuf::Pixbuf) -> Option<RgbColor> {
         }
     }
 
-    dominant_color(colors)
+    Some(scored_buckets(colors))
 }
 
-fn dominant_color<I>(colors: I) -> Option<RgbColor>
+fn scored_buckets<I>(colors: I) -> Vec<ColorBucket>
 where
     I: IntoIterator<Item = (u8, u8, u8, u8)>,
 {
@@ -112,10 +150,71 @@ where
         bucket.pixels += 1;
     }
 
-    buckets
-        .into_values()
-        .max_by_key(|bucket| bucket.score)
+    let mut sorted: Vec<ColorBucket> = buckets.into_values().collect();
+    sorted.sort_by(|a, b| b.score.cmp(&a.score));
+    sorted
+}
+
+#[cfg(test)]
+fn dominant_color<I>(colors: I) -> Option<RgbColor>
+where
+    I: IntoIterator<Item = (u8, u8, u8, u8)>,
+{
+    scored_buckets(colors)
+        .into_iter()
+        .next()
         .and_then(|bucket| bucket.average())
+}
+
+/// Walk the artwork's scored colour buckets in descending score order
+/// (skipping the dominant one) and return the first that stands far
+/// enough from BOTH the dominant background AND the strict-contrast
+/// foreground (so it actually feels like a third colour, not a
+/// rebrand of the white/black contrast colour) AND keeps an
+/// acceptable contrast against the background. When the artwork has
+/// no such colour (monochrome covers, simple white-on-black or
+/// black-on-white covers, tightly-clustered palettes), fall back to
+/// nudging the strict-contrast foreground toward the background so
+/// the muted accent still feels palette-aware instead of pure
+/// white/black at reduced alpha.
+fn pick_secondary(buckets: &[ColorBucket], background: RgbColor, foreground: RgbColor) -> RgbColor {
+    for bucket in buckets.iter().skip(1) {
+        let Some(candidate) = bucket.average() else {
+            continue;
+        };
+        if rgb_distance(candidate, background) < SECONDARY_MIN_DISTANCE {
+            continue;
+        }
+        if rgb_distance(candidate, foreground) < SECONDARY_MIN_DISTANCE {
+            continue;
+        }
+        if contrast_ratio(candidate, background) < SECONDARY_MIN_CONTRAST {
+            continue;
+        }
+        return candidate;
+    }
+
+    blend_toward(foreground, background, SECONDARY_FALLBACK_BLEND)
+}
+
+fn rgb_distance(a: RgbColor, b: RgbColor) -> f64 {
+    let dr = f64::from(a.red) - f64::from(b.red);
+    let dg = f64::from(a.green) - f64::from(b.green);
+    let db = f64::from(a.blue) - f64::from(b.blue);
+    (dr * dr + dg * dg + db * db).sqrt()
+}
+
+fn blend_toward(from: RgbColor, toward: RgbColor, weight: f64) -> RgbColor {
+    RgbColor::new(
+        lerp_u8(from.red, toward.red, weight),
+        lerp_u8(from.green, toward.green, weight),
+        lerp_u8(from.blue, toward.blue, weight),
+    )
+}
+
+fn lerp_u8(from: u8, toward: u8, weight: f64) -> u8 {
+    let blended = f64::from(from) * (1.0 - weight) + f64::from(toward) * weight;
+    blended.clamp(0.0, 255.0).round() as u8
 }
 
 fn sample_step(width: usize, height: usize) -> usize {
@@ -201,7 +300,10 @@ impl RgbColor {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArtworkPalette, RgbColor, dominant_color, readable_foreground, sample_step};
+    use super::{
+        ArtworkPalette, ColorBucket, RgbColor, dominant_color, pick_secondary, readable_foreground,
+        sample_step,
+    };
 
     #[test]
     fn dominant_color_prefers_the_largest_bucket() {
@@ -235,11 +337,71 @@ mod tests {
 
         assert_eq!(palette.background_css(), "#0c2238");
         assert_eq!(palette.foreground_css(), "#ffffff");
+        // Fallback secondary on a chromatic-less construction = white
+        // blended 35% toward the dark blue background.
+        assert_eq!(palette.secondary_css(), "#aab2b9");
     }
 
     #[test]
     fn sample_step_caps_large_images() {
         assert_eq!(sample_step(100, 100), 1);
         assert!(sample_step(4000, 4000) > 1);
+    }
+
+    #[test]
+    fn pick_secondary_returns_the_first_contrasting_artwork_color() {
+        let buckets = vec![
+            bucket(20, 40, 200, 100),
+            bucket(25, 45, 195, 80),
+            bucket(220, 80, 30, 50),
+        ];
+        let background = RgbColor::new(20, 40, 200);
+        let foreground = readable_foreground(background);
+
+        let secondary = pick_secondary(&buckets, background, foreground);
+
+        assert_eq!(secondary, RgbColor::new(220, 80, 30));
+    }
+
+    #[test]
+    fn pick_secondary_skips_buckets_near_the_strict_contrast_foreground() {
+        // Black-dominant cover with a high-scoring near-white bucket
+        // (logo, text overlay) and a smaller chromatic bucket. Without
+        // the foreground-distance filter, the near-white bucket would
+        // win and the secondary would equal the foreground — i.e. the
+        // muted text would just be the title colour again.
+        let buckets = vec![
+            bucket(10, 10, 10, 200),
+            bucket(248, 248, 248, 120),
+            bucket(180, 60, 60, 40),
+        ];
+        let background = RgbColor::new(10, 10, 10);
+        let foreground = readable_foreground(background);
+
+        let secondary = pick_secondary(&buckets, background, foreground);
+
+        assert_eq!(secondary, RgbColor::new(180, 60, 60));
+    }
+
+    #[test]
+    fn pick_secondary_falls_back_when_artwork_is_monochromatic() {
+        let buckets = vec![bucket(20, 40, 200, 100), bucket(22, 42, 198, 80)];
+        let background = RgbColor::new(20, 40, 200);
+        let foreground = readable_foreground(background);
+
+        let secondary = pick_secondary(&buckets, background, foreground);
+
+        // White (foreground) blended 35% toward the dark blue background.
+        assert_eq!(secondary, RgbColor::new(173, 180, 236));
+    }
+
+    fn bucket(red: u8, green: u8, blue: u8, pixels: u64) -> ColorBucket {
+        ColorBucket {
+            red_total: u64::from(red) * pixels,
+            green_total: u64::from(green) * pixels,
+            blue_total: u64::from(blue) * pixels,
+            score: pixels * 10,
+            pixels,
+        }
     }
 }
