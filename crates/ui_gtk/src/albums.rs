@@ -25,6 +25,7 @@ mod track_list;
 #[derive(Clone)]
 pub(crate) struct AlbumsView {
     scroller: gtk::ScrolledWindow,
+    viewport: gtk::Viewport,
     container: gtk::Box,
     runtime: SharedRuntime,
     command_controller: SharedCommandController,
@@ -87,10 +88,14 @@ impl AlbumsView {
         scroller.set_vexpand(true);
         scroller.set_hexpand(true);
         scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        scroller.set_child(Some(&container));
+
+        let viewport = gtk::Viewport::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        viewport.set_child(Some(&container));
+        scroller.set_child(Some(&viewport));
 
         let view = Self {
             scroller,
+            viewport,
             container,
             runtime,
             command_controller,
@@ -148,7 +153,7 @@ impl AlbumsView {
         };
         self.selected_album.set(Some(album_index));
         self.rebuild();
-        self.scroll_selected_tile_to_top();
+        self.scroll_selected_tile_into_view();
         if let Some(tile) = self.selected_tile.borrow().clone() {
             // Keep keyboard focus in the grid after a context-menu reveal so
             // arrow-key nav has a starting point. Scroll is handled above.
@@ -159,46 +164,18 @@ impl AlbumsView {
         true
     }
 
-    /// Scrolls the grid so the selected album's tile row sits at the top of
-    /// the viewport, leaving the full screen below for the expanded detail
-    /// panel.
-    ///
-    /// Hooks the frame clock's `after-paint` signal so the tile's bounds are
-    /// read after the current frame's UPDATE → LAYOUT → PAINT cycle has
-    /// completed. An idle callback is not deterministic enough here: it can
-    /// fire before the next frame's LAYOUT phase depending on whether a
-    /// frame happens to be due, and in that pre-layout window
-    /// `compute_bounds` on a freshly-added widget returns a zero-sized rect
-    /// that would silently scroll the viewport to `value = 0`.
-    // SUSPECTED FLAKINESS: occasional reports of the viewport still landing
-    // at the top under rapid clicks; the assumption that `after-paint`
-    // always fires with a finalized allocation has not been independently
-    // verified, and a concurrent rebuild (e.g. width watcher) could swap
-    // the tile out between registration and emission.
-    fn scroll_selected_tile_to_top(&self) {
+    /// Scrolls the grid so the selected album tile is visible after the detail
+    /// panel rebuild. `Viewport::scroll_to` avoids the old after-paint bounds
+    /// calculation, which could observe a replaced or zero-sized tile.
+    fn scroll_selected_tile_into_view(&self) {
         let Some(tile) = self.selected_tile.borrow().clone() else {
             return;
         };
-        let Some(frame_clock) = self.scroller.frame_clock() else {
-            return;
-        };
-        let scroller = self.scroller.clone();
-        let container = self.container.clone();
 
-        let handler: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::new(RefCell::new(None));
-        let handler_for_callback = handler.clone();
-        let id = frame_clock.connect_after_paint(move |fc| {
-            if let Some(id) = handler_for_callback.borrow_mut().take() {
-                fc.disconnect(id);
-            }
-            let Some(bounds) = tile.compute_bounds(&container) else {
-                return;
-            };
-            scroller
-                .vadjustment()
-                .set_value(f64::from(bounds.y()).max(0.0));
-        });
-        *handler.borrow_mut() = Some(id);
+        let scroll_info = gtk::ScrollInfo::new();
+        scroll_info.set_enable_horizontal(false);
+        scroll_info.set_enable_vertical(true);
+        self.viewport.scroll_to(&tile, Some(scroll_info));
     }
 
     fn install_width_watcher(&self) {
@@ -218,17 +195,12 @@ impl AlbumsView {
 
     fn rebuild(&self) {
         // TODO: clicking an album currently scrolls the viewport back to
-        // the top. `clear_container` empties the grid before re-adding
-        // rows, and while the container is empty the ScrolledWindow's
-        // vadjustment is clamped to 0; the new content is then laid out
-        // from that position. The reveal-from-context-menu flow happens
-        // to want a scroll (it explicitly re-scrolls to the selected
-        // tile afterwards) but a plain tile click should keep the user
-        // where they were. Fix not attempted — Claude failed on the
-        // adjacent arrow-seam problem and the user pulled the trust to
-        // try again here. A robust fix likely needs an incremental
-        // update of the grid instead of a full clear-and-rebuild on
-        // every selection change.
+        // the top because the full clear-and-rebuild leaves the viewport
+        // with no stable descendant to anchor. Context-menu reveal wants
+        // an explicit scroll after rebuild; plain tile clicks should keep
+        // the user's current position. A robust fix likely needs an
+        // incremental update of the grid instead of rebuilding every tile
+        // on selection changes.
         self.selected_tile.replace(None);
         self.live_track_lists.borrow_mut().clear();
         clear_container(&self.container);

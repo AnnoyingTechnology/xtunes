@@ -27,6 +27,7 @@ pub(crate) type RatingChangedCallback = Rc<dyn Fn(TrackId, Rating) -> bool>;
 #[derive(Clone)]
 pub(crate) struct TrackTable {
     scroller: gtk::ScrolledWindow,
+    table: gtk::ColumnView,
     store: gio::ListStore,
     selection: gtk::MultiSelection,
     playing_track_id: Rc<Cell<Option<TrackId>>>,
@@ -71,59 +72,29 @@ impl TrackTable {
             let Ok(row) = row_object.try_borrow::<TrackTableRow>() else {
                 continue;
             };
-            if row.track_id != Some(track_id) {
+            let is_target = row.track_id == Some(track_id);
+            drop(row);
+
+            if !is_target {
                 continue;
             }
-            drop(row);
-            self.selection.select_item(position, true);
-            // The scroll math reads `vadj.upper()` and the selection's
-            // `n_items` to derive row height. Right after a layout-triggering
-            // change (e.g. the Playlists table was just refreshed by the
-            // sidebar selection callback, or the user switched views) those
-            // can be stale within the same frame, producing a no-op scroll on
-            // the first Ctrl-L. Deferring to idle lets GTK finish the pending
-            // layout before we read the adjustment, so the first press lands.
-            let scroller = self.scroller.clone();
-            let selection = self.selection.clone();
-            glib::idle_add_local_once(move || {
-                scroll_row_into_view(&scroller, position, selection.n_items());
-            });
+            self.table.scroll_to(
+                position,
+                None,
+                gtk::ListScrollFlags::SELECT | gtk::ListScrollFlags::FOCUS,
+                Some(vertical_scroll_info()),
+            );
             return true;
         }
         false
     }
 }
 
-/// Centers row `position` in the viewport by setting the ScrolledWindow's
-/// vertical adjustment directly. GTK 4.12 added `ColumnView::scroll_to`, but
-/// the project targets GTK 4.10 (Debian-first); the adjustment math here
-/// derives row height from the live `upper / n_items` instead of hardcoding a
-/// pixel constant, so the result stays correct as the row CSS evolves.
-///
-/// KNOWN FLAKY: the Playlists view occasionally needs a second Ctrl-L for
-/// the scroll to take effect. The selection always lands on the first
-/// press, but `vadj.upper` can still be stale on the idle tick after a
-/// recent layout change (sidebar selection → `replace_rows` → ColumnView
-/// relayout). When the GTK 4.18 bump lands, replace this entire helper
-/// with `ColumnView::scroll_to(position, ListScrollFlags::SELECT)` and
-/// drop the manual idle defer in `TrackTable::reveal_track`.
-fn scroll_row_into_view(scroller: &gtk::ScrolledWindow, position: u32, n_items: u32) {
-    if n_items == 0 {
-        return;
-    }
-    let vadj = scroller.vadjustment();
-    let upper = vadj.upper();
-    let page = vadj.page_size();
-    if upper <= 0.0 || page <= 0.0 {
-        return;
-    }
-    let row_height = upper / n_items as f64;
-    let target_y = position as f64 * row_height;
-    let max_value = (upper - page).max(0.0);
-    let centered = (target_y - (page - row_height) / 2.0)
-        .max(0.0)
-        .min(max_value);
-    vadj.set_value(centered);
+fn vertical_scroll_info() -> gtk::ScrollInfo {
+    let scroll_info = gtk::ScrollInfo::new();
+    scroll_info.set_enable_horizontal(false);
+    scroll_info.set_enable_vertical(true);
+    scroll_info
 }
 
 pub(crate) fn build_track_table(
@@ -218,6 +189,7 @@ pub(crate) fn build_track_table(
     scroller.set_child(Some(&table));
     TrackTable {
         scroller,
+        table,
         store,
         selection,
         playing_track_id,

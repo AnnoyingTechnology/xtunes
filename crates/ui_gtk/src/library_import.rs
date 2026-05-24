@@ -47,10 +47,22 @@ pub(crate) fn library_import_requested_callback(
 }
 
 pub(crate) fn install_file_drop_target(
-    widget: &impl IsA<gtk::Widget>,
+    drop_zone: &impl IsA<gtk::Widget>,
+    drop_indicator: &impl IsA<gtk::Widget>,
     import_requested: LibraryImportRequestedCallback,
 ) {
     let drop_target = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+
+    let indicator_for_enter = drop_indicator.clone().upcast::<gtk::Widget>();
+    drop_target.connect_enter(move |_target, _x, _y| {
+        indicator_for_enter.add_css_class(LIBRARY_DROP_ACTIVE_CLASS);
+        gdk::DragAction::COPY
+    });
+    let indicator_for_leave = drop_indicator.clone().upcast::<gtk::Widget>();
+    drop_target.connect_leave(move |_target| {
+        indicator_for_leave.remove_css_class(LIBRARY_DROP_ACTIVE_CLASS);
+    });
+
     drop_target.connect_drop(move |_target, value, _x, _y| {
         let Ok(file_list) = value.get::<gdk::FileList>() else {
             return false;
@@ -61,8 +73,11 @@ pub(crate) fn install_file_drop_target(
         }
         import_requested(paths).is_ok()
     });
-    widget.add_controller(drop_target);
+    drop_zone.add_controller(drop_target);
 }
+
+pub(crate) const LIBRARY_DROP_INDICATOR_CLASS: &str = "library-drop-indicator";
+const LIBRARY_DROP_ACTIVE_CLASS: &str = "library-drop-active";
 
 fn poll_library_import(
     rx: mpsc::Receiver<Result<super::LibraryImportResult, ApplicationRuntimeError>>,

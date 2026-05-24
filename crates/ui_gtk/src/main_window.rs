@@ -25,7 +25,9 @@ use super::{
     command_controller::{SharedCommandController, UiCommandController},
     content_stack::build_content_stack,
     library_consolidation::library_consolidation_requested_callback,
-    library_import::{install_file_drop_target, library_import_requested_callback},
+    library_import::{
+        LIBRARY_DROP_INDICATOR_CLASS, install_file_drop_target, library_import_requested_callback,
+    },
     library_scan::library_scan_requested_callback,
     mode_bar::{ShowSongsViewCallback, ViewModeChangedCallback, build_mode_bar},
     now_playing::NowPlayingView,
@@ -167,10 +169,22 @@ pub(crate) fn build_main_window(
     );
     playlists_table_holder.replace(Some(playlists_table.clone()));
     playback_changed();
+    let songs_drop_indicator = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    songs_drop_indicator.add_css_class(LIBRARY_DROP_INDICATOR_CLASS);
+    songs_drop_indicator.set_can_target(false);
+    songs_drop_indicator.set_hexpand(true);
+    songs_drop_indicator.set_vexpand(true);
+
+    let songs_drop_overlay = gtk::Overlay::new();
+    songs_drop_overlay.set_hexpand(true);
+    songs_drop_overlay.set_vexpand(true);
+    songs_drop_overlay.set_child(Some(&songs_table.widget()));
+    songs_drop_overlay.add_overlay(&songs_drop_indicator);
+
     let content_stack = build_content_stack(
-        songs_table.widget(),
-        albums_view.widget(),
-        playlists_table.widget(),
+        &songs_drop_overlay,
+        &albums_view.widget(),
+        &playlists_table.widget(),
     );
     let visible_summary_refresh =
         visible_summary_refresh_callback(&runtime, &content_stack, &sidebar, &status_bar);
@@ -221,7 +235,7 @@ pub(crate) fn build_main_window(
         library_consolidation_requested_callback(&runtime, library_changed.clone(), &status_bar);
     let import_requested =
         library_import_requested_callback(&runtime, library_changed.clone(), &status_bar);
-    install_file_drop_target(&songs_table.widget(), import_requested);
+    install_file_drop_target(&songs_drop_overlay, &songs_drop_indicator, import_requested);
     install_preferences_action(
         app,
         &window,
@@ -252,14 +266,16 @@ pub(crate) fn build_main_window(
     show_album_holder.replace(Some(show_album_action));
     install_keyboard_shortcuts(
         &window,
-        command_controller_for_shortcuts,
-        playback_changed.clone(),
-        runtime.clone(),
-        songs_table.clone(),
-        playlists_table.clone(),
-        albums_view.clone(),
-        content_stack.clone(),
-        mode_bar.show_songs.clone(),
+        KeyboardShortcutContext {
+            command_controller: command_controller_for_shortcuts,
+            playback_changed: playback_changed.clone(),
+            runtime: runtime.clone(),
+            songs_table: songs_table.clone(),
+            playlists_table: playlists_table.clone(),
+            albums_view: albums_view.clone(),
+            content_stack: content_stack.clone(),
+            show_songs: mode_bar.show_songs.clone(),
+        },
     );
     main_content.append(&mode_bar.widget);
     main_content.append(&content_stack);
@@ -1004,8 +1020,7 @@ fn track_mutation_callback(
     })
 }
 
-fn install_keyboard_shortcuts(
-    window: &gtk::ApplicationWindow,
+struct KeyboardShortcutContext {
     command_controller: SharedCommandController,
     playback_changed: PlaybackChangedCallback,
     runtime: SharedRuntime,
@@ -1014,7 +1029,20 @@ fn install_keyboard_shortcuts(
     albums_view: AlbumsView,
     content_stack: gtk::Stack,
     show_songs: ShowSongsViewCallback,
-) {
+}
+
+fn install_keyboard_shortcuts(window: &gtk::ApplicationWindow, context: KeyboardShortcutContext) {
+    let KeyboardShortcutContext {
+        command_controller,
+        playback_changed,
+        runtime,
+        songs_table,
+        playlists_table,
+        albums_view,
+        content_stack,
+        show_songs,
+    } = context;
+
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
 
@@ -1056,10 +1084,9 @@ fn install_keyboard_shortcuts(
 /// ever played (no current `now_playing.track`). Paused tracks still
 /// qualify — they remain the current track until something else loads.
 ///
-/// KNOWN HALF-BAKED — Ctrl-L is wired up but visibly imperfect. Document
-/// here so the next pass doesn't have to re-derive the situation:
+/// Ctrl-L reveal currently has one deliberate product ambiguity:
 ///
-/// 1. **"Wrong view" intent is ambiguous.** Today this stays in the active
+/// **"Wrong view" intent is ambiguous.** Today this stays in the active
 ///    view when its model contains the playing track. In Playlists view
 ///    with the "Library" sidebar entry selected, that means the song is
 ///    revealed in the Playlists table (since Library mirrors the full
@@ -1067,24 +1094,7 @@ fn install_keyboard_shortcuts(
 ///    to Songs. A real fix needs the Playlists branch to check whether a
 ///    *real* playlist is selected (vs. the Library pseudo-entry), or to
 ///    abandon the per-view reveal entirely and always route through Songs.
-///    Not done here because the right design is unclear.
-///
-/// 2. **Albums view scroll lands wrong on first press.** `reveal_album_for_track`
-///    rebuilds the view and defers the scroll to `after-paint`; the
-///    `scroll_selected_tile_to_top` helper already carries a SUSPECTED
-///    FLAKINESS note about the viewport occasionally landing at y=0. The
-///    user reports 4–5 Ctrl-L presses are typically needed before the
-///    selected tile centers. Root cause is in the Albums view, not in this
-///    handler. A GTK 4.18 upgrade is planned in parallel and is expected to
-///    let us swap our manual adjustment math for `ColumnView::scroll_to`
-///    (added in GTK 4.12) and the Albums view's equivalent — at which
-///    point both quirks may dissolve.
-///
-/// 3. **Playlists view scroll occasionally needs a second press** despite
-///    the `idle_add_local_once` defer in `TrackTable::reveal_track`. The
-///    selection becomes visible immediately, but `vadjustment.upper` can
-///    still be stale on the idle tick after a recent layout change. Not
-///    addressed further per the user's "one attempt on UI fixes" rule.
+///    Not done here because the right product behavior is unclear.
 fn jump_to_current_track(
     runtime: &SharedRuntime,
     songs_table: &TrackTable,
