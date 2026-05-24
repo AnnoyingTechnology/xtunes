@@ -718,6 +718,56 @@ mapping (iTunes shortcuts → Linux/GTK equivalents, conflicts with GNOME
 conventions, in-app shortcut discoverability) is to be decided when that
 pass is scheduled.
 
+## Search Bar Wiring
+
+The search field in the integrated top bar is currently a visual element
+only. It must be wired into the real query path so that typing in the
+search field filters the active view (Songs, Albums, Playlists) in
+realtime, with no submit button, no Enter-to-search, and no perceptible
+delay between keystroke and filtered result on a real-sized library.
+
+Hard requirements once this work begins:
+
+- typing updates the filtered result set as the user types, debounced
+  only as much as needed to stay smooth on a 10k+ track library; the
+  debounce must not feel like a delay
+- search runs through the existing query/command path; the widget must
+  not query SQLite, scan in-memory tracks, or touch metadata files
+  directly
+- the active view (Songs / Albums / Playlists) determines what the
+  search applies to; switching views while a query is active preserves
+  the query and re-applies it to the new view
+- clearing the field restores the unfiltered view immediately
+- the search field stays responsive while a scan or other background
+  task is in flight; search must never block on background work
+
+Open design questions to clarify with the maintainer before
+implementation:
+
+- **searched fields**: which track fields participate in the match?
+  Candidates include title, artist, album artist, album, genre, year,
+  composer, comment, and file path. The default set and whether the
+  user can scope the search to a specific field are both undecided.
+- **match semantics**: substring vs. token-prefix vs. fuzzy; case
+  sensitivity; diacritic folding; whether multiple whitespace-separated
+  terms are ANDed across fields (typical library-search behavior) or
+  treated as a single phrase.
+- **operators and modalities**: whether to support quoted phrases,
+  field-scoped queries (e.g. `artist:bowie`), negation (`-live`),
+  numeric ranges (`year:1970-1979`), or rating filters (`rating>=4`),
+  and how those interact with the smart-playlist rule grammar so the
+  two systems share vocabulary where it makes sense.
+- **behavior across modes**: in Albums mode, does the query filter the
+  cover grid by any matching track, or only by album-level fields? In
+  Playlists mode, does it filter within the selected playlist or
+  across all playlists?
+- **persistence**: whether the current query is preserved across app
+  restarts or always starts empty.
+
+These decisions need to be made with the maintainer before the search
+behavior is implemented; this section captures the requirement and the
+open questions, not a chosen design.
+
 ## Later Statistics Views
 
 Add one or two library statistics views after the core table, playlist, search,
@@ -966,15 +1016,15 @@ pipeline itself: an offline analysis pass that populates BPM and musical key
 for tracks that lack them. Concrete shape (library/tool used, threading,
 how results are surfaced) is to be decided at implementation time.
 
-### Sync to Android / Export to XDJ (iPod-style device sync)
+### Sync to Android / Export to external drive in Pioneer format (iPod-style device sync)
 
 Sync a selected set of playlists from the library to an external device.
 Two concrete targets:
 
 - Android phones/tablets
-- Pioneer XDJ controllers, in the spirit of the existing
-  [`rhythmbox-to-pioneer-xdj-exporter`](https://github.com/AnnoyingTechnology/rhythmbox-to-pioneer-xdj-exporter)
-  project
+- External drives (USB sticks, SD cards, SSDs) written in Pioneer's
+  proprietary on-device format, consumable by Pioneer XDJ/CDJ hardware
+  and by Rekordbox 5
 
 Both are essentially the same workflow shape — the same one users used to
 get from iTunes for iPod sync: a GUI panel to pick which playlists go to
@@ -990,9 +1040,10 @@ pre-populated instead of starting empty every time.
 
 The device itself only carries half of that information:
 
-- An XDJ USB drive carries the Pioneer `.pdb` database, which tells us
-  what tracks/playlists currently live on the drive — but not which
-  playlists the user had ticked in Sustain's sync panel for that drive.
+- A Pioneer-formatted drive carries the Pioneer `.pdb` database, which
+  tells us what tracks/playlists currently live on the drive — but not
+  which playlists the user had ticked in Sustain's sync panel for that
+  drive.
 - An Android device exposes the files that are present on it, with the
   same gap: we can see what's there, not what the user originally
   selected.
@@ -1002,6 +1053,60 @@ identifier for the device. The best/most solid options for that
 identifier (USB serial, volume UUID, MTP device ID, fingerprint of the
 on-device database, etc.) and the storage shape for the cache are to be
 investigated at implementation time.
+
+#### Pioneer-format reference implementation
+
+The Pioneer-format export is not greenfield work. The maintainer already
+ships a working Rust implementation of the on-drive format in
+[`rhythmbox-to-pioneer-xdj-exporter`](https://github.com/AnnoyingTechnology/rhythmbox-to-pioneer-xdj-exporter),
+and Sustain's external-drive export should be built by **lifting that
+project's format-generation core into a Sustain crate** rather than
+re-deriving the format from scratch. The existing project's Rhythmbox
+read path is throwaway in the Sustain context — Sustain owns its own
+library — but the Pioneer-write path is the load-bearing piece worth
+porting.
+
+What the reference project already produces on the target drive:
+
+- `PIONEER/rekordbox/export.pdb` — the track database (tracks, artists,
+  albums, genres, playlists), with the binary layout reverse-engineered
+  from Rekordbox
+- `PIONEER/USBANLZ/P{XXX}/{HASH}/ANLZ0000.DAT` — preview waveforms
+- `PIONEER/USBANLZ/P{XXX}/{HASH}/ANLZ0000.EXT` — detailed waveforms and
+  cue points, including the `PWAV` / `PWV2`–`PWV5` waveform encodings
+- `Contents/{Artist}/{Album}/{Track}` — the audio files themselves, laid
+  out in the hierarchy the on-drive database expects
+- Pioneer's proprietary path-hash algorithm used to address the per-track
+  analysis directory (`P{XXX}/{HASH}`), reverse-engineered from Rekordbox
+  binaries
+- BPM and musical-key detection (the reference project reports roughly
+  87% and 72% accuracy respectively), with optional caching of the
+  analysis results back into FLAC tags
+- Artwork extraction with deduplication across tracks that share a cover
+
+Constraints carried over from the reference project that Sustain should
+address rather than inherit silently:
+
+- the reference project re-exports the full library on every run; it
+  does not do incremental sync. Sustain's sync panel needs incremental
+  diffing (add/remove/update vs. what's already on the drive) since
+  that's the whole point of the iPod-style workflow described above.
+- the reference project cannot write back to MP3 tags due to an
+  upstream library limitation. Sustain's tag-writing path (which has to
+  exist anyway for ratings) is the right place to fix this; the export
+  should reuse Sustain's tag writer instead of carrying the limitation
+  forward.
+- audio-analysis (BPM/key) is shared concern with the
+  `## Audio analysis` item above and with `## Smart Shuffle`. The
+  analysis pipeline should live in a single Sustain crate and be
+  consumed by both the in-app columns/shuffle and the Pioneer export,
+  not duplicated.
+
+Concrete shape of the port (which crate, how the format code is split
+from the Rhythmbox-specific code in the reference repo, licensing
+review since both projects are the maintainer's own work, what to do
+with the Python components that make up ~38% of the reference repo) is
+to be decided at implementation time.
 
 ### CD encoding
 
