@@ -170,7 +170,6 @@ enough to warrant their own design section. Each links to the detailed
 section where applicable; items without a detailed section are scoped
 fully here.
 
-- **WAL on the library database** — see `## Library Scan Performance`.
 - **Scan cancellation token** — see `## Library Scan Performance`.
 - **Scan parallelization** — see `## Library Scan Performance`.
 - **Live per-phase scan progress in the status bar** — see
@@ -179,10 +178,9 @@ fully here.
   `## Gapless Track-to-Track Playback`.
 - **`Add to Queue` (append) action** distinct from `Play Next` — see
   `## Up Next Queue`.
-- **First-run smart-playlist defaults** — see the smart-playlist note in
-  `## UI Direction`.
-- **Injectable clock for smart-playlist relative-date rules** — see the
-  smart-playlist note in `## UI Direction`.
+- **Audio glitch on successful artwork retrieval** — see the now-playing
+  artwork note in `## UI Direction` and the constraint note in
+  `## Metadata Backfill`.
 - **Within-playlist drag reorder wiring**: `PlaybackCommand` for moving a
   playlist entry exists in the runtime; the regular-playlist track table
   must dispatch it on within-playlist row drags. No GTK-only row reorder
@@ -198,6 +196,30 @@ fully here.
   the next non-trivial change should split it into per-section widget
   modules backed by a settings view model, in line with the broader
   split-when-touched pattern.
+- **Settings window: tabbed navigation in place of the title bar** —
+  the Settings dialog drops the conventional GTK title bar in favor of a
+  tab strip at the top of the window that doubles as the window's drag
+  surface. Initial tabs:
+  - **Library** — library folder picker, managed-mode tickbox (see
+    `## Library Management`), and the manual scan trigger.
+  - **Analysis** — the BPM, Key, and Waveform detection tickboxes (see
+    `## Audio Analysis and Consolidation Grouping`).
+  No `APIs` tab is planned. The two networked features in the plan
+  (`Fetch missing artwork`, `Fetch missing tags` — see
+  `## Metadata Backfill`) work against MusicBrainz, Cover Art Archive,
+  and AcoustID; the first two need no key at all, and AcoustID's
+  per-application client key is an app-level secret embedded in the
+  binary (as Picard does), not a value the user types. An `APIs` tab
+  becomes justified only if/when Sustain grows a feature that requires
+  per-user credentials — Last.fm scrobbling, Spotify "now playing", or
+  any other account-bound integration — at which point it gets added
+  alongside the feature that introduces it.
+  The window height auto-sizes to the active tab's content rather than
+  being fixed; switching tabs reflows the window to fit the new pane.
+  Width stays stable across tabs so the chrome doesn't jitter
+  horizontally on tab switches. This shape is also what the
+  `Preferences module split` above should target — one widget module per
+  tab, behind the shared settings view model.
 - **BPM, Key, and Waveform analysis tickboxes in Settings** — three
   independent opt-in toggles so users can pick which heavy local-CPU
   pipelines they want. See `## Audio Analysis and Consolidation Grouping`.
@@ -205,6 +227,10 @@ fully here.
   `## Single-Instance Enforcement (Library Integrity)`.
 - **Developer-isolation CLI flags** (`--config`, `--database`,
   `--local-scope`) — see `## Developer Isolation (CLI Data Paths)`.
+- **Auto-dismiss + multi-feedback carousel in the status lane** — see
+  `## Status Feedback Behavior (Desired)`. Needs a feasibility pass on
+  GTK4 animation primitives and the message-queue ownership model
+  before implementation.
 
 ## Get Info
 
@@ -382,12 +408,11 @@ rating, metadata cache, and listening statistics.
 ## Library Scan Performance
 
 The scan is off the GTK main thread (background worker + channel), SQLite
-writes are batched in transactions, and the status bar reports the final
+writes are batched in transactions, the library connection runs in WAL
+mode with `synchronous = NORMAL`, and the status bar reports the final
 summary. The structural freeze that motivated this section is resolved.
 Remaining open work, in priority order:
 
-- enable WAL journaling on the library database so UI readers are never
-  blocked by the scan writer (only the artwork cache currently uses WAL)
 - add a cancellation token to the scan task so the user can abort a long
   scan without quitting the app
 - parallelize the CPU/IO-bound phases (tag decoding, hashing, stat) across a
@@ -396,6 +421,12 @@ Remaining open work, in priority order:
 - surface live per-phase progress in the status bar (files seen, files
   indexed, current phase) alongside the rotating sync icon — not only the
   final summary
+
+The WAL pragma is set during `SqliteLibraryStore::from_connection`; until
+the read path gains a second connection, all reads and writes still
+serialize on the single `Mutex<Connection>`, so WAL's reader/writer
+isolation does not yet manifest — but commits are cheaper and the
+infrastructure is in place for the eventual reader connection split.
 
 Non-goals: no bespoke async runtime, no hand-rolled SQLite connection pool
 before measuring whether a single writer thread plus read-only connections
@@ -787,7 +818,7 @@ Interaction states for the small now-playing tile:
 Constraints (mirroring the bulk path so the two surfaces stay coherent):
 
 - the fetch runs on a background task; the GTK main thread is never
-  blocked on a network request, and playback is unaffected
+  blocked on a network request
 - the network request is gated behind the explicit click — Sustain
   never silently fetches artwork while idling on a track
 - if the playing track changes mid-fetch, the in-flight request is
@@ -800,6 +831,24 @@ Constraints (mirroring the bulk path so the two surfaces stay coherent):
   representative track has no artwork, so the user can trigger a fetch
   from whichever surface they happen to be looking at; those secondary
   surfaces are nice-to-haves and can land after the now-playing tile
+
+Known issue — **audio glitch on successful artwork retrieval**. When
+the fetched cover is written to the currently playing track's file
+through the standard tag-writing path, a brief audio glitch is
+audible. The likely cause is that embedding artwork into an existing
+tag grows the tag payload, which forces the tag writer to rewrite the
+file in place and shift the audio data; GStreamer is reading from the
+same file at the same time, so its in-flight reads hit inconsistent
+bytes. The correct fix is an atomic replace-by-rename in the
+tag-writing path (write to a sibling temp file, fsync, `rename(2)` over
+the original): on Linux the kernel keeps GStreamer's open file
+descriptor pointing at the original inode until the descriptor is
+closed, so the new bytes only affect future opens. This fix is the
+load-bearing change; until it lands, the glitch is a tolerated cosmetic
+issue and not a dealbreaker. No workaround should be introduced in the
+fetch path itself — pausing playback, deferring writes until the track
+ends, or skipping the write entirely would all be hacks that paper
+over the real defect in the tag-writing layer.
 
 Open question: whether the missing-artwork icon also belongs on Albums
 grid tiles by default (always visible for art-less albums), or only on
@@ -834,30 +883,30 @@ changing its appearance:
 
 Smart playlists are shipped as rule-based saved queries over the local
 library (domain rules, runtime evaluation, sidebar rows, editor surface,
-folder grouping). Two follow-ups still pending:
+folder grouping). Relative-date evaluation runs against an injectable
+`Clock` plumbed through `ApplicationRuntime`, so tests assert
+date-window behavior deterministically against a fake clock.
 
-- **First-run defaults**: seed a small starter set on a fresh library so it
-  is immediately useful, in the iTunes tradition. These are ordinary
-  user-editable smart playlists — the user can rename, modify, or delete
-  them like any other. The default set deliberately excludes the iTunes
-  entries that don't fit Sustain's pure-local-music scope (no Music Videos,
-  no Purchased, no podcast/audiobook buckets unless those media kinds are
-  introduced later). Defaults to ship:
-  - **Recently Added** — added in the last 2 weeks, newest first
-  - **Recently Played** — played in the last 2 weeks, sorted by last-played
-    descending
-  - **Top 25 Most Played** — highest play count, limited to 25
-  - **Top Rated** — rating ≥ 4 stars
-  - **Unplayed** — play count is 0
-  - **Loved** — rating = 5 stars (the "favourites" bucket)
-- **Injectable clock for relative-date rules**: relative-date evaluation
-  currently reaches for `SystemTime::now()` directly. Plumb an injectable
-  clock through so the relative-date rules ("in the last 2 weeks") are
-  deterministic in tests.
+A freshly created library is seeded once with five starter smart
+playlists, gated on `SqliteLibraryStore::was_freshly_created()` (no
+runtime flag, no meta state — schema creation is the trigger). The set
+deliberately excludes iTunes entries that don't fit Sustain's
+pure-local-music scope (no Music Videos, no Purchased, no
+podcast/audiobook buckets) and avoids iTunes-specific vocabulary like
+"Loved". Shipped defaults:
 
-Exact default rule shapes are open to refinement as the smart-playlist rule
-set grows; the principle is that a freshly populated library is never empty
-of useful default organisation.
+- **Recently Added** — `Date Added` in the last 14 days
+- **Recently Played** — `Last Played` in the last 14 days
+- **Top 25 Most Played** — `Plays > 0`, limited to 25 by Most Often
+  Played
+- **4+ Stars** — rating ≥ 4
+- **Unplayed** — `Plays = 0`
+
+The entries are ordinary user-editable smart playlists — they can be
+renamed, modified, or deleted like any other, and a deletion sticks
+(the seed never re-runs on an existing database). Exact rule shapes
+remain open to refinement; the principle is that a freshly populated
+library is never empty of useful default organisation.
 
 ## Keyboard Shortcuts
 
@@ -938,6 +987,53 @@ rotating sync icon while active.
 
 Wrap GStreamer behind a playback service so no other crate depends on pipeline
 details.
+
+## Status Feedback Behavior (Desired)
+
+The bottom-right status surface that today carries scan progress and other
+background-task state should evolve into a small notification lane with two
+properties on top of what it already does. Both are desired features that
+need a feasibility pass before implementation, particularly around GTK4
+animation primitives and the exact threading/ownership model for a queue of
+ephemeral messages.
+
+- **Auto-dismiss for ephemeral messages.** Transient outcome messages
+  (e.g. "Imported 12 tracks", "No cover art found for this track",
+  "Saved playlist") fade out and disappear after a short timeout instead
+  of persisting until the next message replaces them. Persistent
+  in-progress states (the rotating sync icon while a scan is running,
+  long-lived background tasks) do **not** auto-dismiss — they stay
+  visible until the underlying task completes. The exact timeout is a
+  product decision, not load-bearing on the design; somewhere in the
+  3–6 second range is the starting point.
+- **Multi-feedback carousel for concurrent operations.** When multiple
+  operations finish close together, messages should not stomp on each
+  other. Instead, they queue and animate horizontally — each new
+  message slides in from the right, the previous one slides left and
+  fades toward transparency, so the user can briefly read what just
+  happened before the next message takes the foreground. The lane
+  shows one message at a time at full opacity, with the outgoing one
+  briefly visible mid-fade for continuity.
+
+Constraints and open questions for the feasibility pass:
+
+- the lane must not block the GTK main thread; animations should be
+  driven by GTK's frame clock / `Adw` animation primitives, not by
+  application-level timers spinning on the UI
+- the message queue is application state, not widget state, so
+  background tasks dispatch messages through the same command/state
+  path as other runtime events; the widget only renders the current
+  head of the queue
+- persistent vs. ephemeral is a property of the message itself
+  (background-task progress is persistent; one-shot outcomes are
+  ephemeral), not of the widget
+- if the queue grows unbounded under a burst (e.g. a bulk operation
+  emitting one message per track), the lane should coalesce or
+  collapse rather than animate through hundreds of messages — the
+  exact policy (drop intermediate, replace-by-category, summary
+  message) is to be settled with the maintainer
+- accessibility: screen readers should observe each message as it
+  appears regardless of the visual carousel timing
 
 Minimum playback surface:
 
@@ -1028,7 +1124,12 @@ Open design questions to resolve before implementation:
 
 - which metadata provider(s) to use (MusicBrainz is the obvious local-friendly
   candidate; Cover Art Archive for artwork; AcoustID/Chromaprint for
-  fingerprint-based identification when tags are too sparse to match by text)
+  fingerprint-based identification when tags are too sparse to match by text).
+  None of these require a *user-supplied* key: MusicBrainz and Cover Art
+  Archive are anonymous, and AcoustID's client key is an app-level secret
+  shipped with Sustain (as Picard ships its own). No Settings credentials
+  surface is needed for this feature on its own; that only becomes a
+  question if a later feature introduces per-account integration.
 - match-confidence threshold and how the user is informed when a track was
   skipped because no confident match was found
 - whether the user can run the actions on a selection (e.g. selected tracks in
@@ -1050,6 +1151,18 @@ Constraints if/when this is built:
 - per-track outcomes (filled, skipped-no-match, skipped-already-present,
   failed) are reported as explicit results, consistent with the scanner's
   outcome reporting
+
+Known issue — **audio glitch when artwork is written to a currently
+playing file**. The same write-while-playing defect documented in the
+now-playing artwork note in `## UI Direction` applies here, with the
+same fix path: the tag-writing layer needs an atomic
+replace-by-rename so GStreamer's open file descriptor keeps reading
+the original inode while the new file takes the destination path.
+Until that lands, expect a brief audible glitch when artwork or tag
+fields are written to the file underneath playback. This is the
+write-path's defect to fix, not the backfill feature's to work
+around — no pausing of playback, no deferral of writes, no
+skipping-while-playing should be introduced here.
 
 This feature is out of scope for the first vertical slice. It should not be
 attempted before the local metadata scan, tag-writing path, and background-task

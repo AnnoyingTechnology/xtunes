@@ -121,6 +121,7 @@ pub trait LibraryStore: Send + Sync {
 #[derive(Debug)]
 pub struct SqliteLibraryStore {
     connection: Mutex<Connection>,
+    freshly_created: bool,
 }
 
 impl SqliteLibraryStore {
@@ -134,21 +135,41 @@ impl SqliteLibraryStore {
             std::fs::create_dir_all(parent)
                 .map_err(|error| StoreError::Database(error.to_string()))?;
         }
+        let freshly_created = !path.exists();
         let connection = Connection::open(path).map_err(StoreError::from)?;
-        Self::from_connection(connection)
+        Self::from_connection(connection, freshly_created)
     }
 
     pub fn open_in_memory() -> StoreResult<Self> {
         let connection = Connection::open_in_memory().map_err(StoreError::from)?;
-        Self::from_connection(connection)
+        Self::from_connection(connection, true)
     }
 
-    fn from_connection(connection: Connection) -> StoreResult<Self> {
+    fn from_connection(connection: Connection, freshly_created: bool) -> StoreResult<Self> {
+        // SQLite silently ignores WAL on `:memory:` databases, so tests
+        // keep working without a special case here.
+        connection
+            .execute_batch(
+                r#"
+                PRAGMA journal_mode = WAL;
+                PRAGMA synchronous = NORMAL;
+                "#,
+            )
+            .map_err(StoreError::from)?;
         let store = Self {
             connection: Mutex::new(connection),
+            freshly_created,
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    // True when this open() call brought the database file into
+    // existence. Callers (typically the runtime at startup) use this to
+    // decide whether to perform one-shot first-run setup such as seeding
+    // the default smart playlists. Always true for in-memory stores.
+    pub fn was_freshly_created(&self) -> bool {
+        self.freshly_created
     }
 
     fn connection_guard(&self) -> StoreResult<MutexGuard<'_, Connection>> {
@@ -1211,6 +1232,29 @@ mod tests {
         let query = LibraryQuery::all().sorted_by(TrackSort::default());
 
         assert_eq!(query, LibraryQuery::default());
+    }
+
+    #[test]
+    fn sqlite_store_reports_freshly_created_only_on_first_open() {
+        let dir = std::env::temp_dir().join(format!(
+            "sustain_freshness_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create test directory");
+        let path = dir.join("library.sqlite");
+
+        let first = SqliteLibraryStore::open(&path).expect("open creates the database file");
+        assert!(first.was_freshly_created());
+        drop(first);
+
+        let second = SqliteLibraryStore::open(&path).expect("reopen existing database");
+        assert!(!second.was_freshly_created());
+        drop(second);
+
+        std::fs::remove_dir_all(&dir).expect("clean up test directory");
     }
 
     #[test]

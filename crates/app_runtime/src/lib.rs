@@ -12,16 +12,17 @@ use std::{
 };
 
 pub use sustain_domain::{
-    ApplicationCommand, ApplicationQuery, DEFAULT_PLAYBACK_VOLUME_PERCENT, FieldChange,
+    ApplicationCommand, ApplicationQuery, Clock, DEFAULT_PLAYBACK_VOLUME_PERCENT, FieldChange,
     LibraryManagementMode, LibrarySettings, MetadataChange, PlayStatistics, PlaybackCommand,
     PlaybackOptions, PlaybackQueue, PlaybackQueueSource, PlaybackSettings, PlaybackState, Playlist,
     PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId, PlaylistItem, Rating, RepeatMode,
     SmartPlaylist, SmartPlaylistDateField, SmartPlaylistId, SmartPlaylistLimit,
     SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistNumberField,
     SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField,
-    SmartPlaylistTextOperator, Track, TrackAvailability, TrackColumnEntry, TrackColumnLayout,
-    TrackColumnLayoutScope, TrackContentHash, TrackId, TrackLocation, TrackMetadata,
-    TrackPlaybackSource, TrackRelativePath, UserSettings, VolumePercent, matching_tracks,
+    SmartPlaylistTextOperator, SystemClock, Track, TrackAvailability, TrackColumnEntry,
+    TrackColumnLayout, TrackColumnLayoutScope, TrackContentHash, TrackId, TrackLocation,
+    TrackMetadata, TrackPlaybackSource, TrackRelativePath, UserSettings, VolumePercent,
+    matching_tracks,
 };
 use sustain_library_store::LibraryStore;
 pub use sustain_metadata::MetadataService;
@@ -209,6 +210,7 @@ pub struct ApplicationRuntime {
     remote_metadata_service: Option<Arc<dyn RemoteMetadataService>>,
     artwork_fetcher: Option<artwork_fetcher::ArtworkFetcher>,
     artwork_fetch_result_sink: Option<async_channel::Sender<ArtworkFetchResult>>,
+    clock: Arc<dyn Clock>,
 }
 
 impl ApplicationRuntime {
@@ -235,6 +237,7 @@ impl ApplicationRuntime {
             remote_metadata_service: None,
             artwork_fetcher: None,
             artwork_fetch_result_sink: None,
+            clock: Arc::new(SystemClock),
         }
     }
 
@@ -267,7 +270,13 @@ impl ApplicationRuntime {
             remote_metadata_service: None,
             artwork_fetcher: None,
             artwork_fetch_result_sink: None,
+            clock: Arc::new(SystemClock),
         })
+    }
+
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     pub fn with_library_services(
@@ -559,7 +568,6 @@ impl ApplicationRuntime {
     pub fn smart_playlist_matching_tracks(
         &self,
         smart_playlist_id: SmartPlaylistId,
-        now: std::time::SystemTime,
     ) -> Vec<&Track> {
         let Some(smart_playlist) = self
             .smart_playlists
@@ -568,7 +576,11 @@ impl ApplicationRuntime {
         else {
             return Vec::new();
         };
-        matching_tracks(&self.library_tracks, &smart_playlist.rules, now)
+        matching_tracks(
+            &self.library_tracks,
+            &smart_playlist.rules,
+            self.clock.now(),
+        )
     }
 }
 
@@ -586,11 +598,12 @@ mod tests {
     };
 
     use sustain_domain::{
-        ApplicationCommand, FieldChange, LibraryManagementMode, PlayStatistics, PlaybackCommand,
-        PlaybackOptions, PlaybackState, Playlist, PlaylistFolderId, PlaylistId, PlaylistItem,
-        Rating, RepeatMode, SmartPlaylistId, SmartPlaylistMatchKind, SmartPlaylistRule,
-        SmartPlaylistRuleSet, SmartPlaylistTextField, SmartPlaylistTextOperator, Track, TrackId,
-        TrackLocation, TrackMetadata, UserSettings, VolumePercent,
+        ApplicationCommand, Clock, FieldChange, LibraryManagementMode, PlayStatistics,
+        PlaybackCommand, PlaybackOptions, PlaybackState, Playlist, PlaylistFolderId, PlaylistId,
+        PlaylistItem, Rating, RepeatMode, SmartPlaylist, SmartPlaylistDateField, SmartPlaylistId,
+        SmartPlaylistMatchKind, SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField,
+        SmartPlaylistTextOperator, Track, TrackId, TrackLocation, TrackMetadata, UserSettings,
+        VolumePercent,
     };
     use sustain_library_store::{InMemoryLibraryStore, LibraryStore, StoreResult};
     use sustain_metadata::{MetadataChange, MetadataError, MetadataResult};
@@ -2337,6 +2350,108 @@ mod tests {
             })
             .expect("delete smart playlist");
         assert!(runtime.smart_playlists().is_empty());
+    }
+
+    #[test]
+    fn seeding_default_smart_playlists_installs_the_starter_set() {
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+        runtime
+            .seed_default_smart_playlists()
+            .expect("seed succeeds on fresh library");
+
+        let names: Vec<&str> = runtime
+            .smart_playlists()
+            .iter()
+            .map(|smart| smart.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Recently Added",
+                "Recently Played",
+                "Top 25 Most Played",
+                "4+ Stars",
+                "Unplayed",
+            ]
+        );
+    }
+
+    #[test]
+    fn smart_playlist_evaluation_uses_injected_clock() {
+        use std::num::NonZeroU32;
+        use std::time::{Duration, SystemTime};
+
+        let last_played = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let store = Arc::new(InMemoryLibraryStore::new());
+
+        let mut track = test_track(track_id(1), "track.flac");
+        track.statistics.last_played_at = Some(last_played);
+        store.save_track(track).expect("save track");
+
+        let recently_played = SmartPlaylist {
+            id: smart_id(1),
+            name: "Recently Played".to_owned(),
+            parent_folder_id: None,
+            position: 0,
+            rules: SmartPlaylistRuleSet {
+                match_kind: SmartPlaylistMatchKind::All,
+                rules: vec![SmartPlaylistRule::DateInLast {
+                    field: SmartPlaylistDateField::LastPlayed,
+                    days: NonZeroU32::new(7).expect("positive days"),
+                }],
+                limit: None,
+            },
+        };
+        store
+            .save_smart_playlist(recently_played)
+            .expect("save smart playlist");
+
+        let fake_clock = Arc::new(FakeClock::new(last_played));
+        let runtime = ApplicationRuntime::new()
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .expect("library services initialize")
+            .with_clock(fake_clock.clone());
+
+        fake_clock.set(last_played + Duration::from_secs(86_400));
+        assert_eq!(
+            runtime.smart_playlist_matching_tracks(smart_id(1)).len(),
+            1,
+            "track played within the window must match"
+        );
+
+        fake_clock.set(last_played + Duration::from_secs(86_400 * 10));
+        assert_eq!(
+            runtime.smart_playlist_matching_tracks(smart_id(1)).len(),
+            0,
+            "track played outside the window must not match"
+        );
+    }
+
+    #[derive(Debug)]
+    struct FakeClock {
+        now: Mutex<std::time::SystemTime>,
+    }
+
+    impl FakeClock {
+        fn new(now: std::time::SystemTime) -> Self {
+            Self {
+                now: Mutex::new(now),
+            }
+        }
+
+        fn set(&self, now: std::time::SystemTime) {
+            *self.now.lock().expect("fake clock lock") = now;
+        }
+    }
+
+    impl Clock for FakeClock {
+        fn now(&self) -> std::time::SystemTime {
+            *self.now.lock().expect("fake clock lock")
+        }
     }
 
     #[test]

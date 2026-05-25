@@ -37,12 +37,18 @@ fn main() {
 
     match sustain_library_store::SqliteLibraryStore::open_default() {
         Ok(library_store) => {
+            let was_freshly_created = library_store.was_freshly_created();
             if let Err(error) = runtime.set_library_services(
                 Arc::new(library_store),
                 Arc::new(sustain_metadata::LoftyMetadataService),
             ) {
                 eprintln!("Sustain: library services failed to initialize ({error:?}).");
                 process::exit(1);
+            }
+            if was_freshly_created {
+                if let Err(error) = runtime.seed_default_smart_playlists() {
+                    eprintln!("Sustain: failed to seed default smart playlists ({error:?}).");
+                }
             }
         }
         Err(error) => {

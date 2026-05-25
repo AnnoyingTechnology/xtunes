@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+mod clock;
 mod command;
 mod id;
 mod managed_library;
@@ -14,11 +15,13 @@ mod query;
 mod rating;
 mod settings;
 mod smart_playlist;
+mod smart_playlist_defaults;
 mod smart_playlist_evaluation;
 mod statistics;
 mod track;
 mod track_column_layout;
 
+pub use clock::{Clock, SystemClock};
 pub use command::{ApplicationCommand, ApplicationQuery};
 pub use id::{PlaylistFolderId, PlaylistId, SmartPlaylistId, TrackId};
 pub use managed_library::{
@@ -42,6 +45,7 @@ pub use smart_playlist::{
     SmartPlaylistMatchKind, SmartPlaylistNumberField, SmartPlaylistNumberOperator,
     SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField, SmartPlaylistTextOperator,
 };
+pub use smart_playlist_defaults::default_smart_playlists;
 pub use smart_playlist_evaluation::{matching_tracks, track_matches_rule, track_matches_rule_set};
 pub use statistics::PlayStatistics;
 pub use track::{Track, TrackAvailability, TrackContentHash, TrackLocation, TrackRelativePath};

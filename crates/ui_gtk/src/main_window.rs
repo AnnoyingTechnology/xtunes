@@ -5,7 +5,6 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     rc::Rc,
-    time::SystemTime,
 };
 
 use gtk::prelude::*;
@@ -981,7 +980,7 @@ fn playlist_table_rows_for(
                 .collect()
         }
         Some(SidebarSelection::Item(PlaylistItem::SmartPlaylist(smart_playlist_id))) => runtime
-            .smart_playlist_matching_tracks(smart_playlist_id, SystemTime::now())
+            .smart_playlist_matching_tracks(smart_playlist_id)
             .into_iter()
             .cloned()
             .collect(),
