@@ -21,7 +21,7 @@ const STATUS_ICON_MISSING: &str = "dialog-warning-symbolic";
 
 #[derive(Clone)]
 pub(super) struct AlbumTrackListView {
-    widget: gtk::Overlay,
+    widget: gtk::ScrolledWindow,
 }
 
 impl AlbumTrackListView {
@@ -43,8 +43,7 @@ impl AlbumTrackListView {
         // right-click context menus still work without a selection model.
         let selection = gtk::NoSelection::new(Some(store));
 
-        let popover_anchor = build_context_popover_anchor();
-        let context_menu = AlbumTrackContextMenu::new(context_menu, popover_anchor.clone());
+        let context_menu = AlbumTrackContextMenu::new(context_menu);
         let factory = build_row_factory(
             palette_provider.cloned(),
             context_menu.clone(),
@@ -85,16 +84,10 @@ impl AlbumTrackListView {
         scroller.add_css_class("album-track-table-scroller");
         scroller.set_child(Some(&list));
 
-        let shell = gtk::Overlay::new();
-        shell.set_hexpand(true);
-        shell.set_vexpand(false);
-        shell.set_child(Some(&scroller));
-        shell.add_overlay(&popover_anchor);
-
-        Self { widget: shell }
+        Self { widget: scroller }
     }
 
-    pub(super) fn widget(&self) -> gtk::Overlay {
+    pub(super) fn widget(&self) -> gtk::ScrolledWindow {
         self.widget.clone()
     }
 }
@@ -241,15 +234,13 @@ fn row_track_id(item: Option<glib::Object>) -> Option<TrackId> {
 #[derive(Clone)]
 struct AlbumTrackContextMenu {
     menu: TrackRowContextMenu,
-    popover_anchor: gtk::MenuButton,
     rows: Rc<RefCell<Vec<AlbumTrackContextRow>>>,
 }
 
 impl AlbumTrackContextMenu {
-    fn new(menu: TrackRowContextMenu, popover_anchor: gtk::MenuButton) -> Self {
+    fn new(menu: TrackRowContextMenu) -> Self {
         Self {
             menu,
-            popover_anchor,
             rows: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -267,69 +258,52 @@ impl AlbumTrackContextMenu {
             let Some(hit) = context.row_at(&widget, x, y) else {
                 return;
             };
-            let Some(track_id) = row_track_id(hit.list_item.item()) else {
+            let Some(track_id) = row_track_id(hit.item()) else {
                 return;
             };
 
             gesture.set_state(gtk::EventSequenceState::Claimed);
-            let (anchor_x, anchor_y) = widget
-                .compute_point(
-                    &context.popover_anchor,
-                    &gtk::graphene::Point::new(x as f32, y as f32),
-                )
-                .map(|point| (point.x() as f64, point.y() as f64))
-                .unwrap_or((x, y));
-            let menu = context.menu.clone();
-            let popover_anchor = context.popover_anchor.clone();
-            glib::idle_add_local_once(move || {
-                menu.popup_from_menu_button(vec![track_id], &popover_anchor, anchor_x, anchor_y);
-            });
+            context.menu.popup_at(vec![track_id], &widget, x, y);
         });
         widget.add_controller(gesture);
     }
 
     fn register_row(&self, list_item: &gtk::ListItem, row: &gtk::Box) {
         self.rows.borrow_mut().push(AlbumTrackContextRow {
-            widget: row.clone().upcast(),
-            list_item: list_item.clone(),
+            widget: row.clone().upcast::<gtk::Widget>().downgrade(),
+            list_item: list_item.downgrade(),
         });
     }
 
-    fn row_at(&self, event_widget: &gtk::Widget, x: f64, y: f64) -> Option<AlbumTrackContextRow> {
+    fn row_at(&self, event_widget: &gtk::Widget, x: f64, y: f64) -> Option<gtk::ListItem> {
         let mut current = event_widget.pick(x, y, gtk::PickFlags::DEFAULT);
         while let Some(widget) = current {
-            if let Some(hit) = self
-                .rows
-                .borrow()
-                .iter()
-                .find(|row| row.widget == widget)
-                .cloned()
-            {
+            if let Some(hit) = self.list_item_for_widget(&widget) {
                 return Some(hit);
             }
             current = widget.parent();
         }
         None
     }
-}
 
-fn build_context_popover_anchor() -> gtk::MenuButton {
-    let anchor = gtk::MenuButton::new();
-    anchor.add_css_class("context-popover-anchor");
-    anchor.set_has_frame(false);
-    anchor.set_focusable(false);
-    anchor.set_can_target(false);
-    anchor.set_halign(gtk::Align::Fill);
-    anchor.set_valign(gtk::Align::Fill);
-    anchor.set_hexpand(true);
-    anchor.set_vexpand(true);
-    anchor
+    fn list_item_for_widget(&self, widget: &gtk::Widget) -> Option<gtk::ListItem> {
+        let mut rows = self.rows.borrow_mut();
+        rows.retain(|row| row.widget.upgrade().is_some() && row.list_item.upgrade().is_some());
+        rows.iter().find_map(|row| {
+            let registered = row.widget.upgrade()?;
+            if registered == *widget {
+                row.list_item.upgrade()
+            } else {
+                None
+            }
+        })
+    }
 }
 
 #[derive(Clone)]
 struct AlbumTrackContextRow {
-    widget: gtk::Widget,
-    list_item: gtk::ListItem,
+    widget: glib::WeakRef<gtk::Widget>,
+    list_item: glib::WeakRef<gtk::ListItem>,
 }
 
 fn refresh_status_icon(

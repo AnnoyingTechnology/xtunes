@@ -26,7 +26,7 @@ const STATUS_ICON_MISSING: &str = "dialog-warning-symbolic";
 pub(super) struct TrackTableContextMenu {
     menu: TrackRowContextMenu,
     selection: gtk::MultiSelection,
-    popover_anchor: gtk::MenuButton,
+    popover_parent: glib::WeakRef<gtk::ColumnView>,
     cells: Rc<RefCell<Vec<TrackTableContextCell>>>,
 }
 
@@ -34,32 +34,32 @@ impl TrackTableContextMenu {
     pub(super) fn new(
         menu: TrackRowContextMenu,
         selection: gtk::MultiSelection,
-        popover_anchor: gtk::MenuButton,
+        popover_parent: gtk::ColumnView,
     ) -> Self {
         Self {
             menu,
             selection,
-            popover_anchor,
+            popover_parent: popover_parent.downgrade(),
             cells: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
-    pub(super) fn install_controller(&self, widget: &impl IsA<gtk::Widget>) {
+    pub(super) fn install_controller(&self) {
         let gesture = gtk::GestureClick::new();
         gesture.set_button(gdk::BUTTON_SECONDARY);
         gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
 
         let context = self.clone();
         gesture.connect_released(move |gesture, _n_press, x, y| {
-            let Some(widget) = gesture.widget() else {
+            let Some(popover_parent) = context.popover_parent.upgrade() else {
                 return;
             };
-            let Some(hit) = context.cell_at(&widget, x, y) else {
+            let Some(list_item) = context.cell_at(popover_parent.upcast_ref(), x, y) else {
                 return;
             };
 
             gesture.set_state(gtk::EventSequenceState::Claimed);
-            let position = hit.list_item.position();
+            let position = list_item.position();
             if position == gtk::INVALID_LIST_POSITION {
                 return;
             }
@@ -71,51 +71,49 @@ impl TrackTableContextMenu {
             if track_ids.is_empty() {
                 return;
             }
-            let (anchor_x, anchor_y) = widget
-                .compute_point(
-                    &context.popover_anchor,
-                    &gtk::graphene::Point::new(x as f32, y as f32),
-                )
-                .map(|point| (point.x() as f64, point.y() as f64))
-                .unwrap_or((x, y));
-            let menu = context.menu.clone();
-            let popover_anchor = context.popover_anchor.clone();
-            glib::idle_add_local_once(move || {
-                menu.popup_from_menu_button(track_ids, &popover_anchor, anchor_x, anchor_y);
-            });
+            context.menu.popup_at(track_ids, &popover_parent, x, y);
         });
-        widget.add_controller(gesture);
+        if let Some(popover_parent) = self.popover_parent.upgrade() {
+            popover_parent.add_controller(gesture);
+        }
     }
 
     fn register_cell(&self, list_item: &gtk::ListItem, cell: &gtk::Box) {
         self.cells.borrow_mut().push(TrackTableContextCell {
-            widget: cell.clone().upcast(),
-            list_item: list_item.clone(),
+            widget: cell.clone().upcast::<gtk::Widget>().downgrade(),
+            list_item: list_item.downgrade(),
         });
     }
 
-    fn cell_at(&self, event_widget: &gtk::Widget, x: f64, y: f64) -> Option<TrackTableContextCell> {
+    fn cell_at(&self, event_widget: &gtk::Widget, x: f64, y: f64) -> Option<gtk::ListItem> {
         let mut current = event_widget.pick(x, y, gtk::PickFlags::DEFAULT);
         while let Some(widget) = current {
-            if let Some(hit) = self
-                .cells
-                .borrow()
-                .iter()
-                .find(|cell| cell.widget == widget)
-                .cloned()
-            {
+            if let Some(hit) = self.list_item_for_widget(&widget) {
                 return Some(hit);
             }
             current = widget.parent();
         }
         None
     }
+
+    fn list_item_for_widget(&self, widget: &gtk::Widget) -> Option<gtk::ListItem> {
+        let mut cells = self.cells.borrow_mut();
+        cells.retain(|cell| cell.widget.upgrade().is_some() && cell.list_item.upgrade().is_some());
+        cells.iter().find_map(|cell| {
+            let registered = cell.widget.upgrade()?;
+            if registered == *widget {
+                cell.list_item.upgrade()
+            } else {
+                None
+            }
+        })
+    }
 }
 
 #[derive(Clone)]
 struct TrackTableContextCell {
-    widget: gtk::Widget,
-    list_item: gtk::ListItem,
+    widget: glib::WeakRef<gtk::Widget>,
+    list_item: glib::WeakRef<gtk::ListItem>,
 }
 
 struct StatusBinding {

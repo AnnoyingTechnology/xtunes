@@ -37,7 +37,7 @@ struct ManagedColumn {
 
 #[derive(Clone)]
 pub(crate) struct TrackTable {
-    widget: gtk::Overlay,
+    scroller: gtk::ScrolledWindow,
     table: gtk::ColumnView,
     store: gio::ListStore,
     selection: gtk::MultiSelection,
@@ -60,8 +60,8 @@ pub(crate) struct TrackTable {
 const LAYOUT_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl TrackTable {
-    pub(crate) fn widget(&self) -> gtk::Overlay {
-        self.widget.clone()
+    pub(crate) fn widget(&self) -> gtk::ScrolledWindow {
+        self.scroller.clone()
     }
 
     pub(crate) fn replace_rows(&self, rows: Vec<TrackTableRow>) {
@@ -303,18 +303,11 @@ pub(crate) fn build_track_table(
     scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     scroller.set_vexpand(true);
     scroller.set_hexpand(true);
-    let popover_anchor = build_context_popover_anchor();
 
-    let table_shell = gtk::Overlay::new();
-    table_shell.set_hexpand(true);
-    table_shell.set_vexpand(true);
-    table_shell.set_child(Some(&scroller));
-    table_shell.add_overlay(&popover_anchor);
-
-    let context_menu = context_menu
-        .map(|menu| TrackTableContextMenu::new(menu, selection.clone(), popover_anchor));
+    let context_menu =
+        context_menu.map(|menu| TrackTableContextMenu::new(menu, selection.clone(), table.clone()));
     if let Some(context_menu) = &context_menu {
-        context_menu.install_controller(&scroller);
+        context_menu.install_controller();
     }
 
     table.append_column(&build_status_column(
@@ -398,7 +391,7 @@ pub(crate) fn build_track_table(
 
     scroller.set_child(Some(&table));
     TrackTable {
-        widget: table_shell,
+        scroller,
         table,
         store,
         selection,
@@ -409,19 +402,6 @@ pub(crate) fn build_track_table(
         layout_changed,
         pending_save,
     }
-}
-
-fn build_context_popover_anchor() -> gtk::MenuButton {
-    let anchor = gtk::MenuButton::new();
-    anchor.add_css_class("context-popover-anchor");
-    anchor.set_has_frame(false);
-    anchor.set_focusable(false);
-    anchor.set_can_target(false);
-    anchor.set_halign(gtk::Align::Fill);
-    anchor.set_valign(gtk::Align::Fill);
-    anchor.set_hexpand(true);
-    anchor.set_vexpand(true);
-    anchor
 }
 
 fn install_layout_change_listeners(

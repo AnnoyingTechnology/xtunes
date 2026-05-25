@@ -271,10 +271,10 @@ impl TrackRowContextMenu {
         self
     }
 
-    pub(crate) fn popup_from_menu_button(
+    pub(crate) fn popup_at(
         &self,
         track_ids: Vec<TrackId>,
-        button: &gtk::MenuButton,
+        anchor: &impl IsA<gtk::Widget>,
         x: f64,
         y: f64,
     ) {
@@ -282,65 +282,64 @@ impl TrackRowContextMenu {
             return;
         }
 
-        let popover = self.build_popover(track_ids);
-        let rect = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
-        popover.set_pointing_to(Some(&rect));
-
-        let button_for_close = button.clone();
-        popover.connect_closed(move |_| {
-            button_for_close.set_popover(None::<&gtk::Popover>);
-        });
-
-        button.set_popover(Some(&popover));
-        button.popup();
+        self.popup_at_parent(track_ids, anchor, anchor, x, y);
     }
 
-    fn build_popover(&self, track_ids: Vec<TrackId>) -> gtk::Popover {
+    pub(crate) fn popup_at_parent(
+        &self,
+        track_ids: Vec<TrackId>,
+        anchor: &impl IsA<gtk::Widget>,
+        popover_parent: &impl IsA<gtk::Widget>,
+        x: f64,
+        y: f64,
+    ) {
+        if track_ids.is_empty() {
+            return;
+        }
+
+        let (parent_x, parent_y) = if anchor.as_ref() == popover_parent.as_ref() {
+            (x, y)
+        } else {
+            let Some(point) = anchor.as_ref().compute_point(
+                popover_parent.as_ref(),
+                &gtk::graphene::Point::new(x as f32, y as f32),
+            ) else {
+                return;
+            };
+            (point.x() as f64, point.y() as f64)
+        };
+
         let popover = gtk::Popover::new();
         popover.set_has_arrow(false);
         popover.add_css_class("compact-context-menu");
-        popover.set_child(Some(&self.menu_content(&popover, track_ids)));
-        popover
+        popover.set_parent(popover_parent.as_ref());
+        popover.set_child(Some(&self.build_main_page(&popover, track_ids)));
+
+        let popover_for_close = popover.clone();
+        popover.connect_closed(move |_| {
+            popover_for_close.unparent();
+        });
+
+        let rect = gdk::Rectangle::new(parent_x as i32, parent_y as i32, 1, 1);
+        popover.set_pointing_to(Some(&rect));
+        popover.popup();
     }
 
-    fn menu_content(&self, popover: &gtk::Popover, track_ids: Vec<TrackId>) -> gtk::Box {
-        let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
-
-        let stack = gtk::Stack::new();
-        stack.set_transition_type(gtk::StackTransitionType::SlideLeftRight);
-        stack.set_transition_duration(140);
-
-        stack.add_named(
-            &self.build_main_page(popover, &stack, track_ids.clone()),
-            Some("main"),
-        );
-        if let Some(add) = &self.add_to_playlist {
-            stack.add_named(
-                &build_add_to_playlist_page(add, popover, &stack, track_ids.clone()),
-                Some("playlists"),
-            );
-        }
-        stack.set_visible_child_name("main");
-
-        outer.append(&stack);
-        outer
-    }
-
-    fn build_main_page(
-        &self,
-        popover: &gtk::Popover,
-        stack: &gtk::Stack,
-        track_ids: Vec<TrackId>,
-    ) -> gtk::Box {
+    fn build_main_page(&self, popover: &gtk::Popover, track_ids: Vec<TrackId>) -> gtk::Box {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.add_css_class("track-context-menu");
 
         let mut has_safe_section = false;
-        if self.add_to_playlist.is_some() {
+        if let Some(add) = &self.add_to_playlist {
             let add_button = submenu_button("Add to Playlist\u{2026}");
-            let stack_for_add = stack.clone();
+            let add = add.clone();
+            let menu = self.clone();
+            let popover = popover.clone();
+            let track_ids = track_ids.clone();
             add_button.connect_clicked(move |_| {
-                stack_for_add.set_visible_child_name("playlists");
+                let page =
+                    build_add_to_playlist_page(&add, &popover, menu.clone(), track_ids.clone());
+                popover.set_child(Some(&page));
             });
             content.append(&add_button);
             has_safe_section = true;
@@ -393,7 +392,7 @@ impl TrackRowContextMenu {
 fn build_add_to_playlist_page(
     action: &AddToPlaylistAction,
     popover: &gtk::Popover,
-    stack: &gtk::Stack,
+    menu: TrackRowContextMenu,
     track_ids: Vec<TrackId>,
 ) -> gtk::Box {
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -401,9 +400,12 @@ fn build_add_to_playlist_page(
     content.add_css_class("track-context-submenu");
 
     let back_button = submenu_back_button("Back");
-    let stack_for_back = stack.clone();
+    let popover_for_back = popover.clone();
+    let menu_for_back = menu.clone();
+    let track_ids_for_back = track_ids.clone();
     back_button.connect_clicked(move |_| {
-        stack_for_back.set_visible_child_name("main");
+        let page = menu_for_back.build_main_page(&popover_for_back, track_ids_for_back.clone());
+        popover_for_back.set_child(Some(&page));
     });
     content.append(&back_button);
 
