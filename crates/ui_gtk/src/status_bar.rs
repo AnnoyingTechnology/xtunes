@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
+use std::rc::Rc;
+
 use gtk::prelude::*;
 
 use super::{ApplicationRuntimeError, BackgroundTaskStatus, LibraryScanSummary, STATUS_BAR_HEIGHT};
 use crate::track_table::TrackTableRow;
+
+pub(crate) type CancelBackgroundTaskCallback = Rc<dyn Fn()>;
 
 #[derive(Clone)]
 pub(crate) struct StatusBar {
@@ -14,10 +18,14 @@ pub(crate) struct StatusBar {
     task_box: gtk::Box,
     task_spinner: gtk::Spinner,
     task_label: gtk::Label,
+    cancel_button: gtk::Button,
 }
 
 impl StatusBar {
-    pub(crate) fn new(library_tracks: &[TrackTableRow]) -> Self {
+    pub(crate) fn new(
+        library_tracks: &[TrackTableRow],
+        on_cancel_background_task: CancelBackgroundTaskCallback,
+    ) -> Self {
         let root = gtk::CenterBox::new();
         root.add_css_class("status-bar");
         root.set_height_request(STATUS_BAR_HEIGHT);
@@ -39,12 +47,28 @@ impl StatusBar {
         task_label.add_css_class("task-status-label");
         task_label.set_xalign(1.0);
 
+        let cancel_button = gtk::Button::with_label("Cancel");
+        cancel_button.add_css_class("task-status-cancel");
+        cancel_button.set_valign(gtk::Align::Center);
+        cancel_button.set_visible(false);
+        cancel_button.set_tooltip_text(Some("Cancel"));
+        // Cooperative cancellation request: the click is fire-and-forget,
+        // the runtime sets a flag and the worker stops at its next
+        // checkpoint. We disable the button immediately so the user
+        // does not click it twice while the worker is winding down.
+        let cancel_button_for_click = cancel_button.clone();
+        cancel_button.connect_clicked(move |_| {
+            cancel_button_for_click.set_sensitive(false);
+            on_cancel_background_task();
+        });
+
         let task_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         task_box.add_css_class("task-status");
         task_box.set_valign(gtk::Align::Center);
         task_box.set_halign(gtk::Align::End);
         task_box.append(&task_spinner);
         task_box.append(&task_label);
+        task_box.append(&cancel_button);
 
         root.set_start_widget(Some(&command_label));
         root.set_center_widget(Some(&summary));
@@ -57,9 +81,10 @@ impl StatusBar {
             task_box,
             task_spinner,
             task_label,
+            cancel_button,
         };
         status_bar.update_summary(library_tracks);
-        status_bar.update_task(&BackgroundTaskStatus::Idle);
+        status_bar.update_task(&BackgroundTaskStatus::Idle, false);
         status_bar
     }
 
@@ -84,12 +109,20 @@ impl StatusBar {
         ));
     }
 
-    pub(crate) fn update_task(&self, status: &BackgroundTaskStatus) {
+    pub(crate) fn update_task(&self, status: &BackgroundTaskStatus, cancelling: bool) {
         self.task_box
             .set_visible(!matches!(status, BackgroundTaskStatus::Idle));
         self.task_spinner.set_visible(status.is_running());
         self.task_spinner.set_spinning(status.is_running());
-        self.task_label.set_text(&task_status_text(status));
+        self.task_label
+            .set_text(&task_status_text(status, cancelling));
+        // The Cancel button stays hidden when no task is running, and
+        // is disabled (but visible) once the user has clicked it: the
+        // worker has not yet acknowledged the request so a second
+        // click would be misleading.
+        let show_cancel = status.is_running();
+        self.cancel_button.set_visible(show_cancel);
+        self.cancel_button.set_sensitive(show_cancel && !cancelling);
     }
 
     pub(crate) fn show_command_error(&self, error: &ApplicationRuntimeError) {
@@ -122,7 +155,10 @@ impl StatusBar {
     }
 }
 
-fn task_status_text(status: &BackgroundTaskStatus) -> String {
+fn task_status_text(status: &BackgroundTaskStatus, cancelling: bool) -> String {
+    if cancelling && status.is_running() {
+        return "Cancelling...".to_owned();
+    }
     match status {
         BackgroundTaskStatus::Idle => String::new(),
         BackgroundTaskStatus::LibraryScanRunning => "Scanning library...".to_owned(),
@@ -142,6 +178,12 @@ fn task_status_text(status: &BackgroundTaskStatus) -> String {
 }
 
 fn import_summary_text(summary: &super::LibraryImportSummary) -> String {
+    if summary.cancelled {
+        return format!(
+            "Import stopped: {} added before cancel.",
+            summary.imported_tracks
+        );
+    }
     match (
         summary.imported_tracks,
         summary.duplicate_files,
@@ -221,6 +263,13 @@ pub(crate) fn runtime_error_text(error: &ApplicationRuntimeError) -> &'static st
 }
 
 fn scan_summary_text(summary: &LibraryScanSummary) -> String {
+    if summary.cancelled {
+        return format!(
+            "Scan stopped: {} {} indexed.",
+            summary.scanned_tracks,
+            pluralize(summary.scanned_tracks, "track", "tracks"),
+        );
+    }
     format!(
         "Scan complete: {} {}, {} missing, {} failed",
         summary.scanned_tracks,
@@ -324,6 +373,42 @@ mod tests {
         assert_eq!(
             scan_summary_text(&summary),
             "Scan complete: 10 tracks, 2 missing, 1 failed"
+        );
+    }
+
+    #[test]
+    fn scan_summary_text_reports_a_partial_count_after_cancellation() {
+        let summary = LibraryScanSummary {
+            scanned_tracks: 42,
+            cancelled: true,
+            ..LibraryScanSummary::default()
+        };
+
+        assert_eq!(
+            scan_summary_text(&summary),
+            "Scan stopped: 42 tracks indexed."
+        );
+    }
+
+    #[test]
+    fn task_status_text_switches_to_cancelling_while_a_task_is_winding_down() {
+        assert_eq!(
+            task_status_text(&BackgroundTaskStatus::LibraryScanRunning, true),
+            "Cancelling..."
+        );
+        // Once the worker has reported a completion (cancelled or not),
+        // the local "cancelling" flag clears and we fall back to the
+        // normal completion message.
+        assert_eq!(
+            task_status_text(
+                &BackgroundTaskStatus::LibraryScanCompleted(LibraryScanSummary {
+                    scanned_tracks: 3,
+                    cancelled: true,
+                    ..LibraryScanSummary::default()
+                }),
+                false,
+            ),
+            "Scan stopped: 3 tracks indexed."
         );
     }
 

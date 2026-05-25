@@ -170,7 +170,6 @@ enough to warrant their own design section. Each links to the detailed
 section where applicable; items without a detailed section are scoped
 fully here.
 
-- **Scan cancellation token** — see `## Library Scan Performance`.
 - **Scan parallelization** — see `## Library Scan Performance`.
 - **Live per-phase scan progress in the status bar** — see
   `## Library Scan Performance`.
@@ -406,12 +405,11 @@ rating, metadata cache, and listening statistics.
 
 The scan is off the GTK main thread (background worker + channel), SQLite
 writes are batched in transactions, the library connection runs in WAL
-mode with `synchronous = NORMAL`, and the status bar reports the final
-summary. The structural freeze that motivated this section is resolved.
+mode with `synchronous = NORMAL`, the user can cancel a running scan
+from the status bar, and the status bar reports the final summary.
+The structural freeze that motivated this section is resolved.
 Remaining open work, in priority order:
 
-- add a cancellation token to the scan task so the user can abort a long
-  scan without quitting the app
 - parallelize the CPU/IO-bound phases (tag decoding, hashing, stat) across a
   worker pool sized to the host (`num_cpus`-based, capped), keeping SQLite
   writes funneled through a single writer to avoid lock contention
@@ -424,6 +422,25 @@ the read path gains a second connection, all reads and writes still
 serialize on the single `Mutex<Connection>`, so WAL's reader/writer
 isolation does not yet manifest — but commits are cheaper and the
 infrastructure is in place for the eventual reader connection split.
+
+Cancellation is cooperative: each background task in the status-bar
+lane (scan, import, organize) carries an `Arc<AtomicBool>` flag that
+its worker checks between files and between phases. The status bar
+displays a single "Cancel" button next to the spinner whenever any
+task is running, and clicking it dispatches
+`request_background_task_cancellation` on the runtime — which sets
+whichever of the three flags is currently live. While the worker is
+winding down, the status label switches to "Cancelling..." and the
+button disables; once the worker returns, the result flows through
+the normal `apply_*` path and the summary reports `cancelled: true`.
+Cancelled scans persist the partial set of tracks they did index and
+deliberately skip the missing-tracks sweep — the unwalked portion of
+the library is unknown, not missing. Cancelled imports roll back any
+files copied so far so the filesystem is left exactly as it was
+before the import started. The same pattern is where future
+`Detect BPM` / `Detect key` / `Analyze waveform` runs will plug in:
+their workers will share the cancel button, the `Cancelling...`
+state, and the `cancelled: bool` summary contract.
 
 Non-goals: no bespoke async runtime, no hand-rolled SQLite connection pool
 before measuring whether a single writer thread plus read-only connections
@@ -907,6 +924,61 @@ experience for ex-iTunes users on GNOME.
 playback, navigation, selection/editing, playlists, and window management
 still needs to be specified — including conflict review against GNOME
 conventions and in-app shortcut discoverability.
+
+### Committed shortcuts
+
+The following shortcuts are committed and must be wired as part of the
+broader shortcut pass. They are the iTunes-equivalents translated to
+`Ctrl`, and they must be exposed through the GTK action system (not
+hard-coded key handlers on individual widgets) so they work globally
+across the window, surface uniformly in the GTK shortcuts overlay, and
+can be inspected/overridden through standard GNOME mechanisms.
+
+| Action                                            | Shortcut         |
+|---------------------------------------------------|------------------|
+| Create a new playlist                             | `Ctrl+N`         |
+| Create a new playlist from the current selection  | `Ctrl+Shift+N`   |
+| Create a new Smart Playlist                       | `Ctrl+Alt+N`     |
+| Focus the search field                            | `Ctrl+F`         |
+| Show the selected track's file in the file manager| `Ctrl+R`         |
+| Open the Get Info window for the selected track   | `Ctrl+I`         |
+
+Notes per shortcut:
+
+- `Ctrl+Shift+N` (from-selection) operates on the current Songs-table
+  selection. If the selection is empty, the action is disabled (greyed
+  in the menu, no-op from the keyboard). It must not silently fall
+  back to creating an empty playlist — that's what `Ctrl+N` is for.
+- `Ctrl+R` reuses the existing `Show in folder` context-menu action's
+  underlying command (opens Nautilus, or the user's configured file
+  manager via XDG). On a multi-track selection, scope is to be settled
+  at implementation time (open one window per track is hostile; the
+  likely default is to act on the first selected track and disable the
+  shortcut when multiple tracks span multiple folders).
+- `Ctrl+I` reuses the existing `Get Info` context-menu action. With
+  the deferred multi-track batch-editing question (`## Get Info`),
+  multi-selection behavior tracks whatever Get Info itself settles on,
+  not a separate shortcut-level decision.
+- `Ctrl+F` focuses the existing top-bar search field and selects any
+  current query so a fresh keystroke replaces it, matching standard
+  GNOME find-bar behavior.
+
+### Discoverability: shortcut hints in context menus
+
+Every context-menu entry whose action has a committed keyboard
+shortcut must show that shortcut as muted/secondary text aligned to the
+right edge of the row (e.g. `Get Info        Ctrl+I`). This is the
+standard GTK `MenuItem` accel-label behavior and falls out for free when
+menu items are built from `gio::Action` entries that have an
+accelerator registered against them — that is the required path. Do not
+hand-format shortcut strings into menu labels; the accelerator string
+must come from the action registration so menu text, the shortcuts
+overlay, and the actual key binding cannot drift apart.
+
+The hint is muted (dim-label / secondary text colour) so the menu still
+reads as a list of *actions*, with the shortcuts as ambient reference
+rather than competing for attention. This must work in both native
+light and dark modes.
 
 ## Search Bar
 

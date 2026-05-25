@@ -91,7 +91,17 @@ pub(crate) fn build_main_window(
     let current_search_text: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
 
     let library_tracks = runtime_library_table_rows(&runtime.borrow(), "");
-    let status_bar = StatusBar::new(&library_tracks);
+    let status_bar = {
+        let runtime_for_cancel = runtime.clone();
+        StatusBar::new(
+            &library_tracks,
+            Rc::new(move || {
+                runtime_for_cancel
+                    .borrow()
+                    .request_background_task_cancellation();
+            }),
+        )
+    };
     let command_controller: SharedCommandController = Rc::new(UiCommandController::new(
         runtime.clone(),
         status_bar.clone(),

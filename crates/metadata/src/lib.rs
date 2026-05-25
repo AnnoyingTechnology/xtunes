@@ -7,6 +7,7 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use lofty::{
@@ -69,6 +70,11 @@ pub struct LibraryScan {
     pub tracks: Vec<ScannedTrack>,
     pub skipped_unsupported_files: usize,
     pub failures: Vec<ScanFailure>,
+    // True when the scanner stopped because the cancellation flag was
+    // observed mid-walk. Callers must not interpret an unwalked
+    // subtree as "tracks missing from disk" — partial scans only ever
+    // produce additions/updates, never missing markers.
+    pub cancelled: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,19 +94,30 @@ where
         Self { metadata_service }
     }
 
-    pub fn scan(&self, library_path: &Path) -> Result<LibraryScan, LibraryScanError> {
+    pub fn scan(
+        &self,
+        library_path: &Path,
+        cancellation: &AtomicBool,
+    ) -> Result<LibraryScan, LibraryScanError> {
         if !library_path.is_dir() {
             return Err(LibraryScanError::LibraryPathUnavailable);
         }
 
         let mut scan = LibraryScan::default();
-        self.scan_directory(library_path, library_path, &mut scan);
+        self.scan_directory(library_path, library_path, &mut scan, cancellation);
+        scan.cancelled = scan.cancelled || cancellation.load(Ordering::SeqCst);
         scan.tracks
             .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
         Ok(scan)
     }
 
-    fn scan_directory(&self, library_path: &Path, directory: &Path, scan: &mut LibraryScan) {
+    fn scan_directory(
+        &self,
+        library_path: &Path,
+        directory: &Path,
+        scan: &mut LibraryScan,
+        cancellation: &AtomicBool,
+    ) {
         let Ok(entries) = fs::read_dir(directory) else {
             scan.failures.push(ScanFailure {
                 path: directory.to_path_buf(),
@@ -110,6 +127,10 @@ where
         };
 
         for entry in entries.flatten() {
+            if cancellation.load(Ordering::SeqCst) {
+                scan.cancelled = true;
+                return;
+            }
             let path = entry.path();
             let Ok(metadata) = fs::symlink_metadata(&path) else {
                 scan.failures.push(ScanFailure {
@@ -119,7 +140,10 @@ where
                 continue;
             };
             if metadata.file_type().is_dir() {
-                self.scan_directory(library_path, &path, scan);
+                self.scan_directory(library_path, &path, scan, cancellation);
+                if scan.cancelled {
+                    return;
+                }
             } else if metadata.file_type().is_file() {
                 self.scan_file(library_path, path, metadata.len(), scan);
             }
@@ -592,7 +616,7 @@ mod tests {
         let metadata_service =
             FakeMetadataService::for_paths([root.join("one.mp3"), nested.join("two.flac")]);
         let scan = LibraryScanner::new(&metadata_service)
-            .scan(&root)
+            .scan(&root, &std::sync::atomic::AtomicBool::new(false))
             .expect("scan test directory");
 
         let scanned_paths = scan
@@ -606,6 +630,32 @@ mod tests {
         );
         assert_eq!(scan.skipped_unsupported_files, 1);
         assert_eq!(scan.failures, Vec::new());
+        assert!(!scan.cancelled);
+
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn scanner_returns_partial_results_when_cancellation_is_observed() {
+        let root = unique_test_directory();
+        fs::create_dir_all(&root).expect("create test directory");
+        fs::write(root.join("a.mp3"), b"audio").expect("write a.mp3");
+        fs::write(root.join("b.flac"), b"audio").expect("write b.flac");
+
+        let metadata_service =
+            FakeMetadataService::for_paths([root.join("a.mp3"), root.join("b.flac")]);
+        // Pre-set the cancellation flag so the very first per-entry
+        // check inside the scanner trips. The walk must abort before
+        // visiting any audio file and the result must report
+        // `cancelled = true` so callers know not to treat unwalked
+        // tracks as missing.
+        let cancellation = std::sync::atomic::AtomicBool::new(true);
+        let scan = LibraryScanner::new(&metadata_service)
+            .scan(&root, &cancellation)
+            .expect("scan test directory");
+
+        assert!(scan.cancelled);
+        assert!(scan.tracks.is_empty());
 
         fs::remove_dir_all(root).expect("remove test directory");
     }

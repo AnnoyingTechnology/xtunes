@@ -131,6 +131,8 @@ impl ApplicationRuntime {
             .clone()
             .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
 
+        let cancellation_requested = Arc::new(AtomicBool::new(false));
+        self.library_import_cancellation = Some(cancellation_requested.clone());
         self.background_task_status = crate::BackgroundTaskStatus::LibraryImportRunning;
 
         Ok(LibraryImportTask {
@@ -139,6 +141,7 @@ impl ApplicationRuntime {
             existing_tracks: self.library_tracks.clone(),
             library_store,
             metadata_service,
+            cancellation_requested,
         })
     }
 
@@ -148,10 +151,12 @@ impl ApplicationRuntime {
         self.library_tracks.extend(result.tracks);
         self.library_tracks.sort_by_key(|track| track.id);
         self.refresh_playback_queue_track_ids();
+        self.library_import_cancellation = None;
         self.background_task_status = crate::BackgroundTaskStatus::LibraryImportCompleted(summary);
     }
 
     pub fn fail_library_import(&mut self, error: ApplicationRuntimeError) {
+        self.library_import_cancellation = None;
         self.background_task_status = crate::BackgroundTaskStatus::LibraryImportFailed(error);
     }
 
@@ -207,6 +212,7 @@ pub fn run_library_import_task(
         existing_tracks: task.existing_tracks,
         library_store: task.library_store,
         metadata_service: task.metadata_service,
+        cancellation_requested: task.cancellation_requested,
     };
 
     context.add_external_library_items(task.paths)
@@ -279,6 +285,7 @@ struct LibraryImportContext {
     existing_tracks: Vec<Track>,
     library_store: std::sync::Arc<dyn sustain_library_store::LibraryStore>,
     metadata_service: std::sync::Arc<dyn sustain_metadata::MetadataService>,
+    cancellation_requested: Arc<AtomicBool>,
 }
 
 impl LibraryImportContext {
@@ -314,7 +321,12 @@ impl LibraryImportContext {
             .to_path_buf();
         let canonical_library_path = fs::canonicalize(&library_path).ok();
 
-        let discovered_files = collect_supported_audio_files(&paths)?;
+        let discovered_files =
+            collect_supported_audio_files(&paths, self.cancellation_requested.as_ref())?;
+        if self.cancellation_requested.load(Ordering::SeqCst) {
+            return Ok(cancelled_import_result(discovered_files.len()));
+        }
+
         let mut occupied_paths = self
             .existing_tracks
             .iter()
@@ -332,6 +344,9 @@ impl LibraryImportContext {
         let mut duplicate_files = 0;
 
         for source_path in &discovered_files {
+            if self.cancellation_requested.load(Ordering::SeqCst) {
+                return Ok(cancelled_import_result(discovered_files.len()));
+            }
             let source_path = fs::canonicalize(source_path)
                 .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
             if let Some(relative_path) =
@@ -388,6 +403,13 @@ impl LibraryImportContext {
 
         let mut copied_paths = Vec::new();
         for import in &imports {
+            if self.cancellation_requested.load(Ordering::SeqCst) {
+                // Roll back the files we have copied so far so a
+                // cancelled import leaves zero filesystem side
+                // effects.
+                remove_copied_files(&copied_paths);
+                return Ok(cancelled_import_result(discovered_files.len()));
+            }
             match copy_file_verified(
                 &import.source_path,
                 &import.destination_path,
@@ -434,6 +456,7 @@ impl LibraryImportContext {
                 discovered_files: discovered_files.len(),
                 imported_tracks: copied_paths.len(),
                 duplicate_files,
+                cancelled: false,
             },
         })
     }
@@ -450,7 +473,11 @@ impl LibraryImportContext {
         let canonical_library_path = fs::canonicalize(&library_path)
             .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
 
-        let discovered_files = collect_supported_audio_files(&paths)?;
+        let discovered_files =
+            collect_supported_audio_files(&paths, self.cancellation_requested.as_ref())?;
+        if self.cancellation_requested.load(Ordering::SeqCst) {
+            return Ok(cancelled_import_result(discovered_files.len()));
+        }
         let mut seen_locations = self
             .existing_tracks
             .iter()
@@ -462,6 +489,9 @@ impl LibraryImportContext {
         let mut duplicate_files = 0;
 
         for source_path in &discovered_files {
+            if self.cancellation_requested.load(Ordering::SeqCst) {
+                return Ok(cancelled_import_result(discovered_files.len()));
+            }
             let source_path = fs::canonicalize(source_path)
                 .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
             let relative_path =
@@ -513,6 +543,7 @@ impl LibraryImportContext {
                 discovered_files: discovered_files.len(),
                 imported_tracks,
                 duplicate_files,
+                cancelled: false,
             },
         })
     }
@@ -1102,10 +1133,16 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn collect_supported_audio_files(paths: &[PathBuf]) -> ApplicationRuntimeResult<Vec<PathBuf>> {
+fn collect_supported_audio_files(
+    paths: &[PathBuf],
+    cancellation: &AtomicBool,
+) -> ApplicationRuntimeResult<Vec<PathBuf>> {
     let mut files = Vec::new();
     for path in paths {
-        collect_supported_audio_path(path, &mut files)?;
+        if cancellation.load(Ordering::SeqCst) {
+            return Ok(files);
+        }
+        collect_supported_audio_path(path, &mut files, cancellation)?;
     }
     files.sort();
     files.dedup();
@@ -1115,20 +1152,39 @@ fn collect_supported_audio_files(paths: &[PathBuf]) -> ApplicationRuntimeResult<
 fn collect_supported_audio_path(
     path: &Path,
     files: &mut Vec<PathBuf>,
+    cancellation: &AtomicBool,
 ) -> ApplicationRuntimeResult<()> {
+    if cancellation.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     let metadata =
         fs::symlink_metadata(path).map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
     if metadata.file_type().is_dir() {
         let entries =
             fs::read_dir(path).map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
         for entry in entries {
+            if cancellation.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             let entry = entry.map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
-            collect_supported_audio_path(&entry.path(), files)?;
+            collect_supported_audio_path(&entry.path(), files, cancellation)?;
         }
     } else if metadata.file_type().is_file() && audio_format_from_path(path).is_ok() {
         files.push(path.to_path_buf());
     }
     Ok(())
+}
+
+fn cancelled_import_result(discovered_files: usize) -> LibraryImportResult {
+    LibraryImportResult {
+        tracks: Vec::new(),
+        summary: LibraryImportSummary {
+            discovered_files,
+            imported_tracks: 0,
+            duplicate_files: 0,
+            cancelled: true,
+        },
+    }
 }
 
 fn plan_destination(

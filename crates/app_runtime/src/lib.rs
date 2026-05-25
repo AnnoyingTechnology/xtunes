@@ -93,6 +93,10 @@ pub struct LibraryScanSummary {
     pub missing_tracks: usize,
     pub skipped_unsupported_files: usize,
     pub failed_files: usize,
+    // True when the scan stopped because the user asked it to. The
+    // numbers above reflect the partial work that completed; we do not
+    // sweep the unwalked portion of the library for missing tracks.
+    pub cancelled: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -137,6 +141,7 @@ pub struct LibraryScanTask {
     existing_tracks: Vec<Track>,
     library_store: Arc<dyn LibraryStore>,
     metadata_service: Arc<dyn MetadataService>,
+    cancellation_requested: Arc<AtomicBool>,
 }
 
 pub struct LibraryImportTask {
@@ -145,6 +150,7 @@ pub struct LibraryImportTask {
     existing_tracks: Vec<Track>,
     library_store: Arc<dyn LibraryStore>,
     metadata_service: Arc<dyn MetadataService>,
+    cancellation_requested: Arc<AtomicBool>,
 }
 
 pub struct LibraryConsolidationTask {
@@ -177,6 +183,10 @@ pub struct LibraryImportSummary {
     pub discovered_files: usize,
     pub imported_tracks: usize,
     pub duplicate_files: usize,
+    // True when the import stopped because the user asked it to. The
+    // import is all-or-nothing: a cancelled run rolls back any files
+    // already copied and never partially populates the library.
+    pub cancelled: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -204,6 +214,8 @@ pub struct ApplicationRuntime {
     last_library_import_summary: Option<LibraryImportSummary>,
     last_library_consolidation_summary: Option<LibraryConsolidationSummary>,
     background_task_status: BackgroundTaskStatus,
+    library_scan_cancellation: Option<Arc<AtomicBool>>,
+    library_import_cancellation: Option<Arc<AtomicBool>>,
     library_consolidation_cancellation: Option<Arc<AtomicBool>>,
     metadata_writer: Option<metadata_writer::MetadataWriter>,
     metadata_write_result_sink: Option<async_channel::Sender<MetadataWriteResult>>,
@@ -231,6 +243,8 @@ impl ApplicationRuntime {
             last_library_import_summary: None,
             last_library_consolidation_summary: None,
             background_task_status: BackgroundTaskStatus::Idle,
+            library_scan_cancellation: None,
+            library_import_cancellation: None,
             library_consolidation_cancellation: None,
             metadata_writer: None,
             metadata_write_result_sink: None,
@@ -264,6 +278,8 @@ impl ApplicationRuntime {
             last_library_import_summary: None,
             last_library_consolidation_summary: None,
             background_task_status: BackgroundTaskStatus::Idle,
+            library_scan_cancellation: None,
+            library_import_cancellation: None,
             library_consolidation_cancellation: None,
             metadata_writer: None,
             metadata_write_result_sink: None,
@@ -473,6 +489,45 @@ impl ApplicationRuntime {
         }
     }
 
+    pub fn request_library_scan_cancellation(&self) {
+        if let Some(cancellation_requested) = &self.library_scan_cancellation {
+            cancellation_requested.store(true, Ordering::SeqCst);
+        }
+    }
+
+    pub fn request_library_import_cancellation(&self) {
+        if let Some(cancellation_requested) = &self.library_import_cancellation {
+            cancellation_requested.store(true, Ordering::SeqCst);
+        }
+    }
+
+    // Dispatches a cancellation request to whichever background task is
+    // currently running. Background tasks are mutually exclusive (see
+    // `BackgroundTaskStatus::is_running`), so at most one of these
+    // tokens is live at any moment. Idempotent: calling this with no
+    // task running is a no-op, as is calling it twice while one is
+    // winding down.
+    pub fn request_background_task_cancellation(&self) {
+        self.request_library_scan_cancellation();
+        self.request_library_import_cancellation();
+        self.request_library_consolidation_cancellation();
+    }
+
+    // True while a cancellation request has been issued but the
+    // background task has not yet reported back with its final status.
+    // UI surfaces use this to flip the status label to "Cancelling..."
+    // so the user sees their click was received.
+    pub fn background_task_cancellation_requested(&self) -> bool {
+        fn flag_set(token: Option<&Arc<AtomicBool>>) -> bool {
+            token
+                .map(|token| token.load(Ordering::SeqCst))
+                .unwrap_or(false)
+        }
+        flag_set(self.library_scan_cancellation.as_ref())
+            || flag_set(self.library_import_cancellation.as_ref())
+            || flag_set(self.library_consolidation_cancellation.as_ref())
+    }
+
     pub fn playback_state(&self) -> PlaybackState {
         self.playback_service
             .as_deref()
@@ -612,7 +667,7 @@ mod tests {
 
     use super::{
         ApplicationRuntime, ApplicationRuntimeError, LibraryConsolidationSummary,
-        LibraryScanSummary, MetadataService, run_library_consolidation_task,
+        LibraryScanSummary, MetadataService, run_library_consolidation_task, run_library_scan_task,
     };
 
     #[test]
@@ -877,6 +932,45 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_scan_preserves_existing_tracks_without_marking_them_missing() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let existing_track = test_track(track_id(1), "leftover.mp3");
+        assert_eq!(store.save_track(existing_track.clone()), Ok(()));
+
+        let metadata_service = Arc::new(TestMetadataService);
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store, metadata_service)
+            .expect("library services initialize");
+
+        // Trip the cancellation flag *before* the worker observes it.
+        // That is the worst case for the missing-track sweep: the
+        // walker aborts on its first iteration without indexing the
+        // empty library, and we must not interpret the unwalked
+        // existing track as missing.
+        let task = runtime
+            .prepare_library_scan(root.clone())
+            .expect("prepare scan");
+        runtime.request_library_scan_cancellation();
+        let result = run_library_scan_task(task).expect("scan finishes cleanly");
+        runtime.apply_library_scan_result(result);
+
+        let summary = runtime.last_scan_summary().expect("scan summary present");
+        assert!(summary.cancelled, "cancellation flag must propagate");
+        assert_eq!(
+            summary.missing_tracks, 0,
+            "a partial scan must not mark unwalked tracks as missing"
+        );
+        let tracks = runtime.library_tracks();
+        assert_eq!(tracks.len(), 1, "the pre-existing track must be preserved");
+        assert_eq!(tracks[0].id, existing_track.id);
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
+    #[test]
     fn runtime_scan_preserves_existing_track_identity_for_known_location() {
         let root = unique_test_directory();
         std::fs::create_dir_all(&root).expect("create test library");
@@ -914,6 +1008,7 @@ mod tests {
                 missing_tracks: 0,
                 skipped_unsupported_files: 0,
                 failed_files: 0,
+                cancelled: false,
             })
         );
 
@@ -977,6 +1072,7 @@ mod tests {
                 missing_tracks: 0,
                 skipped_unsupported_files: 0,
                 failed_files: 0,
+                cancelled: false,
             })
         );
 
@@ -1025,6 +1121,7 @@ mod tests {
                 discovered_files: 1,
                 imported_tracks: 1,
                 duplicate_files: 0,
+                cancelled: false,
             })
         );
 
@@ -1075,6 +1172,7 @@ mod tests {
                 discovered_files: 2,
                 imported_tracks: 1,
                 duplicate_files: 1,
+                cancelled: false,
             })
         );
 
@@ -1118,6 +1216,7 @@ mod tests {
                 discovered_files: 1,
                 imported_tracks: 0,
                 duplicate_files: 1,
+                cancelled: false,
             })
         );
 
@@ -1160,6 +1259,7 @@ mod tests {
                 discovered_files: 1,
                 imported_tracks: 1,
                 duplicate_files: 0,
+                cancelled: false,
             })
         );
 

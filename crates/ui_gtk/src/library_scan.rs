@@ -25,7 +25,10 @@ pub(crate) fn library_scan_requested_callback(
         let task = {
             let mut runtime = runtime.borrow_mut();
             let task = runtime.prepare_library_scan(library_path)?;
-            status_bar.update_task(runtime.background_task_status());
+            status_bar.update_task(
+                runtime.background_task_status(),
+                runtime.background_task_cancellation_requested(),
+            );
             task
         };
 
@@ -56,25 +59,39 @@ fn poll_library_scan(
                 runtime.borrow_mut().apply_library_scan_result(result);
             }
             library_changed();
-            status_bar.update_task(runtime.borrow().background_task_status());
+            refresh_task_status(&runtime, &status_bar);
             glib::ControlFlow::Break
         }
         Ok(Err(error)) => {
             {
                 runtime.borrow_mut().fail_library_scan(error);
             }
-            status_bar.update_task(runtime.borrow().background_task_status());
+            refresh_task_status(&runtime, &status_bar);
             glib::ControlFlow::Break
         }
-        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+        Err(mpsc::TryRecvError::Empty) => {
+            // Re-render the status while the worker is still going so
+            // the label can flip to "Cancelling..." the moment the
+            // user clicks the cancel button.
+            refresh_task_status(&runtime, &status_bar);
+            glib::ControlFlow::Continue
+        }
         Err(mpsc::TryRecvError::Disconnected) => {
             {
                 runtime
                     .borrow_mut()
                     .fail_library_scan(ApplicationRuntimeError::LibraryScanFailed);
             }
-            status_bar.update_task(runtime.borrow().background_task_status());
+            refresh_task_status(&runtime, &status_bar);
             glib::ControlFlow::Break
         }
     });
+}
+
+fn refresh_task_status(runtime: &SharedRuntime, status_bar: &StatusBar) {
+    let runtime = runtime.borrow();
+    status_bar.update_task(
+        runtime.background_task_status(),
+        runtime.background_task_cancellation_requested(),
+    );
 }

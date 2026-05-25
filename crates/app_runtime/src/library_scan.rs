@@ -4,6 +4,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    sync::{Arc, atomic::AtomicBool},
     time::SystemTime,
 };
 
@@ -54,6 +55,8 @@ impl ApplicationRuntime {
             .clone()
             .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
 
+        let cancellation_requested = Arc::new(AtomicBool::new(false));
+        self.library_scan_cancellation = Some(cancellation_requested.clone());
         self.background_task_status = crate::BackgroundTaskStatus::LibraryScanRunning;
 
         Ok(LibraryScanTask {
@@ -61,6 +64,7 @@ impl ApplicationRuntime {
             existing_tracks: self.library_tracks.clone(),
             library_store,
             metadata_service,
+            cancellation_requested,
         })
     }
 
@@ -69,20 +73,25 @@ impl ApplicationRuntime {
         self.last_scan_summary = Some(summary.clone());
         self.library_tracks = result.tracks;
         self.refresh_playback_queue_track_ids();
+        self.library_scan_cancellation = None;
         self.background_task_status = crate::BackgroundTaskStatus::LibraryScanCompleted(summary);
     }
 
     pub fn fail_library_scan(&mut self, error: ApplicationRuntimeError) {
+        self.library_scan_cancellation = None;
         self.background_task_status = crate::BackgroundTaskStatus::LibraryScanFailed(error);
     }
 }
 
 pub fn run_library_scan_task(task: LibraryScanTask) -> ApplicationRuntimeResult<LibraryScanResult> {
     let scan = LibraryScanner::new(task.metadata_service.as_ref())
-        .scan(&task.library_path)
+        .scan(&task.library_path, task.cancellation_requested.as_ref())
         .map_err(|_| ApplicationRuntimeError::LibraryScanFailed)?;
     let result = reconcile_library_scan(&task.library_path, task.existing_tracks, scan)?;
 
+    // Even on a cancelled scan, persist whatever was indexed before
+    // the abort. The work has already been paid for and re-doing it
+    // on the next run would punish the user for cancelling.
     for track in &result.tracks {
         task.library_store
             .save_track(track.clone())
@@ -99,6 +108,7 @@ fn reconcile_library_scan(
 ) -> ApplicationRuntimeResult<LibraryScanResult> {
     let skipped_unsupported_files = scan.skipped_unsupported_files;
     let failed_files = scan.failures.len();
+    let cancelled = scan.cancelled;
     let scanned_tracks = scan.tracks;
     let mut tracks_by_path = tracks_by_path(existing_tracks.clone());
     let mut scanned_paths = BTreeSet::new();
@@ -121,15 +131,28 @@ fn reconcile_library_scan(
     }
 
     let mut missing_tracks = 0;
-    for track in existing_tracks
-        .into_iter()
-        .filter(|track| !scanned_paths.contains(&track.location.relative_path))
-    {
-        let track = track_with_current_availability(library_path, track);
-        if track.location.is_missing() {
-            missing_tracks += 1;
+    if cancelled {
+        // A cancelled scan never finished walking the library, so we
+        // cannot tell whether an unwalked track is actually missing or
+        // just unvisited. Preserve every existing track unchanged so
+        // we don't mark live tracks as missing on a partial pass.
+        for track in existing_tracks
+            .into_iter()
+            .filter(|track| !scanned_paths.contains(&track.location.relative_path))
+        {
+            tracks.push(track);
         }
-        tracks.push(track);
+    } else {
+        for track in existing_tracks
+            .into_iter()
+            .filter(|track| !scanned_paths.contains(&track.location.relative_path))
+        {
+            let track = track_with_current_availability(library_path, track);
+            if track.location.is_missing() {
+                missing_tracks += 1;
+            }
+            tracks.push(track);
+        }
     }
 
     tracks.sort_by_key(|track| track.id);
@@ -142,6 +165,7 @@ fn reconcile_library_scan(
             missing_tracks,
             skipped_unsupported_files,
             failed_files,
+            cancelled,
         },
         tracks,
     })

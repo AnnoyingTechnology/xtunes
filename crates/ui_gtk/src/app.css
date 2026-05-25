@@ -232,6 +232,25 @@ button.now-playing-side-button:focus {
     min-width: 14px;
 }
 
+.task-status-cancel {
+    padding: 1px 10px;
+    min-height: 0;
+    border-radius: 999px;
+    font-size: 0.85em;
+    color: alpha(@theme_fg_color, 0.78);
+    background-color: alpha(@theme_fg_color, 0.06);
+    border: 1px solid alpha(@theme_fg_color, 0.16);
+}
+
+.task-status-cancel:hover {
+    background-color: alpha(@theme_fg_color, 0.12);
+    color: @theme_fg_color;
+}
+
+.task-status-cancel:disabled {
+    opacity: 0.55;
+}
+
 .playlist-sidebar {
     background-color: mix(@theme_bg_color, black, 0.10);
     border-right: 1px solid alpha(@theme_fg_color, 0.12);
@@ -429,15 +448,6 @@ listview.album-track-table > row:focus-visible {
    `.sidebar-context-menu` padding. */
 popover.compact-context-menu > contents {
     padding: 0;
-}
-
-button.context-popover-anchor {
-    min-width: 0;
-    min-height: 0;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    box-shadow: none;
 }
 
 .smart-playlist-error {
