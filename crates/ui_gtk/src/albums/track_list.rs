@@ -4,7 +4,9 @@
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::{cell::RefCell, rc::Rc};
-use sustain_app_runtime::{ApplicationCommand, PlaybackCommand, TrackId};
+use sustain_app_runtime::{
+    ApplicationCommand, PlaybackCommand, PlaybackQueueRequest, PlaybackQueueSource, TrackId,
+};
 
 use super::model::{AlbumTrackViewModel, duration_text, track_number_text};
 use crate::{
@@ -60,12 +62,29 @@ impl AlbumTrackListView {
 
         let command_controller_for_activate = command_controller;
         let playback_changed_for_activate = playback_changed;
+        // The album's playable tracks form the queue context: activating
+        // any row plays it and then auto-advances through the rest of the
+        // album in display order, instead of leaking into the broader
+        // library. Captured once at view construction; the album-detail
+        // panel is rebuilt when the album changes, so this list stays in
+        // sync with what the user sees.
+        let album_track_ids: Vec<TrackId> = tracks
+            .iter()
+            .filter(|track| !track.is_missing)
+            .map(|track| track.id)
+            .collect();
         list.connect_activate(move |_list, position| {
             let Some(track_id) = row_track_id(selection.item(position)) else {
                 return;
             };
             if command_controller_for_activate.dispatch_succeeded(ApplicationCommand::Playback(
-                PlaybackCommand::PlayTrack(track_id),
+                PlaybackCommand::PlayTrack {
+                    track_id,
+                    queue: PlaybackQueueRequest::Explicit {
+                        source: PlaybackQueueSource::Album,
+                        ordered_track_ids: album_track_ids.clone(),
+                    },
+                },
             )) {
                 playback_changed_for_activate();
             }

@@ -10,7 +10,8 @@ use std::{
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use sustain_app_runtime::{
-    ApplicationCommand, PlaybackCommand, Track, TrackId, album_matches_search_text,
+    ApplicationCommand, PlaybackCommand, PlaybackQueueRequest, PlaybackQueueSource, Track, TrackId,
+    album_matches_search_text,
 };
 
 use super::{
@@ -1121,18 +1122,28 @@ fn detail_icon_button(
 }
 
 fn play_album(command_controller: &SharedCommandController, album: &AlbumViewModel) -> bool {
-    let Some(track_id) = album
+    // First playable track is the one that actually starts; the queue
+    // pins the rest of the album behind it so auto-advance walks the
+    // album in display order instead of leaking into the library.
+    let ordered_track_ids: Vec<TrackId> = album
         .tracks
         .iter()
-        .find(|track| !track.is_missing)
+        .filter(|track| !track.is_missing)
         .map(|track| track.id)
-    else {
+        .collect();
+    let Some(&track_id) = ordered_track_ids.first() else {
         return false;
     };
 
-    command_controller.dispatch_succeeded(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
-        track_id,
-    )))
+    command_controller.dispatch_succeeded(ApplicationCommand::Playback(
+        PlaybackCommand::PlayTrack {
+            track_id,
+            queue: PlaybackQueueRequest::Explicit {
+                source: PlaybackQueueSource::Album,
+                ordered_track_ids,
+            },
+        },
+    ))
 }
 
 fn ensure_shuffle_enabled(command_controller: &SharedCommandController) {

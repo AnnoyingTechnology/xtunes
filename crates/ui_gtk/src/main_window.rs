@@ -6,8 +6,9 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use sustain_app_runtime::{
-    PlaybackCommand, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistItem,
-    Rating, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId, track_matches_search_text,
+    PlaybackCommand, PlaybackQueueRequest, PlaybackQueueSource, Playlist, PlaylistEntry,
+    PlaylistFolder, PlaylistFolderId, PlaylistItem, Rating, Track, TrackColumnLayout,
+    TrackColumnLayoutScope, TrackId, track_matches_search_text,
 };
 
 use super::{
@@ -164,7 +165,8 @@ pub(crate) fn build_main_window(
     let sidebar_widget = sidebar.widget();
     sidebar_widget.set_visible(false);
 
-    let track_activated = track_activated_callback(&command_controller, playback_changed.clone());
+    let library_track_activated =
+        library_track_activated_callback(&command_controller, playback_changed.clone());
     let library_changed_holder: LibraryChangedHolder = Rc::new(RefCell::new(None));
     let track_row_changed_holder: TrackRowChangedHolder = Rc::new(RefCell::new(None));
     let parent_window = window.clone().upcast::<gtk::Window>();
@@ -200,7 +202,7 @@ pub(crate) fn build_main_window(
         rating_changed_callback(&command_controller, track_row_changed_holder.clone());
     let songs_table = build_track_table(
         library_tracks.clone(),
-        Some(track_activated.clone()),
+        Some(library_track_activated.clone()),
         Some(context_menu.clone()),
         Some(rating_changed.clone()),
         None,
@@ -218,11 +220,19 @@ pub(crate) fn build_main_window(
         &command_controller,
         &runtime,
         &sidebar,
-        &library_changed_holder,
+        &playlists_table_holder,
+        &current_search_text,
+    );
+    let playlist_track_activated = playlist_track_activated_callback(
+        &command_controller,
+        &runtime,
+        &sidebar,
+        playback_changed.clone(),
+        &current_search_text,
     );
     let playlists_table = build_track_table(
         Vec::new(),
-        Some(track_activated.clone()),
+        Some(playlist_track_activated),
         Some(playlist_context_menu),
         Some(rating_changed),
         Some(playlist_row_reorder),
@@ -1396,7 +1406,10 @@ fn handle_mpris_command(
     }
 }
 
-fn track_activated_callback(
+/// Activation handler for the Songs view: the queue is the whole library,
+/// so auto-advance and Next/Previous walk all playable tracks in library
+/// order. Matches the iTunes 11 "Music" library default.
+fn library_track_activated_callback(
     command_controller: &SharedCommandController,
     playback_changed: PlaybackChangedCallback,
 ) -> TrackActivatedCallback {
@@ -1404,11 +1417,119 @@ fn track_activated_callback(
 
     Rc::new(move |track_id: TrackId| {
         if command_controller.dispatch_succeeded(ApplicationCommand::Playback(
-            PlaybackCommand::PlayTrack(track_id),
+            PlaybackCommand::PlayTrack {
+                track_id,
+                queue: PlaybackQueueRequest::Library,
+            },
         )) {
             playback_changed();
         }
     })
+}
+
+/// Activation handler for the Playlists view: the queue is whatever the
+/// sidebar currently has selected.
+///
+/// - Regular playlist: queue is the playlist's entries in their
+///   authoritative position order, so auto-advance stays inside the
+///   playlist and replays it in the user-defined sequence.
+/// - Smart playlist: queue is the smart playlist's current matching
+///   tracks. The runtime's `PlaybackQueueSource::Selection` is used as
+///   the source label (we don't yet model a smart-playlist source
+///   variant) but the play order is the smart playlist's order.
+/// - Library pseudo-entry: queue is the full (search-filtered)
+///   library, matching the Songs view's behavior.
+///
+/// Any other selection (folders, no selection) falls back to the Library
+/// queue — those targets don't activate tracks in normal use, but a
+/// fallback keeps playback predictable if a future code path ever
+/// double-clicks a row in that state.
+fn playlist_track_activated_callback(
+    command_controller: &SharedCommandController,
+    runtime: &SharedRuntime,
+    sidebar: &PlaylistSidebar,
+    playback_changed: PlaybackChangedCallback,
+    current_search_text: &Rc<RefCell<String>>,
+) -> TrackActivatedCallback {
+    let command_controller = command_controller.clone();
+    let runtime = runtime.clone();
+    let sidebar = sidebar.clone();
+    let current_search_text = current_search_text.clone();
+
+    Rc::new(move |track_id: TrackId| {
+        let queue = {
+            let search_text = current_search_text.borrow().clone();
+            let runtime_borrow = runtime.borrow();
+            queue_request_for_playlist_selection(
+                &runtime_borrow,
+                sidebar.current_selection(),
+                &search_text,
+            )
+        };
+        if command_controller.dispatch_succeeded(ApplicationCommand::Playback(
+            PlaybackCommand::PlayTrack { track_id, queue },
+        )) {
+            playback_changed();
+        }
+    })
+}
+
+fn queue_request_for_playlist_selection(
+    runtime: &ApplicationRuntime,
+    selection: Option<SidebarSelection>,
+    search_text: &str,
+) -> PlaybackQueueRequest {
+    let candidates: Vec<(Track, PlaybackQueueSource)> = match selection {
+        Some(SidebarSelection::Item(PlaylistItem::Playlist(playlist_id))) => {
+            let Some(playlist) = runtime
+                .playlists()
+                .iter()
+                .find(|playlist| playlist.id == playlist_id)
+            else {
+                return PlaybackQueueRequest::Library;
+            };
+            let tracks_by_id: HashMap<TrackId, &Track> = runtime
+                .library_tracks()
+                .iter()
+                .map(|track| (track.id, track))
+                .collect();
+            let mut entries: Vec<&PlaylistEntry> = playlist.entries.iter().collect();
+            entries.sort_by_key(|entry| entry.position);
+            let source = PlaybackQueueSource::Playlist(playlist_id);
+            entries
+                .into_iter()
+                .filter_map(|entry| {
+                    tracks_by_id
+                        .get(&entry.track_id)
+                        .copied()
+                        .cloned()
+                        .map(|track| (track, source.clone()))
+                })
+                .collect()
+        }
+        Some(SidebarSelection::Item(PlaylistItem::SmartPlaylist(smart_playlist_id))) => runtime
+            .smart_playlist_matching_tracks(smart_playlist_id)
+            .into_iter()
+            .map(|track| (track.clone(), PlaybackQueueSource::Selection))
+            .collect(),
+        _ => return PlaybackQueueRequest::Library,
+    };
+
+    let source = match candidates.first() {
+        Some((_, source)) => source.clone(),
+        None => return PlaybackQueueRequest::Library,
+    };
+    let ordered_track_ids: Vec<TrackId> = candidates
+        .into_iter()
+        .filter(|(track, _)| {
+            search_text.is_empty() || track_matches_search_text(track, search_text)
+        })
+        .map(|(track, _)| track.id)
+        .collect();
+    PlaybackQueueRequest::Explicit {
+        source,
+        ordered_track_ids,
+    }
 }
 
 fn install_track_ended_callback(
@@ -1608,8 +1729,16 @@ fn playlist_track_context_actions(
 /// playlists and the Library pseudo-entry are derived/dynamic and have no
 /// authoritative entry order to mutate. The PLAN.md punch-list item is
 /// explicit: "no GTK-only row reorder path"; this dispatches
-/// `MovePlaylistEntries` so the runtime/SQLite are the source of truth and
-/// the table refreshes via the standard `library_changed` rebuild.
+/// `MovePlaylistEntries` so the runtime/SQLite are the source of truth.
+///
+/// Post-dispatch the callback rebuilds **only** the playlists table —
+/// nothing in the library, the album set, or the sidebar tree changes
+/// when a playlist's internal order is shuffled. Calling the global
+/// `library_changed` here (the previous approach) re-built the songs
+/// table's entire `gio::ListStore` (10k rows + re-sort), the albums
+/// view's groupings, and the sidebar — visible as a 1–2 s freeze after
+/// every drop. The narrow refresh below touches only the rows the user
+/// is looking at, so the new order appears in the next frame.
 ///
 /// `new_position` is the insertion index in the playlist's *post-removal*
 /// entries list (see `ApplicationCommand::MovePlaylistEntries`), so the
@@ -1619,12 +1748,14 @@ fn playlist_row_reorder_callback(
     command_controller: &SharedCommandController,
     runtime: &SharedRuntime,
     sidebar: &PlaylistSidebar,
-    library_changed_holder: &LibraryChangedHolder,
+    playlists_table_holder: &Rc<RefCell<Option<TrackTable>>>,
+    current_search_text: &Rc<RefCell<String>>,
 ) -> RowReorderCallback {
     let command_controller = command_controller.clone();
     let runtime = runtime.clone();
     let sidebar = sidebar.clone();
-    let library_changed_holder = library_changed_holder.clone();
+    let playlists_table_holder = playlists_table_holder.clone();
+    let current_search_text = current_search_text.clone();
 
     Rc::new(move |drop: RowReorderDrop| -> bool {
         let Some(SidebarSelection::Item(PlaylistItem::Playlist(playlist_id))) =
@@ -1658,10 +1789,23 @@ fn playlist_row_reorder_callback(
                 track_ids: drop.dragged_track_ids,
                 new_position,
             });
-        if dispatched && let Some(callback) = library_changed_holder.borrow().as_ref() {
-            callback();
+        if !dispatched {
+            return false;
         }
-        dispatched
+
+        // Targeted rebuild — only the playlist view. Library / albums /
+        // sidebar are untouched because a reorder doesn't mutate any of
+        // the state those views derive from.
+        if let Some(playlists_table) = playlists_table_holder.borrow().as_ref() {
+            let search_text = current_search_text.borrow().clone();
+            let rows = playlist_table_rows_for(
+                &runtime.borrow(),
+                sidebar.current_selection(),
+                &search_text,
+            );
+            playlists_table.replace_rows(rows);
+        }
+        true
     })
 }
 

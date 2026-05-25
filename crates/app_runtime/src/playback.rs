@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
+use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
 use sustain_domain::{
-    PlaybackCommand, PlaybackQueue, PlaybackQueueSource, PlaybackSession, PlaybackState, TrackId,
-    TrackPlaybackSource,
+    PlaybackCommand, PlaybackQueue, PlaybackQueueRequest, PlaybackQueueSource, PlaybackSession,
+    PlaybackState, TrackId, TrackPlaybackSource,
 };
 use sustain_playback::PlaybackService;
 
@@ -25,10 +26,10 @@ impl ApplicationRuntime {
                 self.playback_queue.toggle_repeat_mode();
                 Ok(())
             }
-            PlaybackCommand::PlayTrack(track_id) => {
-                let queue = self.library_playback_queue(track_id)?;
+            PlaybackCommand::PlayTrack { track_id, queue } => {
+                let new_queue = self.build_playback_queue(track_id, queue)?;
                 self.play_track(track_id)?;
-                self.playback_queue = queue;
+                self.playback_queue = new_queue;
                 Ok(())
             }
             PlaybackCommand::PlayPreviousTrack => self.play_previous_track(),
@@ -84,11 +85,35 @@ impl ApplicationRuntime {
             .ok_or(ApplicationRuntimeError::PlaybackServiceUnavailable)
     }
 
-    fn library_playback_queue(&self, track_id: TrackId) -> ApplicationRuntimeResult<PlaybackQueue> {
+    fn build_playback_queue(
+        &self,
+        track_id: TrackId,
+        request: PlaybackQueueRequest,
+    ) -> ApplicationRuntimeResult<PlaybackQueue> {
+        // Resolving the track here also serves as the "track exists and is
+        // playable" precondition for the whole command — same role
+        // `library_playback_queue` played before. If it fails we never get
+        // to play_track.
         let _source = self.track_playback_source(track_id)?;
+        let (source, ordered_track_ids) = match request {
+            PlaybackQueueRequest::Library => {
+                (PlaybackQueueSource::Library, self.playable_track_ids())
+            }
+            PlaybackQueueRequest::Explicit {
+                source,
+                ordered_track_ids,
+            } => {
+                let playable: HashSet<TrackId> = self.playable_track_ids().into_iter().collect();
+                let filtered: Vec<TrackId> = ordered_track_ids
+                    .into_iter()
+                    .filter(|id| playable.contains(id))
+                    .collect();
+                (source, filtered)
+            }
+        };
         Ok(PlaybackQueue::new(
-            PlaybackQueueSource::Library,
-            self.playable_track_ids(),
+            source,
+            ordered_track_ids,
             track_id,
             self.playback_queue.options(),
             playback_shuffle_seed(),
@@ -293,10 +318,50 @@ impl ApplicationRuntime {
             .collect()
     }
 
+    /// Re-derive the queue's ordered track ids from the current library
+    /// state, preserving the queue's source. Called after library-level
+    /// mutations (scan, library move/import, settings update, track
+    /// removal) so a track that just disappeared is dropped from the
+    /// queue without stomping the user's selected queue context.
+    ///
+    /// When the source is `Library`, the queue is rebuilt from every
+    /// playable track. When it's `Playlist(id)`, the queue is rebuilt
+    /// from that playlist's authoritative entry order, intersected with
+    /// the currently-playable tracks. Other sources (Album,
+    /// SmartPlaylist, SearchResults, Selection) are ad-hoc lists the
+    /// runtime cannot re-derive without UI context; for those we re-run
+    /// the same filter against the queue's existing ids so missing
+    /// tracks fall out, leaving everything else untouched.
     pub(super) fn refresh_playback_queue_track_ids(&mut self) {
-        let track_ids = self.playable_track_ids();
+        let playable: HashSet<TrackId> = self.playable_track_ids().into_iter().collect();
+        let refreshed: Vec<TrackId> = match self.playback_queue.source().clone() {
+            PlaybackQueueSource::Library => self.playable_track_ids(),
+            PlaybackQueueSource::Playlist(playlist_id) => {
+                match self.playlists().iter().find(|p| p.id == playlist_id) {
+                    Some(playlist) => {
+                        let mut entries: Vec<_> = playlist.entries.iter().collect();
+                        entries.sort_by_key(|entry| entry.position);
+                        entries
+                            .into_iter()
+                            .map(|entry| entry.track_id)
+                            .filter(|id| playable.contains(id))
+                            .collect()
+                    }
+                    None => Vec::new(),
+                }
+            }
+            PlaybackQueueSource::Album
+            | PlaybackQueueSource::SearchResults
+            | PlaybackQueueSource::Selection => self
+                .playback_queue
+                .ordered_track_ids()
+                .iter()
+                .copied()
+                .filter(|id| playable.contains(id))
+                .collect(),
+        };
         self.playback_queue
-            .replace_ordered_track_ids(track_ids, playback_shuffle_seed());
+            .replace_ordered_track_ids(refreshed, playback_shuffle_seed());
     }
 }
 

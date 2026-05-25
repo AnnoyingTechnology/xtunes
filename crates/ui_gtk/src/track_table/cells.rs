@@ -40,8 +40,18 @@ pub(super) struct RowReorderHooks {
 /// (re-read live, not cached at register time) identifies which cells belong
 /// to the target row; entries with a dead widget or list_item weak ref are
 /// pruned on the next walk.
+///
+/// Painting is deduped: GTK fires `connect_motion` for every pixel of cursor
+/// movement, so without a guard a steady cursor over one row would still
+/// trigger O(cells) CSS class mutations per pixel, and GTK's style engine
+/// would re-cascade every cell on every change. The `current_target` cell
+/// records the last `(row_position, drop_position)` painted; repeated calls
+/// for the same target return early without touching CSS.
 #[derive(Clone, Default)]
-pub(super) struct RowDropCellRegistry(Rc<RefCell<Vec<RowDropCellEntry>>>);
+pub(super) struct RowDropCellRegistry {
+    cells: Rc<RefCell<Vec<RowDropCellEntry>>>,
+    current_target: Rc<Cell<Option<(u32, RowDropPosition)>>>,
+}
 
 struct RowDropCellEntry {
     widget: glib::WeakRef<gtk::Widget>,
@@ -50,14 +60,18 @@ struct RowDropCellEntry {
 
 impl RowDropCellRegistry {
     fn register(&self, list_item: &gtk::ListItem, cell: &gtk::Box) {
-        self.0.borrow_mut().push(RowDropCellEntry {
+        self.cells.borrow_mut().push(RowDropCellEntry {
             widget: cell.clone().upcast::<gtk::Widget>().downgrade(),
             list_item: list_item.downgrade(),
         });
     }
 
     fn clear_all(&self) {
-        let mut cells = self.0.borrow_mut();
+        if self.current_target.get().is_none() {
+            return;
+        }
+        self.current_target.set(None);
+        let mut cells = self.cells.borrow_mut();
         cells.retain(|entry| {
             entry.widget.upgrade().is_some() && entry.list_item.upgrade().is_some()
         });
@@ -71,23 +85,42 @@ impl RowDropCellRegistry {
     }
 
     fn paint_row(&self, row_position: u32, drop: RowDropPosition) {
-        self.clear_all();
-        let cells = self.0.borrow();
-        let class = match drop {
+        if self.current_target.get() == Some((row_position, drop)) {
+            return;
+        }
+        // The previous target — if any — must shed its class before the new
+        // one gets painted. Doing this here (instead of leaning on
+        // `clear_all` to walk every cell again) keeps motion to a single
+        // pass over the registry.
+        let previous_class =
+            self.current_target
+                .get()
+                .map(|(_, previous_drop)| match previous_drop {
+                    RowDropPosition::Above => ROW_DROP_ABOVE_CSS_CLASS,
+                    RowDropPosition::Below => ROW_DROP_BELOW_CSS_CLASS,
+                });
+        let new_class = match drop {
             RowDropPosition::Above => ROW_DROP_ABOVE_CSS_CLASS,
             RowDropPosition::Below => ROW_DROP_BELOW_CSS_CLASS,
         };
+        let mut cells = self.cells.borrow_mut();
+        cells.retain(|entry| {
+            entry.widget.upgrade().is_some() && entry.list_item.upgrade().is_some()
+        });
         for entry in cells.iter() {
             let (Some(widget), Some(list_item)) =
                 (entry.widget.upgrade(), entry.list_item.upgrade())
             else {
                 continue;
             };
-            if list_item.position() != row_position {
-                continue;
+            if let Some(previous) = previous_class {
+                widget.remove_css_class(previous);
             }
-            widget.add_css_class(class);
+            if list_item.position() == row_position {
+                widget.add_css_class(new_class);
+            }
         }
+        self.current_target.set(Some((row_position, drop)));
     }
 }
 

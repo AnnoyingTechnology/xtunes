@@ -7,7 +7,17 @@ use crate::{PlaylistId, TrackId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlaybackCommand {
-    PlayTrack(TrackId),
+    /// Start playback at `track_id` and set the play queue from `queue`.
+    /// The queue request is part of the command — not derived inside the
+    /// runtime — so the caller (UI / MPRIS / test) decides what context
+    /// the activation runs in. Activating a track from the Songs view
+    /// passes [`PlaybackQueueRequest::Library`]; activating from a
+    /// playlist passes [`PlaybackQueueRequest::Explicit`] with the
+    /// playlist's track ids so auto-advance stays within the playlist.
+    PlayTrack {
+        track_id: TrackId,
+        queue: PlaybackQueueRequest,
+    },
     PlayPreviousTrack,
     /// Auto-advance to the next track. Used by the GStreamer EOS callback
     /// when the current track ends naturally. NOT a user-initiated skip;
@@ -107,6 +117,25 @@ pub enum PlaybackQueueSource {
     Playlist(PlaylistId),
     SearchResults,
     Selection,
+}
+
+/// Describes the queue the runtime should build when starting playback at a
+/// specific track. The activation source (UI view, MPRIS, ...) decides:
+/// the runtime never reaches for "all library tracks" by default — it does
+/// only what the request asks for.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlaybackQueueRequest {
+    /// Build the queue from every playable library track. Used by Songs view
+    /// and other surfaces that don't pin the queue to a narrower context.
+    Library,
+    /// Build the queue from this explicit ordered list, labelled with the
+    /// given source for downstream UI / MPRIS reporting. Track ids that
+    /// don't resolve to a playable library track are silently dropped so
+    /// the queue never tries to play missing entries.
+    Explicit {
+        source: PlaybackQueueSource,
+        ordered_track_ids: Vec<TrackId>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

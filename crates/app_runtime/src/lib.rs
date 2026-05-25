@@ -14,10 +14,10 @@ use std::{
 pub use sustain_domain::{
     ApplicationCommand, ApplicationQuery, Clock, DEFAULT_PLAYBACK_VOLUME_PERCENT, FieldChange,
     LibraryManagementMode, LibrarySettings, MetadataChange, PlayStatistics, PlaybackCommand,
-    PlaybackOptions, PlaybackQueue, PlaybackQueueSource, PlaybackSession, PlaybackSettings,
-    PlaybackState, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId,
-    PlaylistItem, Rating, RepeatMode, SmartPlaylist, SmartPlaylistDateField, SmartPlaylistId,
-    SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind,
+    PlaybackOptions, PlaybackQueue, PlaybackQueueRequest, PlaybackQueueSource, PlaybackSession,
+    PlaybackSettings, PlaybackState, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId,
+    PlaylistId, PlaylistItem, Rating, RepeatMode, SmartPlaylist, SmartPlaylistDateField,
+    SmartPlaylistId, SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind,
     SmartPlaylistNumberField, SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet,
     SmartPlaylistTextField, SmartPlaylistTextOperator, SystemClock, Track, TrackAvailability,
     TrackColumnEntry, TrackColumnLayout, TrackColumnLayoutScope, TrackContentHash, TrackId,
@@ -673,7 +673,8 @@ mod tests {
 
     use super::{
         ApplicationRuntime, ApplicationRuntimeError, LibraryConsolidationSummary,
-        LibraryScanSummary, MetadataService, run_library_consolidation_task, run_library_scan_task,
+        LibraryScanSummary, MetadataService, PlaybackQueueRequest, run_library_consolidation_task,
+        run_library_scan_task,
     };
 
     #[test]
@@ -707,7 +708,10 @@ mod tests {
 
         let cases = vec![
             (
-                ApplicationCommand::Playback(PlaybackCommand::PlayTrack(track_id)),
+                ApplicationCommand::Playback(PlaybackCommand::PlayTrack {
+                    track_id,
+                    queue: PlaybackQueueRequest::Library,
+                }),
                 Err(ApplicationRuntimeError::TrackUnavailable),
             ),
             (
@@ -1567,9 +1571,10 @@ mod tests {
         .with_playback_service(Box::new(NullPlaybackService::new()));
 
         assert_eq!(
-            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
-                track_id
-            ))),
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack {
+                track_id,
+                queue: PlaybackQueueRequest::Library,
+            })),
             Ok(())
         );
         assert_eq!(
@@ -1667,9 +1672,10 @@ mod tests {
         .with_playback_service(Box::new(NullPlaybackService::new()));
 
         assert_eq!(
-            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
-                track_id(1)
-            ))),
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack {
+                track_id: track_id(1),
+                queue: PlaybackQueueRequest::Library,
+            })),
             Ok(())
         );
         assert_eq!(
@@ -1713,9 +1719,10 @@ mod tests {
         .with_playback_service(Box::new(NullPlaybackService::new()));
 
         assert_eq!(
-            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
-                track_id(3)
-            ))),
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack {
+                track_id: track_id(3),
+                queue: PlaybackQueueRequest::Library,
+            })),
             Ok(())
         );
         assert_eq!(
@@ -2090,9 +2097,10 @@ mod tests {
         .with_playback_service(Box::new(NullPlaybackService::new()));
 
         assert_eq!(
-            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
-                removed_id,
-            ))),
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack {
+                track_id: removed_id,
+                queue: PlaybackQueueRequest::Library,
+            })),
             Ok(())
         );
         assert_eq!(
@@ -3081,7 +3089,10 @@ mod tests {
         .with_playback_service(Box::new(NullPlaybackService::new()));
 
         runtime
-            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(id)))
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack {
+                track_id: id,
+                queue: PlaybackQueueRequest::Library,
+            }))
             .expect("play track");
 
         // Threshold for a 60s track is 30s. 29 ticks of 1s each must
@@ -3162,9 +3173,10 @@ mod tests {
         .with_playback_service(Box::new(NullPlaybackService::new()));
 
         runtime
-            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
-                track_id(1),
-            )))
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack {
+                track_id: track_id(1),
+                queue: PlaybackQueueRequest::Library,
+            }))
             .expect("play A");
 
         // Listen briefly — well short of the 30s threshold — then skip.
@@ -3232,9 +3244,10 @@ mod tests {
         .with_playback_service(Box::new(NullPlaybackService::new()));
 
         runtime
-            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
-                track_id(1),
-            )))
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack {
+                track_id: track_id(1),
+                queue: PlaybackQueueRequest::Library,
+            }))
             .expect("play A");
 
         // Cross the play threshold for the 60s track.
@@ -3290,9 +3303,10 @@ mod tests {
         .with_playback_service(Box::new(NullPlaybackService::new()));
 
         runtime
-            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
-                track_id(1),
-            )))
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack {
+                track_id: track_id(1),
+                queue: PlaybackQueueRequest::Library,
+            }))
             .expect("play A");
 
         // Briefly listen — well short of the play threshold.
@@ -3376,9 +3390,10 @@ mod tests {
         .with_playback_service(Box::new(NullPlaybackService::new()));
 
         runtime
-            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
-                track_id(1),
-            )))
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack {
+                track_id: track_id(1),
+                queue: PlaybackQueueRequest::Library,
+            }))
             .expect("play A");
 
         // No ticks have fired yet. Skip immediately. The session must
@@ -3430,9 +3445,10 @@ mod tests {
         .with_playback_service(Box::new(NullPlaybackService::new()));
 
         runtime
-            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
-                track_id(1),
-            )))
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack {
+                track_id: track_id(1),
+                queue: PlaybackQueueRequest::Library,
+            }))
             .expect("play A");
         runtime
             .handle_command(ApplicationCommand::Playback(

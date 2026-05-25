@@ -30,8 +30,8 @@ pub use managed_library::{
 };
 pub use metadata::{FieldChange, MetadataChange, TrackMetadata};
 pub use playback::{
-    PlaybackCommand, PlaybackOptions, PlaybackQueue, PlaybackQueueSource, PlaybackState,
-    RepeatMode, TrackPlaybackSource, VolumePercent,
+    PlaybackCommand, PlaybackOptions, PlaybackQueue, PlaybackQueueRequest, PlaybackQueueSource,
+    PlaybackState, RepeatMode, TrackPlaybackSource, VolumePercent,
 };
 pub use playback_session::PlaybackSession;
 pub use playlist::{Playlist, PlaylistEntry};
