@@ -16,12 +16,14 @@ use super::{
     command_controller::SharedCommandController,
 };
 use model::{
-    artist_album_text, playback_position, progress_fraction, progress_fraction_from_x,
-    remaining_time_text, time_text, track_title,
+    artist_album_text, playback_position, progress_fraction, remaining_time_text, time_text,
+    track_title,
 };
+use progress_hit_area::ProgressHitArea;
 use sustain_app_runtime::{ApplicationCommand, NowPlaying, PlaybackCommand, Track};
 
 mod model;
+mod progress_hit_area;
 
 #[derive(Clone)]
 pub(crate) struct NowPlayingView {
@@ -32,7 +34,7 @@ pub(crate) struct NowPlayingView {
     artist_album: MarqueeLabel,
     elapsed: gtk::Label,
     remaining: gtk::Label,
-    progress: gtk::ProgressBar,
+    hit_area: ProgressHitArea,
     shuffle_icon: gtk::Image,
     shuffle_button: gtk::Button,
     repeat_icon: gtk::Image,
@@ -121,19 +123,12 @@ impl NowPlayingView {
         detail_content.set_center_widget(Some(&metadata));
         detail_content.set_end_widget(Some(&repeat.widget));
 
-        let progress = gtk::ProgressBar::new();
-        progress.add_css_class("song-progress");
-        progress.set_fraction(0.0);
-        progress.set_hexpand(true);
-        progress.set_halign(gtk::Align::Fill);
-        progress.set_valign(gtk::Align::End);
-        progress.set_cursor_from_name(Some("pointer"));
-
         let duration = Rc::new(Cell::new(Duration::ZERO));
-        install_progress_seeking(&progress, command_controller.clone(), duration.clone());
+        let hit_area = ProgressHitArea::new(command_controller.clone(), duration.clone());
 
         details.append(&detail_content);
-        details.append(&progress);
+        details.append(hit_area.widget());
+        hit_area.install_hover_visibility_on(&area);
 
         let loaded_view = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         loaded_view.set_hexpand(true);
@@ -163,7 +158,7 @@ impl NowPlayingView {
             artist_album,
             elapsed,
             remaining,
-            progress,
+            hit_area,
             shuffle_icon: shuffle.icon,
             shuffle_button: shuffle.button,
             repeat_icon: repeat.icon,
@@ -218,7 +213,7 @@ impl NowPlayingView {
             self.artist_album.set_text("");
             self.elapsed.set_text("");
             self.remaining.set_text("");
-            self.progress.set_fraction(0.0);
+            self.hit_area.set_position(0.0, false);
             self.duration.set(Duration::ZERO);
             sync_playback_option_icon(&self.shuffle_icon, now_playing.options.shuffle_enabled);
             sync_playback_option_icon(&self.repeat_icon, now_playing.options.repeat_enabled());
@@ -236,8 +231,8 @@ impl NowPlayingView {
         self.elapsed.set_text(&time_text(position));
         self.remaining
             .set_text(&remaining_time_text(position, duration));
-        self.progress
-            .set_fraction(progress_fraction(position, duration));
+        self.hit_area
+            .set_position(progress_fraction(position, duration), true);
         sync_playback_option_icon(&self.shuffle_icon, now_playing.options.shuffle_enabled);
         sync_playback_option_icon(&self.repeat_icon, now_playing.options.repeat_enabled());
     }
@@ -281,116 +276,6 @@ fn install_playback_option_controls(
             );
         }
     });
-}
-
-fn install_progress_seeking(
-    progress: &gtk::ProgressBar,
-    command_controller: SharedCommandController,
-    duration: Rc<Cell<Duration>>,
-) {
-    let click = gtk::GestureClick::new();
-    click.set_button(gdk::BUTTON_PRIMARY);
-    click.set_exclusive(true);
-    let progress_for_click = progress.clone();
-    let command_controller_for_click = command_controller.clone();
-    let duration_for_click = duration.clone();
-    click.connect_pressed(move |click, _press_count, x, _y| {
-        claim_gesture_sequence(click);
-        commit_seek_from_progress_x(
-            &progress_for_click,
-            &command_controller_for_click,
-            &duration_for_click,
-            x,
-        );
-    });
-    progress.add_controller(click);
-
-    let drag = gtk::GestureDrag::new();
-    drag.set_button(gdk::BUTTON_PRIMARY);
-    drag.set_exclusive(true);
-    let progress_for_drag = progress.clone();
-    let duration_for_drag = duration.clone();
-    drag.connect_drag_begin(move |drag, x, _y| {
-        claim_gesture_sequence(drag);
-        preview_progress_from_x(&progress_for_drag, &duration_for_drag, x);
-    });
-
-    let progress_for_drag_update = progress.clone();
-    let duration_for_drag_update = duration.clone();
-    drag.connect_drag_update(move |drag, offset_x, _offset_y| {
-        claim_gesture_sequence(drag);
-        let Some((start_x, _start_y)) = drag.start_point() else {
-            return;
-        };
-        preview_progress_from_x(
-            &progress_for_drag_update,
-            &duration_for_drag_update,
-            start_x + offset_x,
-        );
-    });
-
-    let progress_for_drag_end = progress.clone();
-    let command_controller_for_drag_end = command_controller.clone();
-    let duration_for_drag_end = duration.clone();
-    drag.connect_drag_end(move |drag, offset_x, _offset_y| {
-        claim_gesture_sequence(drag);
-        let Some((start_x, _start_y)) = drag.start_point() else {
-            return;
-        };
-        commit_seek_from_progress_x(
-            &progress_for_drag_end,
-            &command_controller_for_drag_end,
-            &duration_for_drag_end,
-            start_x + offset_x,
-        );
-    });
-    progress.add_controller(drag);
-}
-
-fn claim_gesture_sequence(gesture: &impl IsA<gtk::Gesture>) {
-    let _claimed = gesture.set_state(gtk::EventSequenceState::Claimed);
-}
-
-fn preview_progress_from_x(
-    progress: &gtk::ProgressBar,
-    duration: &Cell<Duration>,
-    x: f64,
-) -> Option<f64> {
-    if duration.get().is_zero() {
-        return None;
-    }
-
-    let fraction = progress_fraction_from_x(x, progress.width())?;
-    progress.set_fraction(fraction);
-    Some(fraction)
-}
-
-fn commit_seek_from_progress_x(
-    progress: &gtk::ProgressBar,
-    command_controller: &SharedCommandController,
-    duration: &Cell<Duration>,
-    x: f64,
-) {
-    let Some(fraction) = preview_progress_from_x(progress, duration, x) else {
-        return;
-    };
-
-    commit_seek_to_fraction(command_controller, duration.get(), fraction);
-}
-
-fn commit_seek_to_fraction(
-    command_controller: &SharedCommandController,
-    duration: Duration,
-    fraction: f64,
-) {
-    if duration.is_zero() {
-        return;
-    }
-
-    let position = duration.mul_f64(fraction.clamp(0.0, 1.0));
-    let _result = command_controller.dispatch(ApplicationCommand::Playback(PlaybackCommand::Seek(
-        position,
-    )));
 }
 
 fn install_refresh_timer(view: &NowPlayingView, runtime: SharedRuntime) {
