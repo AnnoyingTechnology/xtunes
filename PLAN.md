@@ -1,57 +1,5 @@
 # Sustain Architecture Plan
 
-## Product Name (Open)
-
-The working name `Sustain` is provisional and **must** change before any public
-release. The rename is driven by two independent concerns, either of which
-would be sufficient on its own:
-
-1. **Taste.** The maintainer is not satisfied with the name: the `x` prefix
-   carries a late-90s/early-2000s Linux-desktop flavor (xterm, xmms, xchat,
-   xine) that reads as dated rather than as heritage, and the `Tunes` half
-   leans too hard on iTunes phonetics for an application that is explicitly
-   not iTunes.
-2. **Legal exposure.** `Sustain` shares the distinctive `Tunes` suffix with
-   Apple's `iTunes` registered trademark (EUIPO + INPI) and the product is
-   openly positioned as an iTunes-inspired player. Under EU trademark law
-   (Regulation 2017/1001) and the French Code de la propriété intellectuelle
-   (art. L713-2/3), the likelihood-of-confusion and dilution tests for a
-   reputed mark cut against a single-letter prefix swap. Keeping the name
-   through a public release would invite, at minimum, a takedown or
-   cease-and-desist; renaming before publication eliminates that exposure
-   cleanly. The code itself, the UX inspiration, and the GPL license carry
-   no comparable risk (cf. CJEU C-406/10, *SAS Institute v. World
-   Programming*, on the non-copyrightability of software functionality and
-   look-and-feel) — the name is the single structural change required.
-
-Given the quality bar the maintainer is holding the codebase to, the product
-deserves a name worth being proud of, and one that does not pick a fight with
-Apple's legal team. A better name must be chosen before the first public
-release.
-
-Current candidate names the maintainer likes: **Needle** and **Spindle**. Both
-evoke physical-media / turntable imagery, which fits the product's dense,
-pre-streaming, library-ownership ethos. Neither has been committed to yet, and
-each needs a search-collision and trademark check (existing audio software,
-bands, products) before being adopted.
-
-Direction worth exploring when the time comes:
-
-- short, pronounceable, and easy to say out loud
-- not a play on `iTunes`, `Rhythmbox`, or any other existing player
-- not `x`-prefixed and not leaning on dated Linux-desktop naming conventions
-- music-adjacent without being literal (oblique nouns from records, playback,
-  or musical structure tend to age better than compound words)
-- searchable: distinct enough that the project is findable without colliding
-  with an existing product, band, or common word
-- usable as a binary name, crate prefix, and reverse-DNS application id
-  without awkward transformations
-
-Renaming touches the binary name, crate prefix (`sustain-*` / `sustain_*`), the
-application id (`io.github.open_sustain.sustain`), packaging metadata, and every
-SPDX/copyright header. Plan the rename as a single coordinated change rather
-than a drip of partial renames.
-
 ## Summary
 
 `Sustain` is a Linux-only, Debian-first music library/player built with Rust,
@@ -74,10 +22,13 @@ Adjacent playback action still pending: an explicit **Add to Queue**
 (append to tail), distinct from **Play Next** (insert at head). See
 `## Up Next Queue`.
 
-Rhythmbox is an import source only. The application owns its database, playlists,
-statistics, search behavior, settings, and playback state. Ratings are part of
-the application model, but their durable storage is the audio file's native
-metadata tags.
+Sustain owns its database, playlists, statistics, search behavior, settings,
+and playback state. Ratings are part of the application model, but their
+durable storage is the audio file's native metadata tags. Migrations from
+other players (iTunes, Rhythmbox, Apple Music) are out of scope as a
+maintained feature; see `MIGRATING_TO_SUSTAIN.md` for what users (or an
+LLM coding agent acting on their behalf) need to know to write a one-off
+backfill against their specific export.
 
 ## Architecture
 
@@ -90,7 +41,6 @@ crates/
   library_store/  SQLite persistence, schema, and migrations
   metadata/       Audio tag reading/writing and artwork extraction
   playback/       GStreamer playback controller
-  importer/       Rhythmbox import pipeline
   search/         Query, filtering, sorting, and indexing behavior
   settings/       User preferences, starting with the library folder
   desktop/        MPRIS, media keys, and D-Bus integration
@@ -107,13 +57,19 @@ playback      -> domain
 library_store -> domain
 metadata      -> domain
 search        -> domain
-importer      -> domain + library_store
 settings      -> domain
 domain        -> no application-specific dependencies
 ```
 
-The `domain` crate must not depend on GTK, GStreamer, SQLite, D-Bus, filesystem
-watchers, or Rhythmbox-specific formats.
+The `domain` crate must not depend on GTK, GStreamer, SQLite, D-Bus, or
+filesystem watchers.
+
+The `importer/` crate exists in the workspace but is no longer part of
+Sustain's product surface — migrations from iTunes/Rhythmbox are handled
+out-of-band by user-written backfill scripts (see
+`MIGRATING_TO_SUSTAIN.md`). The crate is preserved as-is for use by other
+projects that reference it; do not remove or modify it from the Sustain
+side without confirming the cross-project dependency.
 
 ## Core Model
 
@@ -1173,7 +1129,6 @@ listening-insight features.
 
 Run GTK on the main thread. Move slow work to background tasks:
 
-- Rhythmbox import
 - metadata scanning
 - search indexing, if needed
 - artwork extraction
@@ -1264,10 +1219,9 @@ Build the first version in this order:
 8. Add playback controls/state over a fake playback service.
 9. Add the settings shell, library path, manual scan action, and native light/dark validation.
 10. Add SQLite schema and explicit migrations behind the runtime contracts.
-11. Import Rhythmbox tracks, playlists, and ratings.
-12. Play the selected track through GStreamer.
-13. Persist rating edits through metadata tags.
-14. Persist settings.
+11. Play the selected track through GStreamer.
+12. Persist rating edits through metadata tags.
+13. Persist settings.
 
 This slice should prove the full architecture without adding non-core features.
 
@@ -1507,19 +1461,6 @@ capabilities. The ones with their own dedicated sections in this plan
 are tracked there. The remainder is consolidated here so the plan covers
 everything the README promises — none of these are first-vertical-slice
 material, but they must not be lost.
-
-### Library import (iTunes / Apple Music `.xml`, Rhythmbox)
-
-Importers are explicitly deferred. The product-level rationale is that early
-adopters can credibly use an LLM coding agent (Claude, Codex, etc.) to write
-a one-off importer against their specific source library, so we must not
-spend a significant slice of the first releases building polished import UIs.
-
-When we do invest engineering time, the shape should be a **CLI importer
-bundled with Sustain** rather than an in-app workflow — a GUI dialog can
-come later once the CLI path is solid. Concrete delivery shape (subcommand
-of `sustain` vs sibling binary, exact flags, etc.) is to be decided at
-implementation time.
 
 ### Audio analysis (BPM detection, musical key detection)
 
