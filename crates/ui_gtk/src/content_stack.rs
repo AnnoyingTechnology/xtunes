@@ -13,6 +13,11 @@ pub(crate) fn build_content_stack(
     let stack = gtk::Stack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
+    // Hidden pages must not contribute to the window's minimum size. The
+    // Albums page can legitimately have a wider temporary natural width while
+    // it is reflowing between column counts.
+    stack.set_hhomogeneous(false);
+    stack.set_vhomogeneous(false);
 
     stack.add_named(songs_view, Some(SONGS_VIEW));
     stack.add_named(albums_view, Some(ALBUMS_VIEW));

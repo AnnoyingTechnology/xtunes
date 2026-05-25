@@ -113,7 +113,11 @@ impl AlbumsView {
         scroller.add_css_class("albums-view");
         scroller.set_vexpand(true);
         scroller.set_hexpand(true);
-        scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        // Rows are rebuilt around the current allocation. Allowing temporary
+        // horizontal overflow lets the scroller shrink first; the width watcher
+        // then recomputes a smaller column count on the next frame.
+        scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        scroller.set_propagate_natural_width(false);
         scroller.set_child(Some(&list_view));
 
         // The loader is created at startup so background workers and the
