@@ -79,6 +79,10 @@ pub(crate) fn build_titlebar(now_playing: gtk::Box, initial_volume: VolumePercen
     search.set_placeholder_text(Some("Search"));
     search.set_width_chars(24);
     search.set_valign(gtk::Align::Center);
+    // GTK's default search delay (150ms) fires partway through a typed word
+    // for normal typing speeds; 300ms lets a typed word land before the
+    // first filter pass without feeling sluggish on a single quick keystroke.
+    search.set_search_delay(300);
 
     let window_controls = gtk::WindowControls::new(gtk::PackType::End);
     window_controls.set_valign(gtk::Align::Center);
