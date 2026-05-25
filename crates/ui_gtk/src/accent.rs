@@ -160,6 +160,25 @@ fn accent_css(palette: AccentPalette) -> String {
             color: {foreground};
         }}
 
+        button.suggested-action:not(:disabled) {{
+            background-color: {background};
+            background-image: none;
+            color: {foreground};
+        }}
+
+        button.suggested-action:not(:disabled):hover {{
+            background-color: shade({background}, 1.10);
+            background-image: none;
+            color: {foreground};
+        }}
+
+        button.suggested-action:not(:disabled):active,
+        button.suggested-action:not(:disabled):checked {{
+            background-color: shade({background}, 0.90);
+            background-image: none;
+            color: {foreground};
+        }}
+
         .playlist-sidebar-row:drop(active) {{
             background-color: transparent;
             background-image: none;
@@ -221,6 +240,16 @@ mod tests {
         assert!(css.contains(".now-playing-side-icon-active"));
         assert!(css.contains(".track-table-cell.track-table-row-selected"));
         assert!(css.contains(".track-table-status-playing"));
+        assert!(css.contains("#3a944a"));
+    }
+
+    #[test]
+    fn accent_css_paints_suggested_action_buttons() {
+        let css = accent_css(accent_palette("green"));
+
+        assert!(css.contains("button.suggested-action:not(:disabled)"));
+        assert!(css.contains("button.suggested-action:not(:disabled):hover"));
+        assert!(css.contains("button.suggested-action:not(:disabled):active"));
         assert!(css.contains("#3a944a"));
     }
 }
