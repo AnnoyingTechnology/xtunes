@@ -20,7 +20,7 @@ mod drag_drop;
 mod model;
 mod row_context;
 
-pub(crate) use drag_drop::{DropPosition, tracks_drag_payload};
+pub(crate) use drag_drop::{DropPosition, parse_tracks_payload, tracks_drag_payload};
 use drag_drop::{SharedDropIndicator, attach_drag_and_drop};
 use model::{SidebarItem, build_tree_model, select_item, selected_item};
 use row_context::{attach_rename_entry_signals, attach_row_context_menu, begin_rename};

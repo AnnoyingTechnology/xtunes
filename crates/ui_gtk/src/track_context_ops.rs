@@ -68,6 +68,20 @@ pub(crate) fn play_next_callback(
     })
 }
 
+pub(crate) fn add_to_queue_callback(
+    command_controller: &SharedCommandController,
+) -> TrackActionCallback {
+    let command_controller = command_controller.clone();
+    Rc::new(move |track_ids: Vec<TrackId>| {
+        if track_ids.is_empty() {
+            return;
+        }
+        let _result = command_controller.dispatch(ApplicationCommand::Playback(
+            PlaybackCommand::EnqueueLast(track_ids),
+        ));
+    })
+}
+
 pub(crate) fn playback_has_current_track_visibility(
     runtime: &SharedRuntime,
 ) -> TrackActionVisibility {

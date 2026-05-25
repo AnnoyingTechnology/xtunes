@@ -7,8 +7,7 @@ use gtk::prelude::*;
 use gtk::{gdk, glib};
 use sustain_app_runtime::{
     PlaybackCommand, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistItem,
-    Rating, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
-    filter_tracks_by_search_text, track_matches_search_text,
+    Rating, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId, track_matches_search_text,
 };
 
 use super::{
@@ -51,12 +50,13 @@ use super::{
         TrackActionVisibility, TrackContextAction, TrackContextActionSet, TrackRowContextMenu,
     },
     track_context_ops::{
-        copy_files_callback, get_info_callback, play_next_callback,
+        add_to_queue_callback, copy_files_callback, get_info_callback, play_next_callback,
         playback_has_current_track_visibility, show_album_callback, show_in_folder_callback,
         track_has_album_visibility,
     },
     track_table::{
-        RatingChangedCallback, TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table,
+        RatingChangedCallback, RowDropPosition, RowReorderCallback, RowReorderDrop,
+        TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table,
     },
     window_chrome::{install_resize_handles, install_window_state_chrome},
 };
@@ -203,6 +203,7 @@ pub(crate) fn build_main_window(
         Some(track_activated.clone()),
         Some(context_menu.clone()),
         Some(rating_changed.clone()),
+        None,
     );
     songs_table_holder.replace(Some(songs_table.clone()));
     let albums_view = AlbumsView::new(
@@ -213,11 +214,18 @@ pub(crate) fn build_main_window(
         artwork_loader.clone(),
     );
     albums_view_holder.replace(Some(albums_view.clone()));
+    let playlist_row_reorder = playlist_row_reorder_callback(
+        &command_controller,
+        &runtime,
+        &sidebar,
+        &library_changed_holder,
+    );
     let playlists_table = build_track_table(
         Vec::new(),
         Some(track_activated.clone()),
         Some(playlist_context_menu),
         Some(rating_changed),
+        Some(playlist_row_reorder),
     );
     playlists_table_holder.replace(Some(playlists_table.clone()));
     install_track_column_layout_persistence(&runtime, &songs_table, &playlists_table, &sidebar);
@@ -751,6 +759,19 @@ fn sidebar_selection_changed_callback(
         if let Some(layout) = layout_for_selection(&runtime.borrow(), selection) {
             playlists_table.apply_layout(&layout);
         }
+        // A regular playlist always lays out in PlaylistEntry::position
+        // order on first display — clicking any other column header sorts
+        // by that field for the duration of the selection, and clicking
+        // the status column header restores play-order. Smart playlists
+        // are derived (no authoritative entry order) and Library shows
+        // the full library, so neither gets a programmatic default sort
+        // here — they inherit whatever sort the user last set.
+        if matches!(
+            selection,
+            Some(SidebarSelection::Item(PlaylistItem::Playlist(_)))
+        ) {
+            playlists_table.apply_playlist_default_sort();
+        }
         let search_text = current_search_text.borrow().clone();
         let rows = playlist_table_rows_for(&runtime.borrow(), selection, &search_text);
         playlists_table.replace_rows(rows);
@@ -945,8 +966,18 @@ fn playlist_table_rows_for(
     selection: Option<SidebarSelection>,
     search_text: &str,
 ) -> Vec<TrackTableRow> {
-    let candidate_tracks: Vec<Track> = match selection {
-        Some(SidebarSelection::Library) => runtime.library_tracks().to_vec(),
+    // Carry the playlist_position alongside each Track so the row built
+    // below mirrors PlaylistEntry::position one-to-one for the regular-
+    // playlist branch. Library / Smart Playlist selections never have an
+    // authoritative play-order, so their pairs hold None — those rows
+    // collate equal under the status column sorter and are unaffected by
+    // the play-order sort.
+    let candidates: Vec<(Track, Option<u32>)> = match selection {
+        Some(SidebarSelection::Library) => runtime
+            .library_tracks()
+            .iter()
+            .map(|track| (track.clone(), None))
+            .collect(),
         Some(SidebarSelection::Item(PlaylistItem::Playlist(playlist_id))) => {
             let Some(playlist) = runtime
                 .playlists()
@@ -960,24 +991,34 @@ fn playlist_table_rows_for(
                 .iter()
                 .map(|track| (track.id, track))
                 .collect();
-            playlist_entries_in_order(playlist)
-                .filter_map(|track_id| tracks_by_id.get(&track_id).copied().cloned())
+            let mut entries: Vec<&PlaylistEntry> = playlist.entries.iter().collect();
+            entries.sort_by_key(|entry| entry.position);
+            entries
+                .into_iter()
+                .filter_map(|entry| {
+                    tracks_by_id
+                        .get(&entry.track_id)
+                        .copied()
+                        .cloned()
+                        .map(|track| (track, Some(entry.position)))
+                })
                 .collect()
         }
         Some(SidebarSelection::Item(PlaylistItem::SmartPlaylist(smart_playlist_id))) => runtime
             .smart_playlist_matching_tracks(smart_playlist_id)
             .into_iter()
-            .cloned()
+            .map(|track| (track.clone(), None))
             .collect(),
         _ => return Vec::new(),
     };
 
-    let filtered = if search_text.is_empty() {
-        candidate_tracks
-    } else {
-        filter_tracks_by_search_text(&candidate_tracks, search_text)
-    };
-    filtered.iter().map(TrackTableRow::from_track).collect()
+    candidates
+        .into_iter()
+        .filter(|(track, _)| {
+            search_text.is_empty() || track_matches_search_text(track, search_text)
+        })
+        .map(|(track, position)| TrackTableRow::from_track(&track).with_playlist_position(position))
+        .collect()
 }
 
 fn sidebar_tracks_drop_callback(
@@ -1006,12 +1047,6 @@ fn sidebar_tracks_drop_callback(
             callback();
         }
     })
-}
-
-fn playlist_entries_in_order(playlist: &Playlist) -> impl Iterator<Item = TrackId> + '_ {
-    let mut ordered: Vec<&PlaylistEntry> = playlist.entries.iter().collect();
-    ordered.sort_by_key(|entry| entry.position);
-    ordered.into_iter().map(|entry| entry.track_id)
 }
 
 fn add_to_playlist_provider(runtime: &SharedRuntime) -> AddToPlaylistProvider {
@@ -1484,6 +1519,10 @@ fn track_context_actions(
             play_next_callback(command_controller),
             playback_has_current_track_visibility(runtime),
         ),
+        TrackContextAction::add_to_queue(
+            add_to_queue_callback(command_controller),
+            playback_has_current_track_visibility(runtime),
+        ),
         TrackContextAction::get_info(get_info_callback(
             window,
             runtime,
@@ -1525,6 +1564,10 @@ fn playlist_track_context_actions(
             play_next_callback(command_controller),
             playback_has_current_track_visibility(runtime),
         ),
+        TrackContextAction::add_to_queue(
+            add_to_queue_callback(command_controller),
+            playback_has_current_track_visibility(runtime),
+        ),
         TrackContextAction::get_info(get_info_callback(
             window,
             runtime,
@@ -1558,6 +1601,103 @@ fn playlist_track_context_actions(
             |track_id| ApplicationCommand::MoveTrackToTrash { track_id },
         )),
     ])
+}
+
+/// Build the drag-reorder callback for the playlist track table. The callback
+/// only acts when a *regular* playlist is selected in the sidebar — smart
+/// playlists and the Library pseudo-entry are derived/dynamic and have no
+/// authoritative entry order to mutate. The PLAN.md punch-list item is
+/// explicit: "no GTK-only row reorder path"; this dispatches
+/// `MovePlaylistEntries` so the runtime/SQLite are the source of truth and
+/// the table refreshes via the standard `library_changed` rebuild.
+///
+/// `new_position` is the insertion index in the playlist's *post-removal*
+/// entries list (see `ApplicationCommand::MovePlaylistEntries`), so the
+/// caller pre-shifts by the count of dragged tracks that currently sit
+/// before the target row.
+fn playlist_row_reorder_callback(
+    command_controller: &SharedCommandController,
+    runtime: &SharedRuntime,
+    sidebar: &PlaylistSidebar,
+    library_changed_holder: &LibraryChangedHolder,
+) -> RowReorderCallback {
+    let command_controller = command_controller.clone();
+    let runtime = runtime.clone();
+    let sidebar = sidebar.clone();
+    let library_changed_holder = library_changed_holder.clone();
+
+    Rc::new(move |drop: RowReorderDrop| -> bool {
+        let Some(SidebarSelection::Item(PlaylistItem::Playlist(playlist_id))) =
+            sidebar.current_selection()
+        else {
+            // Drops on smart-playlist / library views are silently
+            // ignored; the indicator was already cleared when GTK fired
+            // the drop signal, so there is no visual residue.
+            return false;
+        };
+
+        let new_position = {
+            let runtime_borrow = runtime.borrow();
+            let Some(playlist) = runtime_borrow
+                .playlists()
+                .iter()
+                .find(|playlist| playlist.id == playlist_id)
+            else {
+                return false;
+            };
+            let Some(new_position) = compute_playlist_reorder_position(&playlist.entries, &drop)
+            else {
+                return false;
+            };
+            new_position
+        };
+
+        let dispatched =
+            command_controller.dispatch_succeeded(ApplicationCommand::MovePlaylistEntries {
+                playlist_id,
+                track_ids: drop.dragged_track_ids,
+                new_position,
+            });
+        if dispatched && let Some(callback) = library_changed_holder.borrow().as_ref() {
+            callback();
+        }
+        dispatched
+    })
+}
+
+/// Resolve the (`Above`/`Below`, target-row-track-id) pair from a drop into a
+/// post-removal insertion index for `MovePlaylistEntries`.
+///
+/// Returns `None` when the target row is not in the playlist (shouldn't
+/// happen for in-table drops, but the row id is opaque to the cell-level
+/// drop target and is worth validating before dispatching), or when every
+/// dragged track is the target row itself.
+fn compute_playlist_reorder_position(
+    entries: &[sustain_app_runtime::PlaylistEntry],
+    drop: &RowReorderDrop,
+) -> Option<u32> {
+    let target_index = entries
+        .iter()
+        .position(|entry| entry.track_id == drop.target_track_id)?;
+    let moving: std::collections::BTreeSet<sustain_app_runtime::TrackId> =
+        drop.dragged_track_ids.iter().copied().collect();
+    if moving.is_empty() {
+        return None;
+    }
+    // Count source tracks that currently sit before the target row; they
+    // will be removed first, so the target row's post-removal index drops
+    // by that count.
+    let source_tracks_before_target = entries
+        .iter()
+        .take(target_index)
+        .filter(|entry| moving.contains(&entry.track_id))
+        .count();
+    let target_post_removal_index = target_index - source_tracks_before_target;
+    let new_position = match drop.position {
+        RowDropPosition::Above => target_post_removal_index,
+        RowDropPosition::Below => target_post_removal_index + 1,
+    };
+    u32::try_from(new_position).ok()
 }
 
 fn remove_from_playlist_callback(
@@ -1755,5 +1895,98 @@ fn install_app_icon() {
     let dev_icons = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/icons");
     if dev_icons.exists() {
         theme.add_search_path(dev_icons);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sustain_app_runtime::{PlaylistEntry, PlaylistId};
+
+    #[test]
+    fn drop_above_target_post_removal_collapses_source_tracks_before_target() {
+        // Playlist: [1, 2, 3, 4, 5]. Drag [3, 4] (which sit before the
+        // target row), drop above row 5. The post-removal list is
+        // [1, 2, 5] (len 3); row 5's post-removal index is 2, and "above"
+        // resolves to insertion at 2 — landing the [3, 4] block right
+        // before 5 in the final order: [1, 2, 3, 4, 5] (no visual change
+        // because the block was already contiguous and ends just before
+        // the target).
+        let entries = playlist_entries(&[1, 2, 3, 4, 5]);
+        let drop = RowReorderDrop {
+            dragged_track_ids: vec![track_id(3), track_id(4)],
+            target_track_id: track_id(5),
+            position: RowDropPosition::Above,
+        };
+        assert_eq!(compute_playlist_reorder_position(&entries, &drop), Some(2));
+    }
+
+    #[test]
+    fn drop_below_target_adds_one_to_post_removal_index() {
+        // Playlist: [1, 2, 3, 4, 5]. Drag [3], drop below row 5.
+        // Post-removal list: [1, 2, 4, 5] (len 4); row 5's post-removal
+        // index is 3; "below" → insertion at 4, which clamps to len and
+        // lands the track at the tail: [1, 2, 4, 5, 3].
+        let entries = playlist_entries(&[1, 2, 3, 4, 5]);
+        let drop = RowReorderDrop {
+            dragged_track_ids: vec![track_id(3)],
+            target_track_id: track_id(5),
+            position: RowDropPosition::Below,
+        };
+        assert_eq!(compute_playlist_reorder_position(&entries, &drop), Some(4));
+    }
+
+    #[test]
+    fn drop_above_target_when_no_sources_precede_it_keeps_index_unchanged() {
+        // Playlist: [1, 2, 3, 4]. Drag [4], drop above row 2.
+        // No source tracks before row 2; row 2 is at index 1, stays at
+        // post-removal index 1. "Above" → insertion at 1 — final order:
+        // [1, 4, 2, 3].
+        let entries = playlist_entries(&[1, 2, 3, 4]);
+        let drop = RowReorderDrop {
+            dragged_track_ids: vec![track_id(4)],
+            target_track_id: track_id(2),
+            position: RowDropPosition::Above,
+        };
+        assert_eq!(compute_playlist_reorder_position(&entries, &drop), Some(1));
+    }
+
+    #[test]
+    fn missing_target_rejects_the_move() {
+        let entries = playlist_entries(&[1, 2, 3]);
+        let drop = RowReorderDrop {
+            dragged_track_ids: vec![track_id(1)],
+            target_track_id: track_id(99),
+            position: RowDropPosition::Above,
+        };
+        assert_eq!(compute_playlist_reorder_position(&entries, &drop), None);
+    }
+
+    #[test]
+    fn empty_dragged_set_rejects_the_move() {
+        let entries = playlist_entries(&[1, 2, 3]);
+        let drop = RowReorderDrop {
+            dragged_track_ids: Vec::new(),
+            target_track_id: track_id(2),
+            position: RowDropPosition::Above,
+        };
+        assert_eq!(compute_playlist_reorder_position(&entries, &drop), None);
+    }
+
+    fn playlist_entries(track_ids: &[i64]) -> Vec<PlaylistEntry> {
+        let playlist_id = PlaylistId::new(1).expect("positive id");
+        track_ids
+            .iter()
+            .enumerate()
+            .map(|(position, id)| PlaylistEntry {
+                playlist_id,
+                track_id: track_id(*id),
+                position: u32::try_from(position).expect("position fits in u32"),
+            })
+            .collect()
+    }
+
+    fn track_id(value: i64) -> TrackId {
+        TrackId::new(value).expect("positive track id")
     }
 }

@@ -21,6 +21,10 @@ pub enum PlaybackCommand {
     /// current track in favor of the next one (e.g. media-key Next).
     SkipCurrentTrack,
     EnqueueNext(Vec<TrackId>),
+    /// Append the given tracks to the tail of the play queue, behind every
+    /// already-queued track. Counterpart to [`Self::EnqueueNext`], which
+    /// inserts at the head right after the currently playing track.
+    EnqueueLast(Vec<TrackId>),
     ToggleShuffle,
     ToggleRepeat,
     Pause,
@@ -265,6 +269,37 @@ impl PlaybackQueue {
                     .insert(index + 1 + offset, *track_id);
             }
         }
+
+        true
+    }
+
+    /// Appends the given tracks at the tail of the play queue, behind every
+    /// already-queued track in both the ordered queue and the play order.
+    /// Tracks already present elsewhere in the queue are moved to the new
+    /// position; the currently playing track is left in place and skipped if
+    /// present in `track_ids`. Returns `false` when there is no current track
+    /// to anchor against or when the candidate list reduces to nothing.
+    pub fn enqueue_at_end(&mut self, track_ids: &[TrackId]) -> bool {
+        let Some(current_track_id) = self.current_track_id else {
+            return false;
+        };
+
+        let mut to_append: Vec<TrackId> = Vec::with_capacity(track_ids.len());
+        for candidate in track_ids {
+            if *candidate != current_track_id && !to_append.contains(candidate) {
+                to_append.push(*candidate);
+            }
+        }
+        if to_append.is_empty() {
+            return false;
+        }
+
+        self.ordered_track_ids.retain(|id| !to_append.contains(id));
+        self.play_order_track_ids
+            .retain(|id| !to_append.contains(id));
+
+        self.ordered_track_ids.extend(to_append.iter().copied());
+        self.play_order_track_ids.extend(to_append.iter().copied());
 
         true
     }
@@ -664,6 +699,104 @@ mod tests {
 
         assert!(!queue.enqueue_after_current(&[track_id(1)]));
         assert!(queue.ordered_track_ids().is_empty());
+    }
+
+    #[test]
+    fn enqueue_at_end_appends_after_every_queued_track() {
+        let mut queue = queue_with_options(track_id(2), PlaybackOptions::default());
+
+        assert!(queue.enqueue_at_end(&[track_id(9)]));
+
+        assert_eq!(
+            queue.ordered_track_ids(),
+            &[track_id(1), track_id(2), track_id(3), track_id(9)]
+        );
+        assert_eq!(queue.next_track_id(), Some(track_id(3)));
+    }
+
+    #[test]
+    fn enqueue_at_end_moves_track_already_in_queue_to_the_tail() {
+        let mut queue = queue_with_options(track_id(1), PlaybackOptions::default());
+
+        assert!(queue.enqueue_at_end(&[track_id(2)]));
+
+        assert_eq!(
+            queue.ordered_track_ids(),
+            &[track_id(1), track_id(3), track_id(2)]
+        );
+        assert_eq!(queue.next_track_id(), Some(track_id(3)));
+    }
+
+    #[test]
+    fn enqueue_at_end_appends_multiple_in_order() {
+        let mut queue = queue_with_options(track_id(1), PlaybackOptions::default());
+
+        assert!(queue.enqueue_at_end(&[track_id(9), track_id(8)]));
+
+        assert_eq!(
+            queue.ordered_track_ids(),
+            &[
+                track_id(1),
+                track_id(2),
+                track_id(3),
+                track_id(9),
+                track_id(8),
+            ]
+        );
+    }
+
+    #[test]
+    fn enqueue_at_end_dedupes_repeated_candidates() {
+        let mut queue = queue_with_options(track_id(1), PlaybackOptions::default());
+
+        assert!(queue.enqueue_at_end(&[track_id(9), track_id(9), track_id(8)]));
+
+        assert_eq!(
+            queue.ordered_track_ids(),
+            &[
+                track_id(1),
+                track_id(2),
+                track_id(3),
+                track_id(9),
+                track_id(8),
+            ]
+        );
+    }
+
+    #[test]
+    fn enqueue_at_end_skips_currently_playing_track() {
+        let mut queue = queue_with_options(track_id(2), PlaybackOptions::default());
+
+        assert!(!queue.enqueue_at_end(&[track_id(2)]));
+        assert_eq!(
+            queue.ordered_track_ids(),
+            &[track_id(1), track_id(2), track_id(3)]
+        );
+    }
+
+    #[test]
+    fn enqueue_at_end_returns_false_with_no_current_track() {
+        let mut queue = PlaybackQueue::empty(PlaybackOptions::default());
+
+        assert!(!queue.enqueue_at_end(&[track_id(1)]));
+        assert!(queue.ordered_track_ids().is_empty());
+    }
+
+    #[test]
+    fn enqueue_at_end_appends_in_shuffle_play_order_too() {
+        let mut queue = queue_with_options(
+            track_id(2),
+            PlaybackOptions {
+                shuffle_enabled: true,
+                repeat_mode: RepeatMode::Off,
+            },
+        );
+
+        assert!(queue.enqueue_at_end(&[track_id(9)]));
+
+        let play_order = queue.play_order_track_ids();
+        assert_eq!(play_order.first().copied(), Some(track_id(2)));
+        assert_eq!(play_order.last().copied(), Some(track_id(9)));
     }
 
     #[test]

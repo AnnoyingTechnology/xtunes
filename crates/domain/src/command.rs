@@ -34,9 +34,17 @@ pub enum ApplicationCommand {
         playlist_id: PlaylistId,
         track_ids: Vec<TrackId>,
     },
-    MovePlaylistEntry {
+    /// Reorder one or more tracks within an existing playlist.
+    ///
+    /// The moved tracks are extracted from the playlist (preserving the
+    /// authoritative entry order among themselves), then re-inserted as a
+    /// single contiguous block at `new_position`. `new_position` is the
+    /// insertion index in the *post-removal* entries list and is clamped to
+    /// the list's length, so the saturating `u32::MAX` value lands the
+    /// block at the tail.
+    MovePlaylistEntries {
         playlist_id: PlaylistId,
-        track_id: TrackId,
+        track_ids: Vec<TrackId>,
         new_position: u32,
     },
     CreatePlaylistFolder {

@@ -83,12 +83,12 @@ impl ApplicationRuntime {
             } => {
                 self.remove_tracks_from_playlist(playlist_id, track_ids)?;
             }
-            ApplicationCommand::MovePlaylistEntry {
+            ApplicationCommand::MovePlaylistEntries {
                 playlist_id,
-                track_id,
+                track_ids,
                 new_position,
             } => {
-                self.move_playlist_entry(playlist_id, track_id, new_position)?;
+                self.move_playlist_entries(playlist_id, track_ids, new_position)?;
             }
             ApplicationCommand::CreatePlaylistFolder {
                 name,

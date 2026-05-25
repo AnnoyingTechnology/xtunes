@@ -65,6 +65,14 @@ pub(crate) struct TrackTableRow {
     pub(crate) track_number: Option<u32>,
     pub(crate) file_size_bytes: u64,
     pub(crate) is_missing: bool,
+    /// Authoritative position of this track inside the currently-displayed
+    /// regular playlist, mirrored straight from
+    /// [`sustain_app_runtime::PlaylistEntry::position`]. `None` for any row
+    /// not sourced from a regular playlist (Songs view, Albums view's track
+    /// list, Library / Smart Playlist selections, etc.). The status column
+    /// sorts by this field, so its non-None value defines the "play order"
+    /// the user can click back to after sorting by another column.
+    pub(crate) playlist_position: Option<u32>,
 }
 
 impl TrackTableRow {
@@ -95,7 +103,13 @@ impl TrackTableRow {
             track_number: track.metadata.track_number,
             file_size_bytes: track.file_size_bytes.unwrap_or(0),
             is_missing: track.location.is_missing(),
+            playlist_position: None,
         }
+    }
+
+    pub(crate) fn with_playlist_position(mut self, playlist_position: Option<u32>) -> Self {
+        self.playlist_position = playlist_position;
+        self
     }
 }
 

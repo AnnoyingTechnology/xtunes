@@ -31,6 +31,7 @@ struct AddToPlaylistAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrackContextActionId {
     PlayNext,
+    AddToQueue,
     GetInfo,
     CopyFiles,
     ShowInFolder,
@@ -44,6 +45,7 @@ impl TrackContextActionId {
     fn css_class(self) -> &'static str {
         match self {
             Self::PlayNext => "track-context-play-next",
+            Self::AddToQueue => "track-context-add-to-queue",
             Self::GetInfo => "track-context-get-info",
             Self::CopyFiles => "track-context-copy-files",
             Self::ShowInFolder => "track-context-show-in-folder",
@@ -112,6 +114,21 @@ impl TrackContextAction {
         Self {
             id: TrackContextActionId::PlayNext,
             label: "Play Next",
+            section: TrackContextActionSection::Safe,
+            selection: TrackSelectionRequirement::AtLeastOne,
+            confirmation: TrackActionConfirmation::None,
+            visibility: Some(visibility),
+            callback,
+        }
+    }
+
+    pub(crate) fn add_to_queue(
+        callback: TrackActionCallback,
+        visibility: TrackActionVisibility,
+    ) -> Self {
+        Self {
+            id: TrackContextActionId::AddToQueue,
+            label: "Add to Queue",
             section: TrackContextActionSection::Safe,
             selection: TrackSelectionRequirement::AtLeastOne,
             confirmation: TrackActionConfirmation::None,
@@ -681,6 +698,7 @@ mod tests {
         let callback = no_op_callback();
         let actions = [
             TrackContextAction::play_next(callback.clone(), always_visible()),
+            TrackContextAction::add_to_queue(callback.clone(), always_visible()),
             TrackContextAction::get_info(callback.clone()),
             TrackContextAction::copy_files(callback.clone()),
             TrackContextAction::show_in_folder(callback.clone()),
@@ -691,18 +709,20 @@ mod tests {
 
         assert_eq!(actions[0].id, TrackContextActionId::PlayNext);
         assert_eq!(actions[0].label, "Play Next");
-        assert_eq!(actions[1].id, TrackContextActionId::GetInfo);
-        assert_eq!(actions[1].label, "Get Info");
-        assert_eq!(actions[2].id, TrackContextActionId::CopyFiles);
-        assert_eq!(actions[2].label, "Copy");
-        assert_eq!(actions[3].id, TrackContextActionId::ShowInFolder);
-        assert_eq!(actions[3].label, "Show in Folder");
-        assert_eq!(actions[4].id, TrackContextActionId::ShowAlbum);
-        assert_eq!(actions[4].label, "Show Album");
-        assert_eq!(actions[5].id, TrackContextActionId::RemoveFromLibrary);
-        assert_eq!(actions[5].label, "Remove from Library");
-        assert_eq!(actions[6].id, TrackContextActionId::MoveToTrash);
-        assert_eq!(actions[6].label, "Move to Trash");
+        assert_eq!(actions[1].id, TrackContextActionId::AddToQueue);
+        assert_eq!(actions[1].label, "Add to Queue");
+        assert_eq!(actions[2].id, TrackContextActionId::GetInfo);
+        assert_eq!(actions[2].label, "Get Info");
+        assert_eq!(actions[3].id, TrackContextActionId::CopyFiles);
+        assert_eq!(actions[3].label, "Copy");
+        assert_eq!(actions[4].id, TrackContextActionId::ShowInFolder);
+        assert_eq!(actions[4].label, "Show in Folder");
+        assert_eq!(actions[5].id, TrackContextActionId::ShowAlbum);
+        assert_eq!(actions[5].label, "Show Album");
+        assert_eq!(actions[6].id, TrackContextActionId::RemoveFromLibrary);
+        assert_eq!(actions[6].label, "Remove from Library");
+        assert_eq!(actions[7].id, TrackContextActionId::MoveToTrash);
+        assert_eq!(actions[7].label, "Move to Trash");
     }
 
     #[test]
@@ -754,6 +774,18 @@ mod tests {
         assert!(visible.is_available(&[track_id]));
 
         let hidden = TrackContextAction::play_next(callback, never_visible());
+        assert!(!hidden.is_available(&[track_id]));
+    }
+
+    #[test]
+    fn add_to_queue_is_hidden_when_visibility_predicate_returns_false() {
+        let callback = no_op_callback();
+        let track_id = TrackId::new(1).expect("positive track id");
+
+        let visible = TrackContextAction::add_to_queue(callback.clone(), always_visible());
+        assert!(visible.is_available(&[track_id]));
+
+        let hidden = TrackContextAction::add_to_queue(callback, never_visible());
         assert!(!hidden.is_available(&[track_id]));
     }
 

@@ -12,8 +12,8 @@ use sustain_app_runtime::{Rating, TrackColumnEntry, TrackColumnLayout, TrackId};
 
 use super::track_context::TrackRowContextMenu;
 use cells::{
-    StatusBindings, TrackTableContextMenu, build_filler_column, build_rating_cell_factory,
-    build_status_column, build_text_cell_factory,
+    RowDropCellRegistry, RowReorderHooks, StatusBindings, TrackTableContextMenu,
+    build_filler_column, build_rating_cell_factory, build_status_column, build_text_cell_factory,
 };
 use columns::{TRACK_TABLE_COLUMNS, TrackTableColumn};
 pub(crate) use row::TrackTableRow;
@@ -25,6 +25,31 @@ mod row;
 pub(crate) type TrackActivatedCallback = Rc<dyn Fn(TrackId)>;
 pub(crate) type RatingChangedCallback = Rc<dyn Fn(TrackId, Rating) -> bool>;
 pub(crate) type LayoutChangedCallback = Rc<dyn Fn(TrackColumnLayout)>;
+
+/// Outcome handler for a within-table row drop. Wired only on tables that
+/// own an authoritative row order — currently just the playlist track table.
+/// Returns `true` when the drop was accepted and dispatched, `false` to
+/// reject (so GTK reports the drop as failed and the source row stays put).
+pub(crate) type RowReorderCallback = Rc<dyn Fn(RowReorderDrop) -> bool>;
+
+/// Per-drop information delivered to a [`RowReorderCallback`].
+#[derive(Clone, Debug)]
+pub(crate) struct RowReorderDrop {
+    /// The track ids that came in on the drag payload, in payload order
+    /// (which is the source row's display order — not necessarily the
+    /// playlist's logical order).
+    pub dragged_track_ids: Vec<TrackId>,
+    /// The track id of the row the drop landed on.
+    pub target_track_id: TrackId,
+    /// Whether the drop landed in the top or bottom half of the target row.
+    pub position: RowDropPosition,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RowDropPosition {
+    Above,
+    Below,
+}
 
 /// A track column that participates in the persisted layout. Status and
 /// filler columns are intentionally structural — they never appear in a
@@ -43,6 +68,7 @@ pub(crate) struct TrackTable {
     selection: gtk::MultiSelection,
     playing_track_id: Rc<Cell<Option<TrackId>>>,
     status_bindings: StatusBindings,
+    status_column: gtk::ColumnViewColumn,
     managed_columns: Rc<Vec<ManagedColumn>>,
     applying_layout: Rc<Cell<bool>>,
     layout_changed: Rc<RefCell<Option<LayoutChangedCallback>>>,
@@ -232,6 +258,20 @@ impl TrackTable {
         *self.layout_changed.borrow_mut() = Some(callback);
     }
 
+    /// Activate the play-order sort on the status column.
+    ///
+    /// Per iTunes 11 semantics, a regular playlist is always sorted by some
+    /// column; "manual order" is the sort represented by the leftmost
+    /// (status) column. Callers invoke this when a regular playlist becomes
+    /// the active selection so newly-displayed rows lay out in
+    /// `PlaylistEntry::position` order, and so the within-playlist drag-
+    /// reorder gate (which only accepts drops while this sort is active)
+    /// is satisfied without the user having to click any header first.
+    pub(crate) fn apply_playlist_default_sort(&self) {
+        self.table
+            .sort_by_column(Some(&self.status_column), gtk::SortType::Ascending);
+    }
+
     /// Synchronously fires any pending debounced save. Call this from the
     /// window-close handler so a column tweak made within
     /// [`LAYOUT_SAVE_DEBOUNCE`] of shutdown is not lost.
@@ -304,6 +344,7 @@ pub(crate) fn build_track_table(
     track_activated: Option<TrackActivatedCallback>,
     context_menu: Option<TrackRowContextMenu>,
     rating_changed: Option<RatingChangedCallback>,
+    row_reorder: Option<RowReorderCallback>,
 ) -> TrackTable {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     for row in rows {
@@ -336,11 +377,58 @@ pub(crate) fn build_track_table(
         context_menu.install_controller();
     }
 
-    table.append_column(&build_status_column(
+    // Late-bound back reference broken on purpose: the hooks' play-order-
+    // sort predicate needs to compare against the status column, and the
+    // status column's cell factories need the hooks installed at setup time
+    // (so each status cell becomes a drop target). The predicate reads
+    // through this RefCell, which we populate the instant build_status_column
+    // returns. Cell setup runs strictly after build_track_table finishes
+    // installing the selection model below, so the predicate is never asked
+    // before the cell is filled.
+    let status_column_for_pred: Rc<RefCell<Option<gtk::ColumnViewColumn>>> =
+        Rc::new(RefCell::new(None));
+
+    let row_reorder_hooks = row_reorder.map(|callback| {
+        let table_for_pred = table.clone();
+        let status_column_for_pred = status_column_for_pred.clone();
+        let is_play_order_active: Rc<dyn Fn() -> bool> = Rc::new(move || {
+            let Some(sorter) = table_for_pred.sorter() else {
+                return false;
+            };
+            let Some(column_sorter) = sorter.downcast_ref::<gtk::ColumnViewSorter>() else {
+                return false;
+            };
+            let Some(active) = column_sorter.primary_sort_column() else {
+                return false;
+            };
+            status_column_for_pred
+                .borrow()
+                .as_ref()
+                .is_some_and(|target| &active == target)
+        });
+        RowReorderHooks {
+            drop: callback,
+            is_play_order_active,
+            cells: RowDropCellRegistry::default(),
+        }
+    });
+
+    let status_column = build_status_column(
         playing_track_id.clone(),
         status_bindings.clone(),
         context_menu.clone(),
-    ));
+        row_reorder_hooks.clone(),
+    );
+    *status_column_for_pred.borrow_mut() = Some(status_column.clone());
+    if row_reorder_hooks.is_some() {
+        // The status column doubles as the play-order sort. Installing the
+        // CustomSorter here makes clicking its header equivalent to "sort
+        // by manual order" — matching the iTunes 11 leftmost column — and
+        // gives apply_playlist_default_sort() a column to point at.
+        let playlist_position_sorter = gtk::CustomSorter::new(compare_playlist_position_objects);
+        status_column.set_sorter(Some(&playlist_position_sorter));
+    }
+    table.append_column(&status_column);
 
     let header_menu = build_column_visibility_menu();
     let column_actions = gio::SimpleActionGroup::new();
@@ -352,6 +440,7 @@ pub(crate) fn build_track_table(
             &header_menu,
             context_menu.clone(),
             rating_changed.clone(),
+            row_reorder_hooks.clone(),
         );
         let action = gio::SimpleAction::new_stateful(
             column.action_name(),
@@ -377,7 +466,10 @@ pub(crate) fn build_track_table(
             column: table_column,
         });
     }
-    table.append_column(&build_filler_column(context_menu.clone()));
+    table.append_column(&build_filler_column(
+        context_menu.clone(),
+        row_reorder_hooks.clone(),
+    ));
 
     table.insert_action_group("columns", Some(&column_actions));
 
@@ -423,6 +515,7 @@ pub(crate) fn build_track_table(
         selection,
         playing_track_id,
         status_bindings,
+        status_column,
         managed_columns,
         applying_layout,
         layout_changed,
@@ -500,11 +593,12 @@ fn build_table_column(
     header_menu: &gio::Menu,
     context_menu: Option<TrackTableContextMenu>,
     rating_changed: Option<RatingChangedCallback>,
+    row_reorder: Option<RowReorderHooks>,
 ) -> gtk::ColumnViewColumn {
     let factory = if column == TrackTableColumn::Rating {
-        build_rating_cell_factory(context_menu, rating_changed)
+        build_rating_cell_factory(context_menu, rating_changed, row_reorder)
     } else {
-        build_text_cell_factory(column, context_menu)
+        build_text_cell_factory(column, context_menu, row_reorder)
     };
     let table_column = gtk::ColumnViewColumn::new(Some(column.title()), Some(factory));
     table_column.set_resizable(true);
@@ -560,4 +654,28 @@ fn to_gtk_ordering(ordering: CmpOrdering) -> gtk::Ordering {
         CmpOrdering::Equal => gtk::Ordering::Equal,
         CmpOrdering::Greater => gtk::Ordering::Larger,
     }
+}
+
+/// Sort comparator wired to the status column when a row-reorder hook is
+/// present. Orders by [`TrackTableRow::playlist_position`] so rows from a
+/// regular playlist lay out in the playlist's authoritative
+/// [`sustain_app_runtime::PlaylistEntry::position`] order. Rows without a
+/// playlist position (Songs / Library / Smart Playlist views) compare equal
+/// to each other and sort after positioned rows, leaving non-playlist tables
+/// undisturbed when the column header is clicked.
+fn compare_playlist_position_objects(left: &glib::Object, right: &glib::Object) -> gtk::Ordering {
+    let left_position = playlist_position_from_object(left);
+    let right_position = playlist_position_from_object(right);
+    to_gtk_ordering(match (left_position, right_position) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => CmpOrdering::Less,
+        (None, Some(_)) => CmpOrdering::Greater,
+        (None, None) => CmpOrdering::Equal,
+    })
+}
+
+fn playlist_position_from_object(object: &glib::Object) -> Option<u32> {
+    let row_object = object.downcast_ref::<glib::BoxedAnyObject>()?;
+    let row = row_object.try_borrow::<TrackTableRow>().ok()?;
+    row.playlist_position
 }

@@ -137,10 +137,10 @@ impl ApplicationRuntime {
         self.reload_playlist_state()
     }
 
-    pub(super) fn move_playlist_entry(
+    pub(super) fn move_playlist_entries(
         &mut self,
         playlist_id: PlaylistId,
-        track_id: TrackId,
+        track_ids: Vec<TrackId>,
         new_position: u32,
     ) -> ApplicationRuntimeResult<()> {
         let library_store = self.library_store()?;
@@ -150,19 +150,35 @@ impl ApplicationRuntime {
         else {
             return Err(ApplicationRuntimeError::PlaylistNotFound);
         };
-        let Some(current_index) = playlist
-            .entries
-            .iter()
-            .position(|entry| entry.track_id == track_id)
-        else {
-            return Err(ApplicationRuntimeError::PlaylistEntryNotFound);
-        };
 
-        let entry = playlist.entries.remove(current_index);
-        let target_index = usize::try_from(new_position)
+        // Authoritative source order is the playlist's own entry order,
+        // not the caller's vec order — the UI may have read the dragged
+        // selection from a sorted view that doesn't match the playlist's
+        // logical order, and the post-move contiguous block must reflect
+        // the playlist, not the view.
+        let moving_set: BTreeSet<TrackId> = track_ids.iter().copied().collect();
+        if moving_set.is_empty() {
+            return Err(ApplicationRuntimeError::PlaylistEntryNotFound);
+        }
+        let mut moving_entries: Vec<PlaylistEntry> = Vec::with_capacity(moving_set.len());
+        playlist.entries.retain(|entry| {
+            if moving_set.contains(&entry.track_id) {
+                moving_entries.push(entry.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if moving_entries.is_empty() {
+            return Err(ApplicationRuntimeError::PlaylistEntryNotFound);
+        }
+
+        let insert_at = usize::try_from(new_position)
             .unwrap_or(usize::MAX)
             .min(playlist.entries.len());
-        playlist.entries.insert(target_index, entry);
+        for (offset, entry) in moving_entries.into_iter().enumerate() {
+            playlist.entries.insert(insert_at + offset, entry);
+        }
         reindex_playlist_entries(&mut playlist);
 
         library_store

@@ -789,9 +789,9 @@ mod tests {
                 Err(ApplicationRuntimeError::LibraryServicesUnavailable),
             ),
             (
-                ApplicationCommand::MovePlaylistEntry {
+                ApplicationCommand::MovePlaylistEntries {
                     playlist_id,
-                    track_id,
+                    track_ids: vec![track_id],
                     new_position: 2,
                 },
                 Err(ApplicationRuntimeError::LibraryServicesUnavailable),
@@ -2255,9 +2255,9 @@ mod tests {
         );
 
         assert_eq!(
-            runtime.handle_command(ApplicationCommand::MovePlaylistEntry {
+            runtime.handle_command(ApplicationCommand::MovePlaylistEntries {
                 playlist_id,
-                track_id: track_id(1),
+                track_ids: vec![track_id(1)],
                 new_position: 0,
             }),
             Ok(())
@@ -2283,6 +2283,145 @@ mod tests {
                 .expect("playlist exists")],
             playlist_id,
             &[track_id(1)],
+        );
+    }
+
+    #[test]
+    fn runtime_move_playlist_entries_relocates_a_contiguous_block_atomically() {
+        let store = Arc::new(InMemoryLibraryStore::new());
+        for id in 1..=5 {
+            assert_eq!(
+                store.save_track(test_track(track_id(id), &format!("track-{id}.flac"))),
+                Ok(())
+            );
+        }
+        let playlist_id = playlist_id(1);
+        assert_eq!(
+            store.save_playlist(Playlist {
+                id: playlist_id,
+                name: "Set".to_owned(),
+                parent_folder_id: None,
+                position: 0,
+                entries: Vec::new(),
+            }),
+            Ok(())
+        );
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store.clone(), Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::AddTracksToPlaylist {
+                playlist_id,
+                track_ids: (1..=5).map(track_id).collect(),
+            }),
+            Ok(())
+        );
+        assert_playlist_track_ids(
+            runtime.playlists(),
+            playlist_id,
+            &[
+                track_id(1),
+                track_id(2),
+                track_id(3),
+                track_id(4),
+                track_id(5),
+            ],
+        );
+
+        // Move tracks 3 and 4 to the head: post-removal list is
+        // [1, 2, 5] (len 3), insertion at index 0 lands the block ahead
+        // of every other entry.
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::MovePlaylistEntries {
+                playlist_id,
+                track_ids: vec![track_id(3), track_id(4)],
+                new_position: 0,
+            }),
+            Ok(())
+        );
+        assert_playlist_track_ids(
+            runtime.playlists(),
+            playlist_id,
+            &[
+                track_id(3),
+                track_id(4),
+                track_id(1),
+                track_id(2),
+                track_id(5),
+            ],
+        );
+
+        // Move tracks 4 and 1 to the tail: caller passes them in arbitrary
+        // order, but the post-removal block must reflect the playlist's
+        // own current order (1 comes before 4 in [3, 4, 1, 2, 5]),
+        // landing as [..., 4, 1] would be wrong; the correct outcome is
+        // [3, 2, 5, 4, 1] because at extraction time 4 still precedes 1
+        // in the playlist's entries. Saturating new_position to u32::MAX
+        // pins the block at the tail.
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::MovePlaylistEntries {
+                playlist_id,
+                track_ids: vec![track_id(1), track_id(4)],
+                new_position: u32::MAX,
+            }),
+            Ok(())
+        );
+        assert_playlist_track_ids(
+            runtime.playlists(),
+            playlist_id,
+            &[
+                track_id(3),
+                track_id(2),
+                track_id(5),
+                track_id(4),
+                track_id(1),
+            ],
+        );
+
+        // Same outcome must be visible in the underlying store, not just
+        // the runtime cache.
+        assert_playlist_track_ids(
+            &[store
+                .playlist(playlist_id)
+                .expect("playlist loads")
+                .expect("playlist exists")],
+            playlist_id,
+            &[
+                track_id(3),
+                track_id(2),
+                track_id(5),
+                track_id(4),
+                track_id(1),
+            ],
+        );
+    }
+
+    #[test]
+    fn runtime_move_playlist_entries_rejects_empty_track_list() {
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let playlist_id = playlist_id(1);
+        assert_eq!(
+            store.save_playlist(Playlist {
+                id: playlist_id,
+                name: "Set".to_owned(),
+                parent_folder_id: None,
+                position: 0,
+                entries: Vec::new(),
+            }),
+            Ok(())
+        );
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::MovePlaylistEntries {
+                playlist_id,
+                track_ids: Vec::new(),
+                new_position: 0,
+            }),
+            Err(ApplicationRuntimeError::PlaylistEntryNotFound),
         );
     }
 

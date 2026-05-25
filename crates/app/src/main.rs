@@ -3,9 +3,51 @@
 
 #![forbid(unsafe_code)]
 
+mod instance_lock;
+
 use std::{process, sync::Arc};
 
+use crate::instance_lock::{AcquireOutcome, InstanceLock};
+
 fn main() {
+    // Resolve the on-disk library database location up front so the
+    // single-instance lock and the GTK application id are both keyed off
+    // the exact same path the library store will end up opening. See
+    // `instance_lock.rs` and `PLAN.md` `## Single-Instance Enforcement`.
+    let Some(database_path) = sustain_library_store::default_database_path() else {
+        eprintln!(
+            "Sustain: cannot resolve the library database path (XDG_DATA_HOME and HOME are both unset)."
+        );
+        process::exit(1);
+    };
+
+    let application_id = instance_lock::application_id_for(&database_path);
+
+    let _instance_lock: InstanceLock = match instance_lock::acquire(&database_path) {
+        AcquireOutcome::Acquired(lock) => lock,
+        AcquireOutcome::Held { lock_path } => {
+            eprintln!(
+                "Sustain: another instance is already running for this library ({}). Raising its window.",
+                lock_path.display()
+            );
+            // Hand the activate off to the primary instance so its window
+            // is raised/focused, then exit with whatever GTK reported for
+            // the brief remote registration.
+            let exit_code = sustain_ui_gtk::forward_activate(&application_id);
+            process::exit(i32::from(exit_code));
+        }
+        AcquireOutcome::Failed { lock_path, error } => {
+            eprintln!(
+                "Sustain: cannot acquire the single-instance lock at {} ({error}).",
+                lock_path.display()
+            );
+            eprintln!(
+                "Refusing to start without a lock — two Sustain processes writing the same library can corrupt it."
+            );
+            process::exit(1);
+        }
+    };
+
     let settings_store = match sustain_settings::TomlSettingsStore::open_default() {
         Ok(store) => store,
         Err(error) => {
@@ -35,7 +77,7 @@ fn main() {
         }
     };
 
-    match sustain_library_store::SqliteLibraryStore::open_default() {
+    match sustain_library_store::SqliteLibraryStore::open(&database_path) {
         Ok(library_store) => {
             let was_freshly_created = library_store.was_freshly_created();
             if let Err(error) = runtime.set_library_services(
@@ -90,5 +132,5 @@ fn main() {
     // force `GSK_RENDERER` here. If it becomes visually broken, prefer documenting
     // `GSK_RENDERER=ngl` / `GSK_RENDERER=gl` as a user workaround before changing
     // the app default.
-    sustain_ui_gtk::run(runtime);
+    sustain_ui_gtk::run(runtime, &application_id);
 }

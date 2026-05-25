@@ -261,7 +261,7 @@ pub(crate) fn tracks_drag_payload(track_ids: &[TrackId]) -> String {
     format!("tracks:{joined}")
 }
 
-fn parse_tracks_payload(text: &str) -> Option<Vec<TrackId>> {
+pub(crate) fn parse_tracks_payload(text: &str) -> Option<Vec<TrackId>> {
     let (kind, ids_str) = text.split_once(':')?;
     if kind != "tracks" {
         return None;

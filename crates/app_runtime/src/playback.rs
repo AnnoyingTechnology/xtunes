@@ -38,6 +38,10 @@ impl ApplicationRuntime {
                 self.playback_queue.enqueue_after_current(&track_ids);
                 Ok(())
             }
+            PlaybackCommand::EnqueueLast(track_ids) => {
+                self.playback_queue.enqueue_at_end(&track_ids);
+                Ok(())
+            }
             PlaybackCommand::Pause => self
                 .playback_service()?
                 .pause()

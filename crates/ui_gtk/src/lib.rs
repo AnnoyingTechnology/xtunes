@@ -5,6 +5,7 @@
 
 use std::{cell::RefCell, rc::Rc};
 
+use gtk::glib;
 use gtk::prelude::*;
 use main_window::build_main_window;
 
@@ -67,6 +68,17 @@ const STATUS_BAR_HEIGHT: i32 = 28;
 const VOLUME_WIDTH: i32 = 192;
 const VOLUME_MAGNET_THRESHOLD: f64 = 0.90;
 const WINDOW_SHADOW_MARGIN: i32 = 14;
+/// Fixed reverse-DNS id of the installed `.desktop` entry / icon theme name.
+///
+/// This is the value used when **looking up the application's icon** (window
+/// icon, now-playing fallback image) — those lookups must match the file
+/// name shipped by the Debian package, regardless of which database the
+/// running instance is pointing at.
+///
+/// The GTK *application id* used for single-instance routing is a separate
+/// value derived from the resolved database path (see
+/// `sustain-app`'s `instance_lock` module). Do not reuse `APP_ID` for
+/// `gtk::Application::application_id`.
 const APP_ID: &str = "io.github.open_sustain.sustain";
 const SONGS_VIEW: &str = "songs";
 const ALBUMS_VIEW: &str = "albums";
@@ -87,8 +99,10 @@ pub(crate) type MetadataWriteResultReceiver =
 pub(crate) type ArtworkFetchResultReceiver =
     async_channel::Receiver<sustain_app_runtime::ArtworkFetchResult>;
 
-pub fn run(mut runtime: ApplicationRuntime) {
-    let app = gtk::Application::builder().application_id(APP_ID).build();
+pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
+    let app = gtk::Application::builder()
+        .application_id(application_id)
+        .build();
 
     // Start the async metadata writer before wrapping the runtime in a
     // shared cell, so its worker thread is up before any UI mutation
@@ -177,6 +191,34 @@ pub fn run(mut runtime: ApplicationRuntime) {
     let mut runtime_guard = runtime.borrow_mut();
     runtime_guard.shutdown_metadata_writer();
     runtime_guard.shutdown_artwork_fetcher();
+}
+
+/// Activate the already-running Sustain primary instance that owns
+/// `application_id`, then return.
+///
+/// Used by `sustain-app` when the per-database single-instance lock is
+/// already held: instead of opening a second window, we forward an
+/// `activate` to the primary so it raises/focuses its existing window. The
+/// returned `ExitCode` is whatever `gtk::Application::run` reports for the
+/// short-lived remote registration (`0` on success, non-zero when the
+/// inter-process registration itself failed).
+///
+/// **Must not be called from the primary process.** The caller is expected
+/// to have already determined that another instance owns the lock; calling
+/// this from the primary would just register a second `gtk::Application`
+/// against the same id and either dispatch activate to itself or fail to
+/// register, depending on timing.
+pub fn forward_activate(application_id: &str) -> glib::ExitCode {
+    let app = gtk::Application::builder()
+        .application_id(application_id)
+        .build();
+    // The primary's connect_activate handler raises its window. Our
+    // local activate signal handler is only reached if no primary
+    // existed at register time — in which case we deliberately do
+    // nothing (and exit), because spinning up a second main loop here
+    // would defeat the single-instance guarantee.
+    app.connect_activate(|_app| {});
+    app.run()
 }
 
 fn start_mpris(

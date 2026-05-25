@@ -311,7 +311,17 @@ impl SqliteLibraryStore {
     }
 }
 
-fn default_database_path() -> Option<std::path::PathBuf> {
+/// Resolve the on-disk SQLite library database path Sustain reads from when
+/// no explicit override is supplied. Returns `None` when neither
+/// `XDG_DATA_HOME` nor `HOME` is set, in which case no default location can be
+/// derived and the caller is expected to surface the failure (Sustain has no
+/// reasonable fallback there).
+///
+/// Exposed publicly so callers that need the resolved path *before* opening
+/// the store (e.g. the application-startup single-instance lock, which
+/// flocks a sidecar in the same directory) can reuse the same resolution
+/// rule rather than re-deriving it.
+pub fn default_database_path() -> Option<std::path::PathBuf> {
     if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
         return Some(
             std::path::PathBuf::from(data_home)
