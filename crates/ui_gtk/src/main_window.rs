@@ -24,6 +24,7 @@ use super::{
     accent::install_accent_css,
     albums::AlbumsView,
     app_css::install_app_css,
+    artwork_loader::ArtworkLoader,
     command_controller::{SharedCommandController, UiCommandController},
     content_stack::build_content_stack,
     library_consolidation::library_consolidation_requested_callback,
@@ -99,7 +100,23 @@ pub(crate) fn build_main_window(
     let albums_view_holder: Rc<RefCell<Option<AlbumsView>>> = Rc::new(RefCell::new(None));
     let playlists_table_holder: Rc<RefCell<Option<TrackTable>>> = Rc::new(RefCell::new(None));
 
-    let now_playing = NowPlayingView::new(runtime.clone(), command_controller.clone());
+    // One artwork loader for the whole window. Sharing it across views
+    // means the on-disk cache, in-memory cache, and worker pool are all
+    // single-instance — a track resolved by the Albums grid is
+    // immediately available to the now-playing tile and vice versa.
+    // Construction launches worker threads, so do it once after the
+    // metadata service is installed and before any view subscribes.
+    let metadata_service = runtime
+        .borrow()
+        .metadata_service()
+        .expect("metadata service must be installed before building the main window");
+    let artwork_loader = ArtworkLoader::new(metadata_service);
+
+    let now_playing = NowPlayingView::new(
+        runtime.clone(),
+        command_controller.clone(),
+        artwork_loader.clone(),
+    );
     let initial_volume = runtime.borrow().settings().playback.volume;
     let titlebar = build_titlebar(now_playing.widget(), initial_volume);
     let playback_changed = playback_changed_callback(
@@ -182,6 +199,7 @@ pub(crate) fn build_main_window(
         command_controller.clone(),
         playback_changed.clone(),
         context_menu,
+        artwork_loader.clone(),
     );
     albums_view_holder.replace(Some(albums_view.clone()));
     let playlists_table = build_track_table(

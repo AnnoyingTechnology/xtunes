@@ -14,14 +14,15 @@ use sustain_app_runtime::{
 };
 
 use super::{
-    PlaybackChangedCallback, SharedRuntime, artwork_color::ArtworkPalette,
-    command_controller::SharedCommandController, track_context::TrackRowContextMenu,
+    PlaybackChangedCallback, SharedRuntime,
+    artwork_color::ArtworkPalette,
+    artwork_loader::{ArtworkLoader, ArtworkSource, DecodedArtwork},
+    command_controller::SharedCommandController,
+    track_context::TrackRowContextMenu,
 };
-use artwork_loader::{AlbumArtworkLoader, ArtworkSource, DecodedArtwork};
 use model::{AlbumKey, AlbumViewModel, album_subtitle, group_albums};
 use track_list::AlbumTrackListView;
 
-mod artwork_loader;
 mod model;
 mod track_list;
 
@@ -60,7 +61,15 @@ pub(crate) struct AlbumsView {
     pending_scroll_album: Rc<RefCell<Option<AlbumKey>>>,
     visible_columns: Rc<Cell<usize>>,
     last_width: Rc<Cell<i32>>,
-    artwork_loader: AlbumArtworkLoader,
+    artwork_loader: ArtworkLoader,
+    /// Monotonic generation bumped at the start of every full grid
+    /// rebuild. Each artwork request snapshot-captures the current value
+    /// and the callback drops itself when the view has moved on, so
+    /// late-arriving decodes can't touch tiles that have been torn
+    /// down. Staleness lives here (per view) instead of in the shared
+    /// loader, so an Albums rebuild can't invalidate a concurrent
+    /// now-playing request and vice versa.
+    artwork_generation: Rc<Cell<u64>>,
     /// Switches from `false` to `true` the first time `activate()` is
     /// called. Tile construction, grouping, and the width-watcher tick
     /// callback all key off this — they are skipped while the view is
@@ -105,6 +114,7 @@ impl AlbumsView {
         command_controller: SharedCommandController,
         playback_changed: PlaybackChangedCallback,
         context_menu: TrackRowContextMenu,
+        artwork_loader: ArtworkLoader,
     ) -> Self {
         let row_store = gio::ListStore::new::<glib::BoxedAnyObject>();
         let selection = gtk::NoSelection::new(Some(row_store.clone()));
@@ -127,17 +137,11 @@ impl AlbumsView {
         scroller.set_propagate_natural_width(false);
         scroller.set_child(Some(&list_view));
 
-        // The loader is created at startup so background workers and the
-        // result poller exist regardless of whether the user ever opens
-        // the Albums view. They sit idle until `activate()` queues the
-        // first batch of artwork requests, and shut down when the loader
+        // The loader is constructed once at startup in `main_window` and
+        // shared with every view that needs artwork (Albums, now-playing,
+        // future zoom modal). Its worker pool sits idle until a view
+        // queues its first request, and shuts down when the last `Rc`
         // is dropped at app teardown.
-        let metadata_service = runtime
-            .borrow()
-            .metadata_service()
-            .expect("metadata service must be installed before AlbumsView is built");
-        let artwork_loader = AlbumArtworkLoader::new(metadata_service);
-
         let initial_tracks = runtime.borrow().library_tracks().to_vec();
 
         let view = Self {
@@ -158,6 +162,7 @@ impl AlbumsView {
             visible_columns: Rc::new(Cell::new(1)),
             last_width: Rc::new(Cell::new(0)),
             artwork_loader,
+            artwork_generation: Rc::new(Cell::new(0)),
             activated: Rc::new(Cell::new(false)),
             playing_track_id: Rc::new(Cell::new(None)),
         };
@@ -344,7 +349,8 @@ impl AlbumsView {
         if !self.activated.get() {
             return;
         }
-        self.artwork_loader.begin_generation();
+        self.artwork_generation
+            .set(self.artwork_generation.get().wrapping_add(1));
         self.realized_rows.borrow_mut().clear();
         let old_len = self.row_store.n_items();
 
@@ -524,10 +530,14 @@ impl AlbumsView {
         content.append(&cover);
         if let Some(source) = self.album_artwork_source(album) {
             let cover_for_callback = cover.clone();
+            let generation_snapshot = self.artwork_generation.get();
+            let generation_cell = self.artwork_generation.clone();
             self.artwork_loader.request(
-                self.artwork_loader.current_generation(),
                 source,
                 Box::new(move |decoded| {
+                    if generation_cell.get() != generation_snapshot {
+                        return;
+                    }
                     apply_cover_texture(
                         &cover_for_callback,
                         decoded.tile_texture,

@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-//! Background loader for album cover artwork.
+//! Shared background loader for cover artwork.
 //!
 //! Reading artwork from an audio file is a synchronous, disk- and
 //! CPU-bound operation (a `lofty` tag parse plus a pixbuf decode plus a
-//! palette derivation). Doing any part of it inline while building
-//! album tiles meant the Albums view paid those costs on the GTK main
-//! thread, freezing the UI for several seconds on libraries with a few
-//! thousand albums.
+//! palette derivation). Doing any part of it inline on the GTK main
+//! thread freezes the UI on large libraries — for the Albums grid the
+//! freeze used to be several seconds; for the now-playing tile it
+//! manifests as a hitch on every track change.
 //!
-//! `AlbumArtworkLoader` separates that work:
+//! `ArtworkLoader` separates that work and is shared by every view
+//! that needs an artwork texture or palette (Albums grid, album-detail
+//! panel, integrated top bar's now-playing tile, future zoom modal).
 //!
 //! * A small pool of worker threads consumes `ArtworkSource` requests from a
 //!   shared queue and runs the **entire** decode pipeline off the main thread:
@@ -23,13 +25,15 @@
 //! * A GTK main-loop poller drains the result channel under a strict
 //!   per-tick budget (small max batch + short wall-clock cap) so even a
 //!   burst of completions can't monopolise the main thread, places each
-//!   result in the source-keyed cache, and fires the callbacks that were
+//!   result in the source-keyed cache, and fires every callback that was
 //!   waiting for that source.
-//! * A monotonic *generation* counter lets the view discard callbacks
-//!   that belong to a previous rebuild. `begin_generation` is called at
-//!   the start of every full tile-grid rebuild; any callback whose
-//!   generation no longer matches is dropped without invocation, so
-//!   stale results never touch widgets that have been removed.
+//! * Staleness — discarding callbacks whose target widget is no longer
+//!   relevant (Albums grid rebuilt, now-playing track changed) — is the
+//!   caller's concern. Each view tracks its own per-view generation
+//!   counter and checks it inside the callback closure before touching
+//!   widgets. Keeping that policy with the caller lets independent
+//!   views share one loader without one view's rebuild invalidating
+//!   another view's in-flight requests.
 //! * The repository checks a small SQLite cache before touching the audio file.
 //!   Cache rows are keyed by source plus the representative file fingerprint,
 //!   and store already-scaled tile/detail PNG payloads plus the derived palette.
@@ -37,7 +41,7 @@
 //!   source boundary is where the missing-artwork downloader should plug in.
 
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::HashMap,
     fs,
     io::Cursor,
@@ -55,8 +59,6 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sustain_app_runtime::MetadataService;
 
 use crate::artwork_color::{ArtworkPalette, ArtworkPaletteComponents, RgbColorComponents};
-
-use super::{ALBUM_DETAIL_ARTWORK_SIZE, ALBUM_TILE_COVER_SIZE};
 
 /// Number of worker threads pulling from the request queue. Artwork
 /// extraction is dominated by file I/O, tag parsing, and pixbuf decode;
@@ -85,8 +87,18 @@ const RESULT_BATCH_MAX: usize = 8;
 /// up doing more than expected, we still relinquish the main thread on
 /// schedule rather than running through the whole batch.
 const RESULT_TICK_BUDGET: Duration = Duration::from_millis(4);
-const TILE_TEXTURE_MAX_SIDE: i32 = ALBUM_TILE_COVER_SIZE;
-const DETAIL_TEXTURE_MAX_SIDE: i32 = ALBUM_DETAIL_ARTWORK_SIZE;
+
+/// Maximum side length of the smaller cached texture. Sized to cover
+/// the Albums grid tile (132px) and the now-playing tile (72px) without
+/// either having to upscale. Bigger consumers (album-detail panel,
+/// zoom modal) use the detail texture below.
+const TILE_TEXTURE_MAX_SIDE: i32 = 132;
+
+/// Maximum side length of the larger cached texture. Sized to cover
+/// the album-detail panel (3× the grid tile). The cache stores PNG
+/// payloads at this size; views downscale further at paint time.
+const DETAIL_TEXTURE_MAX_SIDE: i32 = TILE_TEXTURE_MAX_SIDE * 3;
+
 const CACHE_SCHEMA_VERSION: i64 = 1;
 const CACHE_SOURCE_KIND_EMBEDDED_TRACK: &str = "embedded-track";
 
@@ -95,14 +107,14 @@ const CACHE_SOURCE_KIND_EMBEDDED_TRACK: &str = "embedded-track";
 /// the panel background/text). Both are computed once per file and
 /// cached.
 #[derive(Clone, Default)]
-pub(super) struct DecodedArtwork {
-    pub(super) tile_texture: Option<gdk::Texture>,
-    pub(super) detail_texture: Option<gdk::Texture>,
-    pub(super) palette: Option<ArtworkPalette>,
+pub(crate) struct DecodedArtwork {
+    pub(crate) tile_texture: Option<gdk::Texture>,
+    pub(crate) detail_texture: Option<gdk::Texture>,
+    pub(crate) palette: Option<ArtworkPalette>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(super) enum ArtworkSource {
+pub(crate) enum ArtworkSource {
     EmbeddedTrack {
         /// Stable key for this embedded artwork source. Prefer the library
         /// relative track path so future disk-cache rows survive library-root
@@ -114,7 +126,7 @@ pub(super) enum ArtworkSource {
 }
 
 impl ArtworkSource {
-    pub(super) fn embedded_track(cache_path: PathBuf, file_path: PathBuf) -> Self {
+    pub(crate) fn embedded_track(cache_path: PathBuf, file_path: PathBuf) -> Self {
         Self::EmbeddedTrack {
             cache_path,
             file_path,
@@ -153,19 +165,18 @@ struct ArtworkFileFingerprint {
     mtime_ns: i64,
 }
 
-pub(super) type ArtworkCallback = Box<dyn FnOnce(DecodedArtwork) + 'static>;
+pub(crate) type ArtworkCallback = Box<dyn FnOnce(DecodedArtwork) + 'static>;
 
 #[derive(Clone)]
-pub(super) struct AlbumArtworkLoader {
+pub(crate) struct ArtworkLoader {
     inner: Rc<LoaderInner>,
 }
 
 struct LoaderInner {
     repository: Arc<ArtworkRepository>,
     request_tx: mpsc::Sender<WorkerRequest>,
-    current_generation: Cell<u64>,
     cache: RefCell<HashMap<ArtworkSource, DecodedArtwork>>,
-    pending: RefCell<HashMap<ArtworkSource, Vec<PendingCallback>>>,
+    pending: RefCell<HashMap<ArtworkSource, Vec<ArtworkCallback>>>,
 }
 
 struct WorkerRequest {
@@ -177,13 +188,8 @@ struct WorkerResult {
     decoded: DecodedArtwork,
 }
 
-struct PendingCallback {
-    generation: u64,
-    callback: ArtworkCallback,
-}
-
-impl AlbumArtworkLoader {
-    pub(super) fn new(metadata_service: Arc<dyn MetadataService>) -> Self {
+impl ArtworkLoader {
+    pub(crate) fn new(metadata_service: Arc<dyn MetadataService>) -> Self {
         let repository = Arc::new(ArtworkRepository::new(metadata_service));
         let (request_tx, request_rx) = mpsc::channel::<WorkerRequest>();
         let request_rx = Arc::new(Mutex::new(request_rx));
@@ -206,7 +212,6 @@ impl AlbumArtworkLoader {
         let inner = Rc::new(LoaderInner {
             repository,
             request_tx,
-            current_generation: Cell::new(0),
             cache: RefCell::new(HashMap::new()),
             pending: RefCell::new(HashMap::new()),
         });
@@ -216,63 +221,34 @@ impl AlbumArtworkLoader {
         Self { inner }
     }
 
-    /// Begin a new generation. All previously queued callbacks are
-    /// dropped without firing — their target widgets belong to a rebuild
-    /// that has been superseded. In-flight worker reads may still
-    /// complete; their results land in the cache (useful for the next
-    /// rebuild) but trigger no callbacks. Returns the new generation;
-    /// the view passes it back into each `request` call so the loader
-    /// can tell whether a callback is still relevant when its result
-    /// arrives.
-    pub(super) fn begin_generation(&self) -> u64 {
-        let next = self.inner.current_generation.get().wrapping_add(1);
-        self.inner.current_generation.set(next);
-        self.inner.pending.borrow_mut().clear();
-        next
-    }
-
-    /// Current generation used by newly-bound virtual rows. Rebuilds advance
-    /// the generation once, then every visible row binding queues artwork
-    /// requests against that stable value until the next rebuild.
-    pub(super) fn current_generation(&self) -> u64 {
-        self.inner.current_generation.get()
-    }
-
-    /// Returns the decoded entry for `source`, if any. Lets the detail
-    /// panel reuse what the tile loader already produced rather than
-    /// reading the file a second time.
-    pub(super) fn cached(&self, source: &ArtworkSource) -> Option<DecodedArtwork> {
+    /// Returns the decoded entry for `source`, if any. Lets a view
+    /// reuse what another view already produced rather than reading the
+    /// file a second time.
+    pub(crate) fn cached(&self, source: &ArtworkSource) -> Option<DecodedArtwork> {
         self.inner.cache.borrow().get(source).cloned()
     }
 
     /// Request the decoded artwork for `source`. The callback fires on
-    /// the main thread when the artwork becomes available, unless the
-    /// loader has advanced past `generation` in the meantime — in that
-    /// case the callback is dropped silently. Cache hits fire
-    /// synchronously, so a tile whose neighbour just resolved the same
-    /// file never schedules redundant disk work.
-    pub(super) fn request(
-        &self,
-        generation: u64,
-        source: ArtworkSource,
-        callback: ArtworkCallback,
-    ) {
-        if generation < self.inner.current_generation.get() {
-            return;
-        }
+    /// the main thread when the artwork becomes available, or
+    /// synchronously when the in-memory cache already holds the entry —
+    /// so a tile whose neighbour just resolved the same file never
+    /// schedules redundant disk work.
+    ///
+    /// The loader has no notion of staleness; callbacks always fire.
+    /// Each caller is responsible for checking, inside its closure,
+    /// whether the result still applies to the widget it would update
+    /// (e.g. via a per-view generation counter). Keeping that policy
+    /// with the caller is what lets one shared loader serve multiple
+    /// independent views without their rebuilds invalidating each
+    /// other's in-flight requests.
+    pub(crate) fn request(&self, source: ArtworkSource, callback: ArtworkCallback) {
         if let Some(cached) = self.inner.cache.borrow().get(&source) {
             callback(cached.clone());
             return;
         }
         let mut pending = self.inner.pending.borrow_mut();
         let needs_queue = !pending.contains_key(&source);
-        pending
-            .entry(source.clone())
-            .or_default()
-            .push(PendingCallback {
-                generation,
-                callback,
-            });
+        pending.entry(source.clone()).or_default().push(callback);
         if needs_queue {
             // Send only fails if every worker has exited, which happens
             // exclusively at shutdown. Drop the callback silently in
@@ -281,14 +257,14 @@ impl AlbumArtworkLoader {
         }
     }
 
-    /// Synchronously read and cache `source`. Used by the
-    /// album detail panel when the user clicks an album whose tile
-    /// hasn't been resolved yet — the panel needs the palette to render
-    /// at all, and a single tag read is fast enough that blocking the
-    /// click for one file is preferable to flashing colours in after
-    /// the fact. Subsequent loader callbacks for the same path see the
+    /// Synchronously read and cache `source`. Used by the album detail
+    /// panel when the user clicks an album whose tile hasn't been
+    /// resolved yet — the panel needs the palette to render at all,
+    /// and a single tag read is fast enough that blocking the click
+    /// for one file is preferable to flashing colours in after the
+    /// fact. Subsequent loader callbacks for the same path see the
     /// cache hit.
-    pub(super) fn ensure_cached_sync(&self, source: &ArtworkSource) -> DecodedArtwork {
+    pub(crate) fn ensure_cached_sync(&self, source: &ArtworkSource) -> DecodedArtwork {
         if let Some(cached) = self.inner.cache.borrow().get(source) {
             return cached.clone();
         }
@@ -355,11 +331,8 @@ fn install_result_poller(inner: Rc<LoaderInner>, rx: mpsc::Receiver<WorkerResult
                         .borrow_mut()
                         .remove(&result.source)
                         .unwrap_or_default();
-                    let current = inner.current_generation.get();
-                    for entry in callbacks {
-                        if entry.generation == current {
-                            (entry.callback)(result.decoded.clone());
-                        }
+                    for callback in callbacks {
+                        callback(result.decoded.clone());
                     }
                     processed += 1;
                 }

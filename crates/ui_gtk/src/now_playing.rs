@@ -13,6 +13,8 @@ use gtk::{cairo, gdk, glib};
 
 use super::{
     APP_ID, NOW_PLAYING_ICON_SIZE, NOW_PLAYING_SIDE_WIDTH, SharedRuntime, TITLEBAR_HEIGHT,
+    artwork_color::ArtworkPalette,
+    artwork_loader::{ArtworkLoader, ArtworkSource, DecodedArtwork},
     command_controller::SharedCommandController,
 };
 use model::{
@@ -24,6 +26,13 @@ use sustain_app_runtime::{ApplicationCommand, NowPlaying, PlaybackCommand, Track
 
 mod model;
 mod progress_hit_area;
+
+/// CSS class added to the artwork box while a dominant-color background
+/// is active. Defining it as a sibling of `now-playing-artwork` (rather
+/// than overriding that class directly) keeps the default neutral tint
+/// — applied via the static stylesheet — intact for the no-artwork
+/// state without any extra removal step.
+const ARTWORK_DOMINANT_COLOR_CLASS: &str = "now-playing-artwork-dominant";
 
 #[derive(Clone)]
 pub(crate) struct NowPlayingView {
@@ -39,8 +48,23 @@ pub(crate) struct NowPlayingView {
     shuffle_button: gtk::Button,
     repeat_icon: gtk::Image,
     repeat_button: gtk::Button,
+    artwork_box: gtk::Box,
     artwork_image: gtk::Image,
+    artwork_loader: ArtworkLoader,
+    /// Last absolute path passed to the artwork loader, used to avoid
+    /// re-issuing a request when `refresh()` runs on the same track
+    /// (the playback poll triggers `refresh()` every second).
     artwork_path: Rc<RefCell<Option<PathBuf>>>,
+    /// Monotonic counter bumped on every track change. Callbacks queued
+    /// against the loader capture the value they were issued with and
+    /// drop themselves if the track has changed since, so a slow decode
+    /// for a previous track never paints over the current one.
+    artwork_generation: Rc<Cell<u64>>,
+    /// CSS provider that carries the dominant-color rule for the
+    /// artwork box. Rewritten in place as palettes resolve; installed
+    /// once on the display at construction and stays for the window's
+    /// lifetime.
+    artwork_color_provider: gtk::CssProvider,
     duration: Rc<Cell<Duration>>,
 }
 
@@ -79,7 +103,11 @@ const MARQUEE_SPEED: f64 = 0.75;
 const MARQUEE_VIEWPORT_WIDTH: i32 = 400;
 
 impl NowPlayingView {
-    pub(crate) fn new(runtime: SharedRuntime, command_controller: SharedCommandController) -> Self {
+    pub(crate) fn new(
+        runtime: SharedRuntime,
+        command_controller: SharedCommandController,
+        artwork_loader: ArtworkLoader,
+    ) -> Self {
         let area = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         area.add_css_class("now-playing-area");
         area.set_size_request(super::NOW_PLAYING_WIDTH, TITLEBAR_HEIGHT);
@@ -89,18 +117,19 @@ impl NowPlayingView {
         area.set_margin_end(super::NOW_PLAYING_HORIZONTAL_MARGIN);
         area.set_valign(gtk::Align::Fill);
 
-        let artwork = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        artwork.add_css_class("now-playing-artwork");
-        artwork.set_size_request(TITLEBAR_HEIGHT, TITLEBAR_HEIGHT);
-        artwork.set_overflow(gtk::Overflow::Hidden);
+        let artwork_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        artwork_box.add_css_class("now-playing-artwork");
+        artwork_box.set_size_request(TITLEBAR_HEIGHT, TITLEBAR_HEIGHT);
+        artwork_box.set_overflow(gtk::Overflow::Hidden);
 
         let artwork_image = gtk::Image::new();
         artwork_image.set_pixel_size(TITLEBAR_HEIGHT);
         artwork_image.set_halign(gtk::Align::Fill);
         artwork_image.set_valign(gtk::Align::Fill);
         artwork_image.set_visible(false);
-        artwork.append(&artwork_image);
+        artwork_box.append(&artwork_image);
         let artwork_path: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
+        let artwork_color_provider = install_artwork_color_provider();
 
         let details = gtk::Box::new(gtk::Orientation::Vertical, 0);
         details.set_hexpand(true);
@@ -133,7 +162,7 @@ impl NowPlayingView {
         let loaded_view = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         loaded_view.set_hexpand(true);
         loaded_view.set_vexpand(true);
-        loaded_view.append(&artwork);
+        loaded_view.append(&artwork_box);
         loaded_view.append(&details);
 
         let empty_view = empty_state_view();
@@ -163,8 +192,12 @@ impl NowPlayingView {
             shuffle_button: shuffle.button,
             repeat_icon: repeat.icon,
             repeat_button: repeat.button,
+            artwork_box,
             artwork_image,
+            artwork_loader,
             artwork_path,
+            artwork_generation: Rc::new(Cell::new(0)),
+            artwork_color_provider,
             duration,
         };
         install_playback_option_controls(&view, command_controller);
@@ -178,28 +211,96 @@ impl NowPlayingView {
     }
 
     fn sync_artwork(&self, track: Option<&Track>) {
-        let new_path = track.and_then(|track| self.runtime.borrow().absolute_track_path(track));
-        {
-            let current = self.artwork_path.borrow();
-            if *current == new_path {
-                return;
-            }
+        let new_source = track.and_then(|track| self.artwork_source(track));
+        let new_path = new_source.as_ref().map(absolute_path_of);
+        if *self.artwork_path.borrow() == new_path {
+            return;
         }
-        *self.artwork_path.borrow_mut() = new_path.clone();
+        *self.artwork_path.borrow_mut() = new_path;
 
-        let texture = new_path
-            .as_deref()
-            .and_then(|path| self.runtime.borrow().read_artwork(path))
-            .and_then(texture_from_bytes);
+        // Bump the per-track generation so any callback still in flight
+        // for the previous track no-ops when it lands. Snapshot the new
+        // value into each closure below; without the snapshot the
+        // callback would read whatever generation happened to be
+        // current at delivery time and apply unconditionally.
+        let generation_snapshot = self.artwork_generation.get().wrapping_add(1);
+        self.artwork_generation.set(generation_snapshot);
 
+        let Some(source) = new_source else {
+            self.apply_decoded_artwork(&DecodedArtwork::default());
+            return;
+        };
+
+        // Synchronous cache hit (in-memory) — apply immediately to
+        // avoid a one-tick gap where the previous artwork's color
+        // would still be visible. Cold cache requests fall through to
+        // the async loader.
+        if let Some(decoded) = self.artwork_loader.cached(&source) {
+            self.apply_decoded_artwork(&decoded);
+            return;
+        }
+
+        // Show the neutral placeholder while the worker decodes, so a
+        // stale dominant color from the previous track doesn't linger
+        // in the gap before the new palette arrives.
+        self.apply_decoded_artwork(&DecodedArtwork::default());
+
+        let view = self.clone();
+        self.artwork_loader.request(
+            source,
+            Box::new(move |decoded| {
+                if view.artwork_generation.get() != generation_snapshot {
+                    return;
+                }
+                view.apply_decoded_artwork(&decoded);
+            }),
+        );
+    }
+
+    fn artwork_source(&self, track: &Track) -> Option<ArtworkSource> {
+        let runtime = self.runtime.borrow();
+        let absolute = runtime.absolute_track_path(track)?;
+        // The disk cache is keyed by the library-relative path so it
+        // survives library-root moves; the worker also needs the
+        // absolute path to actually read the file. Albums uses the
+        // same convention, so both views hit the same cache row.
+        let cache_path = track.location.path().to_path_buf();
+        Some(ArtworkSource::embedded_track(cache_path, absolute))
+    }
+
+    fn apply_decoded_artwork(&self, decoded: &DecodedArtwork) {
+        let texture = decoded
+            .tile_texture
+            .as_ref()
+            .or(decoded.detail_texture.as_ref());
         match texture {
             Some(texture) => {
-                self.artwork_image.set_paintable(Some(&texture));
+                self.artwork_image.set_paintable(Some(texture));
                 self.artwork_image.set_visible(true);
             }
             None => {
                 self.artwork_image.set_paintable(None::<&gdk::Paintable>);
                 self.artwork_image.set_visible(false);
+            }
+        }
+        self.apply_dominant_color(decoded.palette);
+    }
+
+    fn apply_dominant_color(&self, palette: Option<ArtworkPalette>) {
+        match palette {
+            Some(palette) => {
+                // Rewriting the provider's CSS is preferable to swapping
+                // multiple per-color classes: GTK reapplies styles to
+                // every widget that matches the class, so a single
+                // load_from_string is one re-style pass rather than
+                // several class-list mutations.
+                self.artwork_color_provider
+                    .load_from_string(&artwork_dominant_color_css(palette));
+                self.artwork_box.add_css_class(ARTWORK_DOMINANT_COLOR_CLASS);
+            }
+            None => {
+                self.artwork_box
+                    .remove_css_class(ARTWORK_DOMINANT_COLOR_CLASS);
             }
         }
     }
@@ -238,9 +339,33 @@ impl NowPlayingView {
     }
 }
 
-fn texture_from_bytes(bytes: Vec<u8>) -> Option<gdk::Texture> {
-    let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(bytes)).ok()?;
-    Some(gdk::Texture::for_pixbuf(&pixbuf))
+fn install_artwork_color_provider() -> gtk::CssProvider {
+    let provider = gtk::CssProvider::new();
+    // STYLE_PROVIDER_PRIORITY_APPLICATION + 2 sits one notch above the
+    // accent-color provider (+1) and three notches above the static
+    // app stylesheet, so the dominant background overrides the neutral
+    // tint from app.css. The provider lives for the window's lifetime
+    // — there is no removal step because the widget it styles is
+    // never re-parented or destroyed before app shutdown.
+    if let Some(display) = gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 2,
+        );
+    }
+    provider
+}
+
+fn artwork_dominant_color_css(palette: ArtworkPalette) -> String {
+    let background = palette.background_css();
+    format!(".now-playing-artwork-dominant {{ background-color: {background}; }}",)
+}
+
+fn absolute_path_of(source: &ArtworkSource) -> PathBuf {
+    match source {
+        ArtworkSource::EmbeddedTrack { file_path, .. } => file_path.clone(),
+    }
 }
 
 fn install_playback_option_controls(
