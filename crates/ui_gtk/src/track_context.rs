@@ -13,6 +13,8 @@ pub(crate) type TrackActionVisibility = Rc<dyn Fn(&[TrackId]) -> bool>;
 pub(crate) type AddToPlaylistProvider = Rc<dyn Fn() -> Vec<AddToPlaylistEntry>>;
 pub(crate) type AddToPlaylistCallback = Rc<dyn Fn(PlaylistId, Vec<TrackId>)>;
 type PendingConfirmCallback = Rc<RefCell<Option<Box<dyn FnOnce(Vec<TrackId>)>>>>;
+const ADD_TO_PLAYLIST_MAX_VISIBLE_HEIGHT: i32 = 360;
+const ADD_TO_PLAYLIST_MAX_LABEL_CHARS: i32 = 48;
 
 #[derive(Clone, Debug)]
 pub(crate) struct AddToPlaylistEntry {
@@ -313,7 +315,7 @@ impl TrackRowContextMenu {
         popover.set_has_arrow(false);
         popover.add_css_class("compact-context-menu");
         popover.set_parent(popover_parent.as_ref());
-        popover.set_child(Some(&self.build_main_page(&popover, track_ids)));
+        popover.set_child(Some(&self.menu_content(&popover, track_ids)));
 
         let popover_for_close = popover.clone();
         popover.connect_closed(move |_| {
@@ -325,23 +327,59 @@ impl TrackRowContextMenu {
         popover.popup();
     }
 
-    fn build_main_page(&self, popover: &gtk::Popover, track_ids: Vec<TrackId>) -> gtk::Box {
+    fn menu_content(&self, popover: &gtk::Popover, track_ids: Vec<TrackId>) -> gtk::Box {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let (main_page, add_button) = self.build_main_page(popover, &track_ids);
+        root.append(&main_page);
+
+        if let Some(add) = &self.add_to_playlist {
+            let (playlist_page, back_button) =
+                build_add_to_playlist_page(add, popover, track_ids.clone());
+            playlist_page.set_visible(false);
+            root.append(&playlist_page);
+
+            if let Some(add_button) = add_button {
+                let main_page = main_page.downgrade();
+                let playlist_page = playlist_page.downgrade();
+                add_button.connect_clicked(move |_| {
+                    if let Some(main_page) = main_page.upgrade() {
+                        main_page.set_visible(false);
+                    }
+                    if let Some(playlist_page) = playlist_page.upgrade() {
+                        playlist_page.set_visible(true);
+                    }
+                });
+            }
+
+            let main_page = main_page.downgrade();
+            let playlist_page = playlist_page.downgrade();
+            back_button.connect_clicked(move |_| {
+                if let Some(playlist_page) = playlist_page.upgrade() {
+                    playlist_page.set_visible(false);
+                }
+                if let Some(main_page) = main_page.upgrade() {
+                    main_page.set_visible(true);
+                }
+            });
+        }
+
+        root
+    }
+
+    fn build_main_page(
+        &self,
+        popover: &gtk::Popover,
+        track_ids: &[TrackId],
+    ) -> (gtk::Box, Option<gtk::Button>) {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.add_css_class("track-context-menu");
 
+        let mut add_button = None;
         let mut has_safe_section = false;
-        if let Some(add) = &self.add_to_playlist {
-            let add_button = submenu_button("Add to Playlist\u{2026}");
-            let add = add.clone();
-            let menu = self.clone();
-            let popover = popover.clone();
-            let track_ids = track_ids.clone();
-            add_button.connect_clicked(move |_| {
-                let page =
-                    build_add_to_playlist_page(&add, &popover, menu.clone(), track_ids.clone());
-                popover.set_child(Some(&page));
-            });
-            content.append(&add_button);
+        if self.add_to_playlist.is_some() {
+            let button = submenu_button("Add to Playlist\u{2026}");
+            content.append(&button);
+            add_button = Some(button);
             has_safe_section = true;
         }
 
@@ -352,7 +390,7 @@ impl TrackRowContextMenu {
             .partition(|action| action.section == TrackContextActionSection::Safe);
 
         for action in &safe {
-            self.append_action_button(&content, popover, action, &track_ids);
+            self.append_action_button(&content, popover, action, track_ids);
             has_safe_section = true;
         }
 
@@ -363,10 +401,10 @@ impl TrackRowContextMenu {
         }
 
         for action in &destructive {
-            self.append_action_button(&content, popover, action, &track_ids);
+            self.append_action_button(&content, popover, action, track_ids);
         }
 
-        content
+        (content, add_button)
     }
 
     fn append_action_button(
@@ -392,21 +430,13 @@ impl TrackRowContextMenu {
 fn build_add_to_playlist_page(
     action: &AddToPlaylistAction,
     popover: &gtk::Popover,
-    menu: TrackRowContextMenu,
     track_ids: Vec<TrackId>,
-) -> gtk::Box {
+) -> (gtk::Box, gtk::Button) {
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.add_css_class("track-context-menu");
     content.add_css_class("track-context-submenu");
 
     let back_button = submenu_back_button("Back");
-    let popover_for_back = popover.clone();
-    let menu_for_back = menu.clone();
-    let track_ids_for_back = track_ids.clone();
-    back_button.connect_clicked(move |_| {
-        let page = menu_for_back.build_main_page(&popover_for_back, track_ids_for_back.clone());
-        popover_for_back.set_child(Some(&page));
-    });
     content.append(&back_button);
 
     let entries = (action.provider)();
@@ -420,6 +450,7 @@ fn build_add_to_playlist_page(
         empty_label.set_margin_end(8);
         content.append(&empty_label);
     } else {
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         for entry in entries {
             let button = context_menu_button_with_label(&entry.display_path);
             let callback = action.callback.clone();
@@ -430,11 +461,18 @@ fn build_add_to_playlist_page(
                 popover_for_pick.popdown();
                 callback(playlist_id, track_ids.clone());
             });
-            content.append(&button);
+            list.append(&button);
         }
+
+        let scroller = gtk::ScrolledWindow::new();
+        scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        scroller.set_propagate_natural_height(true);
+        scroller.set_max_content_height(ADD_TO_PLAYLIST_MAX_VISIBLE_HEIGHT);
+        scroller.set_child(Some(&list));
+        content.append(&scroller);
     }
 
-    content
+    (content, back_button)
 }
 
 fn submenu_button(label_text: &str) -> gtk::Button {
@@ -490,6 +528,8 @@ fn context_menu_button_with_label(label_text: &str) -> gtk::Button {
     label.set_xalign(0.0);
     label.set_halign(gtk::Align::Fill);
     label.set_hexpand(true);
+    label.set_width_chars(1);
+    label.set_max_width_chars(ADD_TO_PLAYLIST_MAX_LABEL_CHARS);
     label.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
     let button = gtk::Button::new();
