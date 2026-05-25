@@ -178,9 +178,6 @@ fully here.
   `## Gapless Track-to-Track Playback`.
 - **`Add to Queue` (append) action** distinct from `Play Next` — see
   `## Up Next Queue`.
-- **Audio glitch on successful artwork retrieval** — see the now-playing
-  artwork note in `## UI Direction` and the constraint note in
-  `## Metadata Backfill`.
 - **Within-playlist drag reorder wiring**: `PlaybackCommand` for moving a
   playlist entry exists in the runtime; the regular-playlist track table
   must dispatch it on within-playlist row drags. No GTK-only row reorder
@@ -832,23 +829,14 @@ Constraints (mirroring the bulk path so the two surfaces stay coherent):
   from whichever surface they happen to be looking at; those secondary
   surfaces are nice-to-haves and can land after the now-playing tile
 
-Known issue — **audio glitch on successful artwork retrieval**. When
-the fetched cover is written to the currently playing track's file
-through the standard tag-writing path, a brief audio glitch is
-audible. The likely cause is that embedding artwork into an existing
-tag grows the tag payload, which forces the tag writer to rewrite the
-file in place and shift the audio data; GStreamer is reading from the
-same file at the same time, so its in-flight reads hit inconsistent
-bytes. The correct fix is an atomic replace-by-rename in the
-tag-writing path (write to a sibling temp file, fsync, `rename(2)` over
-the original): on Linux the kernel keeps GStreamer's open file
-descriptor pointing at the original inode until the descriptor is
-closed, so the new bytes only affect future opens. This fix is the
-load-bearing change; until it lands, the glitch is a tolerated cosmetic
-issue and not a dealbreaker. No workaround should be introduced in the
-fetch path itself — pausing playback, deferring writes until the track
-ends, or skipping the write entirely would all be hacks that paper
-over the real defect in the tag-writing layer.
+Write-while-playing safety: all tag writes (artwork, metadata,
+ratings) go through `atomic_save_to_path` in the metadata crate, which
+seeds a sibling temp file from the original, lets lofty rewrite the
+temp's tag chunks, fsyncs, and then `rename(2)`s the temp over the
+destination. On Linux/POSIX the kernel keeps any open file descriptor
+pointing at the original inode until it is closed, so GStreamer's
+in-flight playback reads continue against the unmodified bytes and the
+new bytes only affect future opens.
 
 Open question: whether the missing-artwork icon also belongs on Albums
 grid tiles by default (always visible for art-less albums), or only on
@@ -1152,17 +1140,10 @@ Constraints if/when this is built:
   failed) are reported as explicit results, consistent with the scanner's
   outcome reporting
 
-Known issue — **audio glitch when artwork is written to a currently
-playing file**. The same write-while-playing defect documented in the
-now-playing artwork note in `## UI Direction` applies here, with the
-same fix path: the tag-writing layer needs an atomic
-replace-by-rename so GStreamer's open file descriptor keeps reading
-the original inode while the new file takes the destination path.
-Until that lands, expect a brief audible glitch when artwork or tag
-fields are written to the file underneath playback. This is the
-write-path's defect to fix, not the backfill feature's to work
-around — no pausing of playback, no deferral of writes, no
-skipping-while-playing should be introduced here.
+Writes from this feature ride on the tag-writing path's atomic
+replace-by-rename (see the write-while-playing note in `## UI
+Direction`), so a backfill run against a track currently being played
+does not introduce audio glitches.
 
 This feature is out of scope for the first vertical slice. It should not be
 attempted before the local metadata scan, tag-writing path, and background-task

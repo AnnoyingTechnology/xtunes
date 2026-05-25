@@ -254,9 +254,7 @@ impl MetadataService for LoftyMetadataService {
         apply_text_change(tag, ItemKey::Comment, change.comments);
         apply_text_change(tag, ItemKey::Lyrics, change.lyrics);
 
-        tagged_file
-            .save_to_path(path, WriteOptions::default())
-            .map_err(|_| MetadataError::WriteFailed)
+        atomic_save_to_path(&tagged_file, path, WriteOptions::default())
     }
 
     fn read_rating(&self, path: &Path) -> MetadataResult<Option<Rating>> {
@@ -288,9 +286,7 @@ impl MetadataService for LoftyMetadataService {
             );
         }
 
-        tagged_file
-            .save_to_path(path, WriteOptions::default())
-            .map_err(|_| MetadataError::WriteFailed)
+        atomic_save_to_path(&tagged_file, path, WriteOptions::default())
     }
 
     fn read_artwork(&self, path: &Path) -> MetadataResult<Option<Vec<u8>>> {
@@ -339,9 +335,7 @@ impl MetadataService for LoftyMetadataService {
             tag.push_picture(picture);
         }
 
-        tagged_file
-            .save_to_path(path, WriteOptions::default())
-            .map_err(|_| MetadataError::WriteFailed)
+        atomic_save_to_path(&tagged_file, path, WriteOptions::default())
     }
 }
 
@@ -394,6 +388,73 @@ fn ensure_primary_tag(tagged_file: &mut lofty::file::TaggedFile) {
     }
 
     tagged_file.insert_tag(Tag::new(tagged_file.primary_tag_type()));
+}
+
+// Persists `tagged_file` over `path` via atomic replace-by-rename: the
+// new bytes land in a sibling temp file, get fsync'd to disk, and then
+// `rename(2)` atomically swaps the temp into place. The key property
+// this buys us is that GStreamer (or any other reader holding an open
+// file descriptor on `path`) keeps seeing the *original* inode's bytes
+// until it closes the descriptor — Linux/POSIX `rename` only swaps the
+// directory entry, the prior inode is kept alive by outstanding fds.
+// That eliminates the audio glitch caused by lofty's default in-place
+// rewrite happening underneath an active playback read.
+fn atomic_save_to_path(
+    tagged_file: &lofty::file::TaggedFile,
+    path: &Path,
+    options: WriteOptions,
+) -> MetadataResult<()> {
+    atomic_write_via_rename(path, |temp_path| {
+        tagged_file
+            .save_to_path(temp_path, options)
+            .map_err(|_| MetadataError::WriteFailed)
+    })
+}
+
+// File-level atomic-replace primitive. Seeds the temp file with the
+// current contents of `path` so callers that only rewrite a small
+// section (lofty's tag chunks) keep the surrounding bytes intact, then
+// hands the temp path to the caller for in-place modification, then
+// fsyncs and renames over the destination. The temp file is removed on
+// any failure so we never leak partial state next to the user's audio.
+fn atomic_write_via_rename<F>(path: &Path, modify_temp: F) -> MetadataResult<()>
+where
+    F: FnOnce(&Path) -> MetadataResult<()>,
+{
+    let parent = path.parent().ok_or(MetadataError::WriteFailed)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(MetadataError::WriteFailed)?;
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let temp_path = parent.join(format!(".{file_name}.sustain-{unique}.tmp"));
+
+    let staged = stage_atomic_write(path, &temp_path, modify_temp);
+    if staged.is_err() {
+        let _ = fs::remove_file(&temp_path);
+        return staged;
+    }
+
+    fs::rename(&temp_path, path).map_err(|_| {
+        let _ = fs::remove_file(&temp_path);
+        MetadataError::WriteFailed
+    })
+}
+
+fn stage_atomic_write<F>(source: &Path, temp_path: &Path, modify_temp: F) -> MetadataResult<()>
+where
+    F: FnOnce(&Path) -> MetadataResult<()>,
+{
+    fs::copy(source, temp_path).map_err(|_| MetadataError::WriteFailed)?;
+    modify_temp(temp_path)?;
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(temp_path)
+        .map_err(|_| MetadataError::WriteFailed)?;
+    file.sync_all().map_err(|_| MetadataError::WriteFailed)
 }
 
 fn apply_text_change(tag: &mut Tag, item_key: ItemKey, change: FieldChange<String>) {
@@ -476,7 +537,7 @@ mod tests {
 
     use super::{
         AudioFormat, LibraryScanner, MetadataError, MetadataResult, MetadataService, Rating,
-        audio_format_from_path, hash_file_content,
+        atomic_write_via_rename, audio_format_from_path, hash_file_content,
     };
 
     #[test]
@@ -545,6 +606,74 @@ mod tests {
         );
         assert_eq!(scan.skipped_unsupported_files, 1);
         assert_eq!(scan.failures, Vec::new());
+
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn atomic_write_keeps_open_readers_on_the_original_inode() {
+        use std::io::Read;
+
+        let root = unique_test_directory();
+        fs::create_dir_all(&root).expect("create test directory");
+        let path = root.join("audio.bin");
+        fs::write(&path, b"original-payload-bytes").expect("seed original file");
+
+        // Open the file before the atomic write — this is the moment
+        // that stands in for GStreamer holding an open fd on the
+        // currently playing track.
+        let mut pre_existing_reader = fs::File::open(&path).expect("open before replace");
+
+        atomic_write_via_rename(&path, |temp_path| {
+            fs::write(temp_path, b"replacement-payload").map_err(|_| MetadataError::WriteFailed)
+        })
+        .expect("atomic write succeeds");
+
+        // The pre-existing reader must still see the original bytes.
+        // If rename(2) were not preserving the prior inode for open
+        // file descriptors, this would read either the new bytes or a
+        // torn mixture — both would manifest as audio glitches in
+        // GStreamer.
+        let mut observed = Vec::new();
+        pre_existing_reader
+            .read_to_end(&mut observed)
+            .expect("read pre-existing handle");
+        assert_eq!(observed.as_slice(), b"original-payload-bytes");
+
+        // A fresh open after the rename sees the replacement bytes.
+        let post_swap = fs::read(&path).expect("read after replace");
+        assert_eq!(post_swap.as_slice(), b"replacement-payload");
+
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_temp_file_when_modify_step_fails() {
+        let root = unique_test_directory();
+        fs::create_dir_all(&root).expect("create test directory");
+        let path = root.join("audio.bin");
+        fs::write(&path, b"original").expect("seed original file");
+
+        let result =
+            atomic_write_via_rename(&path, |_temp_path| Err::<(), _>(MetadataError::WriteFailed));
+        assert_eq!(result, Err(MetadataError::WriteFailed));
+
+        // The destination still holds the original content — failure
+        // never replaces the user's file with partial bytes.
+        let on_disk = fs::read(&path).expect("read after failure");
+        assert_eq!(on_disk.as_slice(), b"original");
+
+        // No `.sustain-*.tmp` debris lingers next to the audio file.
+        let leftovers: Vec<_> = fs::read_dir(&root)
+            .expect("list test directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("sustain-") && name.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "expected no temp files, found: {leftovers:?}"
+        );
 
         fs::remove_dir_all(root).expect("remove test directory");
     }
