@@ -4,7 +4,6 @@
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
-    path::PathBuf,
     rc::Rc,
 };
 
@@ -18,7 +17,7 @@ use super::{
     PlaybackChangedCallback, SharedRuntime, artwork_color::ArtworkPalette,
     command_controller::SharedCommandController, track_context::TrackRowContextMenu,
 };
-use artwork_loader::{AlbumArtworkLoader, DecodedArtwork};
+use artwork_loader::{AlbumArtworkLoader, ArtworkSource, DecodedArtwork};
 use model::{AlbumKey, AlbumViewModel, album_subtitle, group_albums};
 use track_list::AlbumTrackListView;
 
@@ -523,11 +522,11 @@ impl AlbumsView {
         // stays — which is what the synchronous path used to show too.
         let cover = build_cover_widget(ALBUM_TILE_COVER_SIZE, "album-cover");
         content.append(&cover);
-        if let Some(absolute_path) = self.album_artwork_path(album) {
+        if let Some(source) = self.album_artwork_source(album) {
             let cover_for_callback = cover.clone();
             self.artwork_loader.request(
                 self.artwork_loader.current_generation(),
-                absolute_path,
+                source,
                 Box::new(move |decoded| {
                     apply_cover_texture(
                         &cover_for_callback,
@@ -776,16 +775,21 @@ impl AlbumsView {
         lists
     }
 
-    /// Resolves the on-disk path the artwork loader should read for an
+    /// Resolves the artwork source the loader should read for an
     /// album cover. Mirrors what the synchronous reader used to do
     /// inline: prefer the first non-missing track, fall back to the
     /// first track of any kind, and turn relative paths into absolute
-    /// paths against the configured library root. Returns `None` only
-    /// when no library root is set or no representative track exists.
-    fn album_artwork_path(&self, album: &AlbumViewModel) -> Option<PathBuf> {
+    /// paths against the configured library root. The source keeps the
+    /// original relative path as its cache key so cache rows survive
+    /// library-root moves. Returns `None` only when no library root is set
+    /// or no representative track exists.
+    fn album_artwork_source(&self, album: &AlbumViewModel) -> Option<ArtworkSource> {
         let relative = album.representative_track_path.as_ref()?;
         if relative.is_absolute() {
-            return Some(relative.clone());
+            return Some(ArtworkSource::embedded_track(
+                relative.clone(),
+                relative.clone(),
+            ));
         }
         let root = self
             .runtime
@@ -793,7 +797,10 @@ impl AlbumsView {
             .settings()
             .library_path()?
             .to_path_buf();
-        Some(root.join(relative))
+        Some(ArtworkSource::embedded_track(
+            relative.clone(),
+            root.join(relative),
+        ))
     }
 
     /// Decoded artwork for the album-detail panel. The panel needs both
@@ -804,17 +811,13 @@ impl AlbumsView {
     /// The synchronous read populates the loader's cache, so any
     /// callbacks still queued for the same path will see the hit.
     fn album_artwork_for_detail(&self, album: &AlbumViewModel) -> DecodedArtwork {
-        let Some(absolute_path) = self.album_artwork_path(album) else {
+        let Some(source) = self.album_artwork_source(album) else {
             return DecodedArtwork::default();
         };
-        if let Some(cached) = self.artwork_loader.cached(&absolute_path) {
+        if let Some(cached) = self.artwork_loader.cached(&source) {
             return cached;
         }
-        let Some(metadata_service) = self.runtime.borrow().metadata_service() else {
-            return DecodedArtwork::default();
-        };
-        self.artwork_loader
-            .ensure_cached_sync(&absolute_path, metadata_service.as_ref())
+        self.artwork_loader.ensure_cached_sync(&source)
     }
 }
 

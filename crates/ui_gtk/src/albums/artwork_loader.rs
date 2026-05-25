@@ -12,44 +12,49 @@
 //!
 //! `AlbumArtworkLoader` separates that work:
 //!
-//! * A small pool of worker threads consumes path requests from a shared
-//!   queue and runs the **entire** decode pipeline off the main thread:
-//!   `MetadataService::read_artwork` to pull the bytes from the audio
-//!   file, `Pixbuf::from_read` to decode them, `ArtworkPalette::from_pixbuf`
-//!   to derive the panel palette, and bounded `gdk::Texture`s for the tile
-//!   and detail sizes. The pixbuf itself is dropped on the worker; only the
-//!   finished `DecodedArtwork` is handed back. (This relies on `gdk::Texture`
-//!   being `Send + Sync` in gtk-rs — it is, because GdkTexture is documented
-//!   as immutable after construction.)
+//! * A small pool of worker threads consumes `ArtworkSource` requests from a
+//!   shared queue and runs the **entire** decode pipeline off the main thread:
+//!   source resolution, `MetadataService::read_artwork` for embedded-track
+//!   artwork, `Pixbuf::from_read`, `ArtworkPalette::from_pixbuf`, and bounded
+//!   `gdk::Texture`s for the tile and detail sizes. The pixbuf itself is
+//!   dropped on the worker; only the finished `DecodedArtwork` is handed back.
+//!   (This relies on `gdk::Texture` being `Send + Sync` in gtk-rs — it is,
+//!   because GdkTexture is documented as immutable after construction.)
 //! * A GTK main-loop poller drains the result channel under a strict
 //!   per-tick budget (small max batch + short wall-clock cap) so even a
 //!   burst of completions can't monopolise the main thread, places each
-//!   result in the path-keyed cache, and fires the callbacks that were
-//!   waiting for that path.
+//!   result in the source-keyed cache, and fires the callbacks that were
+//!   waiting for that source.
 //! * A monotonic *generation* counter lets the view discard callbacks
 //!   that belong to a previous rebuild. `begin_generation` is called at
 //!   the start of every full tile-grid rebuild; any callback whose
 //!   generation no longer matches is dropped without invocation, so
 //!   stale results never touch widgets that have been removed.
-//! * The cache is keyed by `PathBuf` because the bytes embedded in a
-//!   given audio file are stable regardless of which album the view
-//!   currently groups it under, which lets the detail panel reuse what
-//!   the tile loader already produced.
+//! * The repository checks a small SQLite cache before touching the audio file.
+//!   Cache rows are keyed by source plus the representative file fingerprint,
+//!   and store already-scaled tile/detail PNG payloads plus the derived palette.
+//!   Today the only source is embedded artwork from an audio file; the explicit
+//!   source boundary is where the missing-artwork downloader should plug in.
 
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
-    path::{Path, PathBuf},
+    fs,
+    io::Cursor,
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    path::PathBuf,
     rc::Rc,
     sync::{Arc, Mutex, mpsc},
     thread,
     time::Duration,
 };
 
+use directories::BaseDirs;
 use gtk::{gdk, gdk_pixbuf, glib};
+use rusqlite::{Connection, OptionalExtension, params};
 use sustain_app_runtime::MetadataService;
 
-use crate::artwork_color::ArtworkPalette;
+use crate::artwork_color::{ArtworkPalette, ArtworkPaletteComponents, RgbColorComponents};
 
 use super::{ALBUM_DETAIL_ARTWORK_SIZE, ALBUM_TILE_COVER_SIZE};
 
@@ -82,6 +87,8 @@ const RESULT_BATCH_MAX: usize = 8;
 const RESULT_TICK_BUDGET: Duration = Duration::from_millis(4);
 const TILE_TEXTURE_MAX_SIDE: i32 = ALBUM_TILE_COVER_SIZE;
 const DETAIL_TEXTURE_MAX_SIDE: i32 = ALBUM_DETAIL_ARTWORK_SIZE;
+const CACHE_SCHEMA_VERSION: i64 = 1;
+const CACHE_SOURCE_KIND_EMBEDDED_TRACK: &str = "embedded-track";
 
 /// Decoded artwork shared between tile rendering (needs only the
 /// texture) and detail-panel rendering (also needs the palette to tint
@@ -94,6 +101,58 @@ pub(super) struct DecodedArtwork {
     pub(super) palette: Option<ArtworkPalette>,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(super) enum ArtworkSource {
+    EmbeddedTrack {
+        /// Stable key for this embedded artwork source. Prefer the library
+        /// relative track path so future disk-cache rows survive library-root
+        /// moves; use the absolute path only when the model hands us one.
+        cache_path: PathBuf,
+        /// Absolute path to read on this machine.
+        file_path: PathBuf,
+    },
+}
+
+impl ArtworkSource {
+    pub(super) fn embedded_track(cache_path: PathBuf, file_path: PathBuf) -> Self {
+        Self::EmbeddedTrack {
+            cache_path,
+            file_path,
+        }
+    }
+
+    fn cache_key(&self) -> (&'static str, Vec<u8>) {
+        match self {
+            ArtworkSource::EmbeddedTrack { cache_path, .. } => (
+                CACHE_SOURCE_KIND_EMBEDDED_TRACK,
+                cache_path.as_os_str().as_bytes().to_vec(),
+            ),
+        }
+    }
+
+    fn file_fingerprint(&self) -> Option<ArtworkFileFingerprint> {
+        let file_path = match self {
+            ArtworkSource::EmbeddedTrack { file_path, .. } => file_path,
+        };
+        let metadata = fs::metadata(file_path).ok()?;
+        let file_size = i64::try_from(metadata.len()).ok()?;
+        let mtime_ns = metadata
+            .mtime()
+            .saturating_mul(1_000_000_000)
+            .saturating_add(metadata.mtime_nsec());
+        Some(ArtworkFileFingerprint {
+            file_size,
+            mtime_ns,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ArtworkFileFingerprint {
+    file_size: i64,
+    mtime_ns: i64,
+}
+
 pub(super) type ArtworkCallback = Box<dyn FnOnce(DecodedArtwork) + 'static>;
 
 #[derive(Clone)]
@@ -102,18 +161,19 @@ pub(super) struct AlbumArtworkLoader {
 }
 
 struct LoaderInner {
+    repository: Arc<ArtworkRepository>,
     request_tx: mpsc::Sender<WorkerRequest>,
     current_generation: Cell<u64>,
-    cache: RefCell<HashMap<PathBuf, DecodedArtwork>>,
-    pending: RefCell<HashMap<PathBuf, Vec<PendingCallback>>>,
+    cache: RefCell<HashMap<ArtworkSource, DecodedArtwork>>,
+    pending: RefCell<HashMap<ArtworkSource, Vec<PendingCallback>>>,
 }
 
 struct WorkerRequest {
-    path: PathBuf,
+    source: ArtworkSource,
 }
 
 struct WorkerResult {
-    path: PathBuf,
+    source: ArtworkSource,
     decoded: DecodedArtwork,
 }
 
@@ -124,6 +184,7 @@ struct PendingCallback {
 
 impl AlbumArtworkLoader {
     pub(super) fn new(metadata_service: Arc<dyn MetadataService>) -> Self {
+        let repository = Arc::new(ArtworkRepository::new(metadata_service));
         let (request_tx, request_rx) = mpsc::channel::<WorkerRequest>();
         let request_rx = Arc::new(Mutex::new(request_rx));
         let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
@@ -131,10 +192,10 @@ impl AlbumArtworkLoader {
         for index in 0..WORKER_COUNT {
             let request_rx = Arc::clone(&request_rx);
             let result_tx = result_tx.clone();
-            let metadata_service = Arc::clone(&metadata_service);
+            let repository = Arc::clone(&repository);
             thread::Builder::new()
                 .name(format!("sustain-artwork-{index}"))
-                .spawn(move || worker_loop(request_rx, result_tx, metadata_service))
+                .spawn(move || worker_loop(request_rx, result_tx, repository))
                 .expect("spawn artwork worker thread");
         }
         // Workers each keep their own clone of the result sender; drop
@@ -143,6 +204,7 @@ impl AlbumArtworkLoader {
         drop(result_tx);
 
         let inner = Rc::new(LoaderInner {
+            repository,
             request_tx,
             current_generation: Cell::new(0),
             cache: RefCell::new(HashMap::new()),
@@ -176,31 +238,36 @@ impl AlbumArtworkLoader {
         self.inner.current_generation.get()
     }
 
-    /// Returns the decoded entry for `path`, if any. Lets the detail
+    /// Returns the decoded entry for `source`, if any. Lets the detail
     /// panel reuse what the tile loader already produced rather than
     /// reading the file a second time.
-    pub(super) fn cached(&self, path: &Path) -> Option<DecodedArtwork> {
-        self.inner.cache.borrow().get(path).cloned()
+    pub(super) fn cached(&self, source: &ArtworkSource) -> Option<DecodedArtwork> {
+        self.inner.cache.borrow().get(source).cloned()
     }
 
-    /// Request the decoded artwork for `path`. The callback fires on
+    /// Request the decoded artwork for `source`. The callback fires on
     /// the main thread when the artwork becomes available, unless the
     /// loader has advanced past `generation` in the meantime — in that
     /// case the callback is dropped silently. Cache hits fire
     /// synchronously, so a tile whose neighbour just resolved the same
     /// file never schedules redundant disk work.
-    pub(super) fn request(&self, generation: u64, path: PathBuf, callback: ArtworkCallback) {
+    pub(super) fn request(
+        &self,
+        generation: u64,
+        source: ArtworkSource,
+        callback: ArtworkCallback,
+    ) {
         if generation < self.inner.current_generation.get() {
             return;
         }
-        if let Some(cached) = self.inner.cache.borrow().get(&path) {
+        if let Some(cached) = self.inner.cache.borrow().get(&source) {
             callback(cached.clone());
             return;
         }
         let mut pending = self.inner.pending.borrow_mut();
-        let needs_queue = !pending.contains_key(&path);
+        let needs_queue = !pending.contains_key(&source);
         pending
-            .entry(path.clone())
+            .entry(source.clone())
             .or_default()
             .push(PendingCallback {
                 generation,
@@ -210,31 +277,26 @@ impl AlbumArtworkLoader {
             // Send only fails if every worker has exited, which happens
             // exclusively at shutdown. Drop the callback silently in
             // that case — there is no view left to update.
-            let _ = self.inner.request_tx.send(WorkerRequest { path });
+            let _ = self.inner.request_tx.send(WorkerRequest { source });
         }
     }
 
-    /// Synchronously read and cache the artwork at `path`. Used by the
+    /// Synchronously read and cache `source`. Used by the
     /// album detail panel when the user clicks an album whose tile
     /// hasn't been resolved yet — the panel needs the palette to render
     /// at all, and a single tag read is fast enough that blocking the
     /// click for one file is preferable to flashing colours in after
     /// the fact. Subsequent loader callbacks for the same path see the
     /// cache hit.
-    pub(super) fn ensure_cached_sync(
-        &self,
-        path: &Path,
-        metadata_service: &dyn MetadataService,
-    ) -> DecodedArtwork {
-        if let Some(cached) = self.inner.cache.borrow().get(path) {
+    pub(super) fn ensure_cached_sync(&self, source: &ArtworkSource) -> DecodedArtwork {
+        if let Some(cached) = self.inner.cache.borrow().get(source) {
             return cached.clone();
         }
-        let bytes = metadata_service.read_artwork(path).ok().flatten();
-        let decoded = decode_artwork(bytes);
+        let decoded = self.inner.repository.load(source);
         self.inner
             .cache
             .borrow_mut()
-            .insert(path.to_path_buf(), decoded.clone());
+            .insert(source.clone(), decoded.clone());
         decoded
     }
 }
@@ -242,7 +304,7 @@ impl AlbumArtworkLoader {
 fn worker_loop(
     request_rx: Arc<Mutex<mpsc::Receiver<WorkerRequest>>>,
     result_tx: mpsc::Sender<WorkerResult>,
-    metadata_service: Arc<dyn MetadataService>,
+    repository: Arc<ArtworkRepository>,
 ) {
     loop {
         let request = {
@@ -257,11 +319,10 @@ fn worker_loop(
                 Err(_) => return,
             }
         };
-        let bytes = metadata_service.read_artwork(&request.path).ok().flatten();
-        let decoded = decode_artwork(bytes);
+        let decoded = repository.load(&request.source);
         if result_tx
             .send(WorkerResult {
-                path: request.path,
+                source: request.source,
                 decoded,
             })
             .is_err()
@@ -288,11 +349,11 @@ fn install_result_poller(inner: Rc<LoaderInner>, rx: mpsc::Receiver<WorkerResult
                     inner
                         .cache
                         .borrow_mut()
-                        .insert(result.path.clone(), result.decoded.clone());
+                        .insert(result.source.clone(), result.decoded.clone());
                     let callbacks = inner
                         .pending
                         .borrow_mut()
-                        .remove(&result.path)
+                        .remove(&result.source)
                         .unwrap_or_default();
                     let current = inner.current_generation.get();
                     for entry in callbacks {
@@ -309,22 +370,299 @@ fn install_result_poller(inner: Rc<LoaderInner>, rx: mpsc::Receiver<WorkerResult
     });
 }
 
-fn decode_artwork(bytes: Option<Vec<u8>>) -> DecodedArtwork {
-    let Some(bytes) = bytes else {
-        return DecodedArtwork::default();
-    };
-    let pixbuf = match gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(bytes)) {
-        Ok(pixbuf) => pixbuf,
-        Err(_) => return DecodedArtwork::default(),
-    };
-    DecodedArtwork {
-        tile_texture: scaled_texture(&pixbuf, TILE_TEXTURE_MAX_SIDE),
-        detail_texture: scaled_texture(&pixbuf, DETAIL_TEXTURE_MAX_SIDE),
-        palette: ArtworkPalette::from_pixbuf(&pixbuf),
+struct ArtworkRepository {
+    metadata_service: Arc<dyn MetadataService>,
+    disk_cache: Option<ArtworkDiskCache>,
+}
+
+impl ArtworkRepository {
+    fn new(metadata_service: Arc<dyn MetadataService>) -> Self {
+        Self {
+            metadata_service,
+            disk_cache: ArtworkDiskCache::open(),
+        }
+    }
+
+    fn load(&self, source: &ArtworkSource) -> DecodedArtwork {
+        let fingerprint = source.file_fingerprint();
+        if let (Some(cache), Some(fingerprint)) = (&self.disk_cache, fingerprint)
+            && let Some(decoded) = cache.load(source, fingerprint)
+        {
+            return decoded;
+        }
+
+        match source {
+            ArtworkSource::EmbeddedTrack { file_path, .. } => {
+                let bytes = self.metadata_service.read_artwork(file_path).ok().flatten();
+                let decoded = decode_artwork(bytes);
+                if let (Some(cache), Some(fingerprint)) = (&self.disk_cache, fingerprint) {
+                    cache.store(source, fingerprint, &decoded.cache_entry);
+                }
+                decoded.artwork
+            }
+        }
     }
 }
 
-fn scaled_texture(pixbuf: &gdk_pixbuf::Pixbuf, max_side: i32) -> Option<gdk::Texture> {
+struct ArtworkDiskCache {
+    connection: Mutex<Connection>,
+}
+
+impl ArtworkDiskCache {
+    fn open() -> Option<Self> {
+        let path = BaseDirs::new()?
+            .cache_dir()
+            .join("sustain")
+            .join("artwork-cache.sqlite");
+        fs::create_dir_all(path.parent()?).ok()?;
+        let connection = Connection::open(path).ok()?;
+        Self::initialize(&connection).ok()?;
+        Some(Self {
+            connection: Mutex::new(connection),
+        })
+    }
+
+    fn initialize(connection: &Connection) -> rusqlite::Result<()> {
+        connection.execute_batch(
+            r#"
+                PRAGMA journal_mode = WAL;
+                PRAGMA synchronous = NORMAL;
+                "#,
+        )?;
+
+        let user_version: i64 =
+            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if user_version != CACHE_SCHEMA_VERSION {
+            // This is a derived cache, not durable user data. Recreate on
+            // schema changes instead of carrying cache migrations.
+            connection.execute_batch("DROP TABLE IF EXISTS artwork_cache;")?;
+        }
+
+        connection.execute_batch(
+            r#"
+                CREATE TABLE IF NOT EXISTS artwork_cache (
+                    source_kind      TEXT    NOT NULL,
+                    source_key       BLOB    NOT NULL,
+                    file_size        INTEGER NOT NULL,
+                    mtime_ns         INTEGER NOT NULL,
+                    format_version   INTEGER NOT NULL,
+                    tile_png         BLOB,
+                    detail_png       BLOB,
+                    background_red   INTEGER,
+                    background_green INTEGER,
+                    background_blue  INTEGER,
+                    foreground_red   INTEGER,
+                    foreground_green INTEGER,
+                    foreground_blue  INTEGER,
+                    secondary_red    INTEGER,
+                    secondary_green  INTEGER,
+                    secondary_blue   INTEGER,
+                    updated_at_unix  INTEGER NOT NULL,
+                    PRIMARY KEY (source_kind, source_key)
+                ) WITHOUT ROWID;
+                "#,
+        )?;
+        if user_version != CACHE_SCHEMA_VERSION {
+            connection.pragma_update(None, "user_version", CACHE_SCHEMA_VERSION)?;
+        }
+        Ok(())
+    }
+
+    fn load(
+        &self,
+        source: &ArtworkSource,
+        fingerprint: ArtworkFileFingerprint,
+    ) -> Option<DecodedArtwork> {
+        let (source_kind, source_key) = source.cache_key();
+        let cached = {
+            let connection = self.connection.lock().ok()?;
+            connection
+                .query_row(
+                    r#"
+                    SELECT tile_png,
+                           detail_png,
+                           background_red,
+                           background_green,
+                           background_blue,
+                           foreground_red,
+                           foreground_green,
+                           foreground_blue,
+                           secondary_red,
+                           secondary_green,
+                           secondary_blue
+                      FROM artwork_cache
+                     WHERE source_kind = ?1
+                       AND source_key = ?2
+                       AND file_size = ?3
+                       AND mtime_ns = ?4
+                       AND format_version = ?5
+                    "#,
+                    params![
+                        source_kind,
+                        source_key,
+                        fingerprint.file_size,
+                        fingerprint.mtime_ns,
+                        CACHE_SCHEMA_VERSION
+                    ],
+                    |row| {
+                        Ok(CachedArtworkRow {
+                            tile_png: row.get(0)?,
+                            detail_png: row.get(1)?,
+                            palette: palette_components_from_cache_row(row)?,
+                        })
+                    },
+                )
+                .optional()
+                .ok()
+                .flatten()?
+        };
+        cached.decode()
+    }
+
+    fn store(
+        &self,
+        source: &ArtworkSource,
+        fingerprint: ArtworkFileFingerprint,
+        cached: &CachedArtwork,
+    ) {
+        let (source_kind, source_key) = source.cache_key();
+        let connection = match self.connection.lock() {
+            Ok(connection) => connection,
+            Err(_) => return,
+        };
+        let palette = cached.palette;
+        let background = palette.map(|palette| palette.background);
+        let foreground = palette.map(|palette| palette.foreground);
+        let secondary = palette.map(|palette| palette.secondary);
+        let _ = connection.execute(
+            r#"
+            INSERT INTO artwork_cache (
+                source_kind,
+                source_key,
+                file_size,
+                mtime_ns,
+                format_version,
+                tile_png,
+                detail_png,
+                background_red,
+                background_green,
+                background_blue,
+                foreground_red,
+                foreground_green,
+                foreground_blue,
+                secondary_red,
+                secondary_green,
+                secondary_blue,
+                updated_at_unix
+            )
+            VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                unixepoch()
+            )
+            ON CONFLICT(source_kind, source_key) DO UPDATE SET
+                file_size = excluded.file_size,
+                mtime_ns = excluded.mtime_ns,
+                format_version = excluded.format_version,
+                tile_png = excluded.tile_png,
+                detail_png = excluded.detail_png,
+                background_red = excluded.background_red,
+                background_green = excluded.background_green,
+                background_blue = excluded.background_blue,
+                foreground_red = excluded.foreground_red,
+                foreground_green = excluded.foreground_green,
+                foreground_blue = excluded.foreground_blue,
+                secondary_red = excluded.secondary_red,
+                secondary_green = excluded.secondary_green,
+                secondary_blue = excluded.secondary_blue,
+                updated_at_unix = excluded.updated_at_unix
+            "#,
+            params![
+                source_kind,
+                source_key,
+                fingerprint.file_size,
+                fingerprint.mtime_ns,
+                CACHE_SCHEMA_VERSION,
+                cached.tile_png.as_deref(),
+                cached.detail_png.as_deref(),
+                background.map(|color| i64::from(color.red)),
+                background.map(|color| i64::from(color.green)),
+                background.map(|color| i64::from(color.blue)),
+                foreground.map(|color| i64::from(color.red)),
+                foreground.map(|color| i64::from(color.green)),
+                foreground.map(|color| i64::from(color.blue)),
+                secondary.map(|color| i64::from(color.red)),
+                secondary.map(|color| i64::from(color.green)),
+                secondary.map(|color| i64::from(color.blue)),
+            ],
+        );
+    }
+}
+
+#[derive(Default)]
+struct DecodedArtworkRecord {
+    artwork: DecodedArtwork,
+    cache_entry: CachedArtwork,
+}
+
+#[derive(Default)]
+struct CachedArtwork {
+    tile_png: Option<Vec<u8>>,
+    detail_png: Option<Vec<u8>>,
+    palette: Option<ArtworkPaletteComponents>,
+}
+
+struct CachedArtworkRow {
+    tile_png: Option<Vec<u8>>,
+    detail_png: Option<Vec<u8>>,
+    palette: Option<ArtworkPaletteComponents>,
+}
+
+impl CachedArtworkRow {
+    fn decode(self) -> Option<DecodedArtwork> {
+        if self.tile_png.is_none() && self.detail_png.is_none() && self.palette.is_none() {
+            return Some(DecodedArtwork::default());
+        }
+
+        let tile_texture = self.tile_png.as_deref().and_then(texture_from_png)?;
+        let detail_texture = self.detail_png.as_deref().and_then(texture_from_png)?;
+        Some(DecodedArtwork {
+            tile_texture: Some(tile_texture),
+            detail_texture: Some(detail_texture),
+            palette: self.palette.map(ArtworkPalette::from_components),
+        })
+    }
+}
+
+fn decode_artwork(bytes: Option<Vec<u8>>) -> DecodedArtworkRecord {
+    let Some(bytes) = bytes else {
+        return DecodedArtworkRecord::default();
+    };
+    let pixbuf = match gdk_pixbuf::Pixbuf::from_read(Cursor::new(bytes)) {
+        Ok(pixbuf) => pixbuf,
+        Err(_) => return DecodedArtworkRecord::default(),
+    };
+
+    let tile_pixbuf = scaled_pixbuf(&pixbuf, TILE_TEXTURE_MAX_SIDE);
+    let detail_pixbuf = scaled_pixbuf(&pixbuf, DETAIL_TEXTURE_MAX_SIDE);
+    let palette = ArtworkPalette::from_pixbuf(&pixbuf);
+    let cache_entry = CachedArtwork {
+        tile_png: tile_pixbuf.as_ref().and_then(pixbuf_png_bytes),
+        detail_png: detail_pixbuf.as_ref().and_then(pixbuf_png_bytes),
+        palette: palette.map(ArtworkPalette::components),
+    };
+    let artwork = DecodedArtwork {
+        tile_texture: tile_pixbuf.as_ref().map(gdk::Texture::for_pixbuf),
+        detail_texture: detail_pixbuf.as_ref().map(gdk::Texture::for_pixbuf),
+        palette,
+    };
+
+    DecodedArtworkRecord {
+        artwork,
+        cache_entry,
+    }
+}
+
+fn scaled_pixbuf(pixbuf: &gdk_pixbuf::Pixbuf, max_side: i32) -> Option<gdk_pixbuf::Pixbuf> {
     let width = pixbuf.width();
     let height = pixbuf.height();
     if width <= 0 || height <= 0 || max_side <= 0 {
@@ -345,5 +683,51 @@ fn scaled_texture(pixbuf: &gdk_pixbuf::Pixbuf, max_side: i32) -> Option<gdk::Tex
             gdk_pixbuf::InterpType::Bilinear,
         )?
     };
-    Some(gdk::Texture::for_pixbuf(&scaled))
+    Some(scaled)
+}
+
+fn pixbuf_png_bytes(pixbuf: &gdk_pixbuf::Pixbuf) -> Option<Vec<u8>> {
+    pixbuf.save_to_bufferv("png", &[]).ok()
+}
+
+fn texture_from_png(bytes: &[u8]) -> Option<gdk::Texture> {
+    let pixbuf = gdk_pixbuf::Pixbuf::from_read(Cursor::new(bytes.to_vec())).ok()?;
+    Some(gdk::Texture::for_pixbuf(&pixbuf))
+}
+
+fn palette_components_from_cache_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Option<ArtworkPaletteComponents>> {
+    let Some(background) = rgb_from_cache_columns(row, 2)? else {
+        return Ok(None);
+    };
+    let Some(foreground) = rgb_from_cache_columns(row, 5)? else {
+        return Ok(None);
+    };
+    let Some(secondary) = rgb_from_cache_columns(row, 8)? else {
+        return Ok(None);
+    };
+    Ok(Some(ArtworkPaletteComponents {
+        background,
+        foreground,
+        secondary,
+    }))
+}
+
+fn rgb_from_cache_columns(
+    row: &rusqlite::Row<'_>,
+    first_column: usize,
+) -> rusqlite::Result<Option<RgbColorComponents>> {
+    let red: Option<i64> = row.get(first_column)?;
+    let green: Option<i64> = row.get(first_column + 1)?;
+    let blue: Option<i64> = row.get(first_column + 2)?;
+    let (Some(red), Some(green), Some(blue)) = (red, green, blue) else {
+        return Ok(None);
+    };
+    let (Ok(red), Ok(green), Ok(blue)) =
+        (u8::try_from(red), u8::try_from(green), u8::try_from(blue))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(RgbColorComponents { red, green, blue }))
 }

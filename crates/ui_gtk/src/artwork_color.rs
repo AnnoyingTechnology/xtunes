@@ -12,6 +12,20 @@ pub(crate) struct ArtworkPalette {
     secondary: RgbColor,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ArtworkPaletteComponents {
+    pub(crate) background: RgbColorComponents,
+    pub(crate) foreground: RgbColorComponents,
+    pub(crate) secondary: RgbColorComponents,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RgbColorComponents {
+    pub(crate) red: u8,
+    pub(crate) green: u8,
+    pub(crate) blue: u8,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct QuantizedColor(u16);
 
@@ -46,6 +60,22 @@ impl ArtworkPalette {
 
     pub(crate) fn background_css(self) -> String {
         self.background.css_hex()
+    }
+
+    pub(crate) fn from_components(components: ArtworkPaletteComponents) -> Self {
+        Self {
+            background: RgbColor::from_components(components.background),
+            foreground: RgbColor::from_components(components.foreground),
+            secondary: RgbColor::from_components(components.secondary),
+        }
+    }
+
+    pub(crate) fn components(self) -> ArtworkPaletteComponents {
+        ArtworkPaletteComponents {
+            background: self.background.components(),
+            foreground: self.foreground.components(),
+            secondary: self.secondary.components(),
+        }
     }
 
     pub(crate) fn foreground_css(self) -> String {
@@ -291,6 +321,18 @@ impl ColorBucket {
 impl RgbColor {
     const fn new(red: u8, green: u8, blue: u8) -> Self {
         Self { red, green, blue }
+    }
+
+    const fn from_components(components: RgbColorComponents) -> Self {
+        Self::new(components.red, components.green, components.blue)
+    }
+
+    const fn components(self) -> RgbColorComponents {
+        RgbColorComponents {
+            red: self.red,
+            green: self.green,
+            blue: self.blue,
+        }
     }
 
     fn css_hex(self) -> String {

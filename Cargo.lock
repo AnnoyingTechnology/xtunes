@@ -1203,7 +1203,9 @@ dependencies = [
 name = "sustain-ui-gtk"
 version = "0.1.0"
 dependencies = [
+ "directories",
  "gtk4",
+ "rusqlite",
  "sustain-app-runtime",
 ]
 
