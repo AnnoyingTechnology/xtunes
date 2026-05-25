@@ -16,12 +16,11 @@
 //!   queue and runs the **entire** decode pipeline off the main thread:
 //!   `MetadataService::read_artwork` to pull the bytes from the audio
 //!   file, `Pixbuf::from_read` to decode them, `ArtworkPalette::from_pixbuf`
-//!   to derive the panel palette, and `gdk::Texture::for_pixbuf` to
-//!   create the GPU-ready texture. The pixbuf itself is dropped on the
-//!   worker; only the finished `DecodedArtwork { texture, palette }` is
-//!   handed back. (This relies on `gdk::Texture` being `Send + Sync` in
-//!   gtk-rs — it is, because GdkTexture is documented as immutable
-//!   after construction.)
+//!   to derive the panel palette, and bounded `gdk::Texture`s for the tile
+//!   and detail sizes. The pixbuf itself is dropped on the worker; only the
+//!   finished `DecodedArtwork` is handed back. (This relies on `gdk::Texture`
+//!   being `Send + Sync` in gtk-rs — it is, because GdkTexture is documented
+//!   as immutable after construction.)
 //! * A GTK main-loop poller drains the result channel under a strict
 //!   per-tick budget (small max batch + short wall-clock cap) so even a
 //!   burst of completions can't monopolise the main thread, places each
@@ -47,10 +46,12 @@ use std::{
     time::Duration,
 };
 
-use gtk::{gdk, glib};
+use gtk::{gdk, gdk_pixbuf, glib};
 use sustain_app_runtime::MetadataService;
 
 use crate::artwork_color::ArtworkPalette;
+
+use super::{ALBUM_DETAIL_ARTWORK_SIZE, ALBUM_TILE_COVER_SIZE};
 
 /// Number of worker threads pulling from the request queue. Artwork
 /// extraction is dominated by file I/O, tag parsing, and pixbuf decode;
@@ -79,6 +80,8 @@ const RESULT_BATCH_MAX: usize = 8;
 /// up doing more than expected, we still relinquish the main thread on
 /// schedule rather than running through the whole batch.
 const RESULT_TICK_BUDGET: Duration = Duration::from_millis(4);
+const TILE_TEXTURE_MAX_SIDE: i32 = ALBUM_TILE_COVER_SIZE;
+const DETAIL_TEXTURE_MAX_SIDE: i32 = ALBUM_DETAIL_ARTWORK_SIZE;
 
 /// Decoded artwork shared between tile rendering (needs only the
 /// texture) and detail-panel rendering (also needs the palette to tint
@@ -86,7 +89,8 @@ const RESULT_TICK_BUDGET: Duration = Duration::from_millis(4);
 /// cached.
 #[derive(Clone, Default)]
 pub(super) struct DecodedArtwork {
-    pub(super) texture: Option<gdk::Texture>,
+    pub(super) tile_texture: Option<gdk::Texture>,
+    pub(super) detail_texture: Option<gdk::Texture>,
     pub(super) palette: Option<ArtworkPalette>,
 }
 
@@ -163,6 +167,13 @@ impl AlbumArtworkLoader {
         self.inner.current_generation.set(next);
         self.inner.pending.borrow_mut().clear();
         next
+    }
+
+    /// Current generation used by newly-bound virtual rows. Rebuilds advance
+    /// the generation once, then every visible row binding queues artwork
+    /// requests against that stable value until the next rebuild.
+    pub(super) fn current_generation(&self) -> u64 {
+        self.inner.current_generation.get()
     }
 
     /// Returns the decoded entry for `path`, if any. Lets the detail
@@ -246,10 +257,7 @@ fn worker_loop(
                 Err(_) => return,
             }
         };
-        let bytes = metadata_service
-            .read_artwork(&request.path)
-            .ok()
-            .flatten();
+        let bytes = metadata_service.read_artwork(&request.path).ok().flatten();
         let decoded = decode_artwork(bytes);
         if result_tx
             .send(WorkerResult {
@@ -305,12 +313,37 @@ fn decode_artwork(bytes: Option<Vec<u8>>) -> DecodedArtwork {
     let Some(bytes) = bytes else {
         return DecodedArtwork::default();
     };
-    let pixbuf = match gtk::gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(bytes)) {
+    let pixbuf = match gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(bytes)) {
         Ok(pixbuf) => pixbuf,
         Err(_) => return DecodedArtwork::default(),
     };
     DecodedArtwork {
-        texture: Some(gdk::Texture::for_pixbuf(&pixbuf)),
+        tile_texture: scaled_texture(&pixbuf, TILE_TEXTURE_MAX_SIDE),
+        detail_texture: scaled_texture(&pixbuf, DETAIL_TEXTURE_MAX_SIDE),
         palette: ArtworkPalette::from_pixbuf(&pixbuf),
     }
+}
+
+fn scaled_texture(pixbuf: &gdk_pixbuf::Pixbuf, max_side: i32) -> Option<gdk::Texture> {
+    let width = pixbuf.width();
+    let height = pixbuf.height();
+    if width <= 0 || height <= 0 || max_side <= 0 {
+        return None;
+    }
+
+    let largest_side = width.max(height);
+    let scale = (f64::from(max_side) / f64::from(largest_side)).min(1.0);
+    let target_width = (f64::from(width) * scale).round().max(1.0) as i32;
+    let target_height = (f64::from(height) * scale).round().max(1.0) as i32;
+
+    let scaled = if target_width == width && target_height == height {
+        pixbuf.clone()
+    } else {
+        pixbuf.scale_simple(
+            target_width,
+            target_height,
+            gdk_pixbuf::InterpType::Bilinear,
+        )?
+    };
+    Some(gdk::Texture::for_pixbuf(&scaled))
 }

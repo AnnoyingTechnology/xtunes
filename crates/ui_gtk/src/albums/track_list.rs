@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
-
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use sustain_app_runtime::{ApplicationCommand, PlaybackCommand, TrackId};
@@ -19,36 +14,13 @@ use crate::{
 const STATUS_ICON_SIZE: i32 = 14;
 const NUMBER_OR_STATUS_CELL_WIDTH: i32 = 24;
 const TRACK_NUMBER_MIN_CHARS: i32 = 2;
+const TRACK_TITLE_MAX_CHARS: i32 = 56;
 const STATUS_ICON_PLAYING: &str = "audio-volume-high-symbolic";
 const STATUS_ICON_MISSING: &str = "dialog-warning-symbolic";
 
 #[derive(Clone)]
 pub(super) struct AlbumTrackListView {
     widget: gtk::ScrolledWindow,
-    status_bindings: StatusBindings,
-    playing_track_id: Rc<Cell<Option<TrackId>>>,
-}
-
-#[derive(Clone, Default)]
-struct StatusBindings(Rc<RefCell<Vec<StatusBinding>>>);
-
-struct StatusBinding {
-    list_item: gtk::ListItem,
-    icon: gtk::Image,
-    number: gtk::Label,
-}
-
-impl StatusBindings {
-    fn refresh(&self, playing_track_id: Option<TrackId>) {
-        for binding in self.0.borrow().iter() {
-            refresh_status_icon(
-                &binding.list_item,
-                &binding.icon,
-                &binding.number,
-                playing_track_id,
-            );
-        }
-    }
 }
 
 impl AlbumTrackListView {
@@ -69,15 +41,8 @@ impl AlbumTrackListView {
         // noise that lies about state. Activation (double-click / Enter) and
         // right-click context menus still work without a selection model.
         let selection = gtk::NoSelection::new(Some(store));
-        let status_bindings = StatusBindings::default();
-        let playing_track_id = Rc::new(Cell::new(playing_track_id));
 
-        let factory = build_row_factory(
-            status_bindings.clone(),
-            palette_provider.cloned(),
-            context_menu,
-            playing_track_id.clone(),
-        );
+        let factory = build_row_factory(palette_provider.cloned(), context_menu, playing_track_id);
 
         let list = gtk::ListView::new(Some(selection.clone()), Some(factory));
         list.add_css_class("album-track-table");
@@ -106,40 +71,29 @@ impl AlbumTrackListView {
         let scroller = gtk::ScrolledWindow::new();
         scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
         scroller.set_propagate_natural_height(true);
-        scroller.set_propagate_natural_width(true);
+        scroller.set_propagate_natural_width(false);
         scroller.set_hexpand(true);
         scroller.set_vexpand(false);
         scroller.add_css_class("album-track-table-scroller");
         scroller.set_child(Some(&list));
 
-        Self {
-            widget: scroller,
-            status_bindings,
-            playing_track_id,
-        }
+        Self { widget: scroller }
     }
 
     pub(super) fn widget(&self) -> gtk::ScrolledWindow {
         self.widget.clone()
     }
-
-    pub(super) fn set_playing_track_id(&self, playing_track_id: Option<TrackId>) {
-        self.playing_track_id.set(playing_track_id);
-        self.status_bindings.refresh(playing_track_id);
-    }
 }
 
 fn build_row_factory(
-    status_bindings: StatusBindings,
     palette_provider: Option<gtk::CssProvider>,
     context_menu: TrackRowContextMenu,
-    playing_track_id: Rc<Cell<Option<TrackId>>>,
+    playing_track_id: Option<TrackId>,
 ) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
     let palette_present = palette_provider.is_some();
     drop(palette_provider);
 
-    let status_bindings_for_setup = status_bindings.clone();
     let context_for_setup = context_menu;
     factory.connect_setup(move |_factory, item| {
         let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
@@ -184,6 +138,8 @@ fn build_row_factory(
         title.add_css_class("album-track-title");
         title.set_xalign(0.0);
         title.set_hexpand(true);
+        title.set_width_chars(1);
+        title.set_max_width_chars(TRACK_TITLE_MAX_CHARS);
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
         if palette_present {
             title.add_css_class("album-detail-palette-primary");
@@ -200,27 +156,7 @@ fn build_row_factory(
 
         install_row_context_menu(list_item, &row, &context_for_setup);
 
-        status_bindings_for_setup
-            .0
-            .borrow_mut()
-            .push(StatusBinding {
-                list_item: list_item.clone(),
-                icon: status_icon,
-                number,
-            });
-
         list_item.set_child(Some(&row));
-    });
-
-    let status_bindings_for_teardown = status_bindings;
-    factory.connect_teardown(move |_factory, item| {
-        let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-        status_bindings_for_teardown
-            .0
-            .borrow_mut()
-            .retain(|binding| binding.list_item != *list_item);
     });
 
     factory.connect_bind(move |_factory, item| {
@@ -253,7 +189,7 @@ fn build_row_factory(
         sync_missing_class(&title, track.is_missing);
         drop(track);
 
-        refresh_status_icon(list_item, &status_icon, &number, playing_track_id.get());
+        refresh_status_icon(list_item, &status_icon, &number, playing_track_id);
     });
 
     factory

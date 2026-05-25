@@ -65,15 +65,13 @@ pub(super) fn group_albums(tracks: &[Track]) -> Vec<AlbumViewModel> {
             artist: normalize_album_key(&artist),
             title: normalize_album_key(&title),
         };
-        let bucket = albums
-            .entry(key.clone())
-            .or_insert_with(|| AlbumBucket {
-                key,
-                title,
-                artist,
-                year: track.metadata.year,
-                tracks: Vec::new(),
-            });
+        let bucket = albums.entry(key.clone()).or_insert_with(|| AlbumBucket {
+            key,
+            title,
+            artist,
+            year: track.metadata.year,
+            tracks: Vec::new(),
+        });
         if bucket.year.is_none() {
             bucket.year = track.metadata.year;
         }

@@ -64,8 +64,6 @@ pub(crate) fn build_main_window(
     app: &gtk::Application,
     runtime: SharedRuntime,
 ) -> gtk::ApplicationWindow {
-    let _t_build = std::time::Instant::now();
-    eprintln!("[startup] build_main_window: enter");
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .decorated(false)
@@ -166,14 +164,12 @@ pub(crate) fn build_main_window(
         Some(rating_changed.clone()),
     );
     songs_table_holder.replace(Some(songs_table.clone()));
-    let _t_albums_new = std::time::Instant::now();
     let albums_view = AlbumsView::new(
         runtime.clone(),
         command_controller.clone(),
         playback_changed.clone(),
         context_menu,
     );
-    eprintln!("[startup] AlbumsView::new (lazy) in {:?}", _t_albums_new.elapsed());
     albums_view_holder.replace(Some(albums_view.clone()));
     let playlists_table = build_track_table(
         Vec::new(),
@@ -226,13 +222,15 @@ pub(crate) fn build_main_window(
     ));
     install_search_wiring(
         &titlebar,
-        &current_search_text,
-        &runtime,
-        &songs_table,
-        &albums_view,
-        &playlists_table,
-        &sidebar,
-        visible_summary_refresh.clone(),
+        SearchWiringContext {
+            current_search_text: current_search_text.clone(),
+            runtime: runtime.clone(),
+            songs_table: songs_table.clone(),
+            albums_view: albums_view.clone(),
+            playlists_table: playlists_table.clone(),
+            sidebar: sidebar.clone(),
+            visible_summary_refresh: visible_summary_refresh.clone(),
+        },
     );
     sidebar.install_context_menu(SidebarContextMenu::new(sidebar_action_callback(
         &window,
@@ -330,7 +328,6 @@ pub(crate) fn build_main_window(
     shell.set_child(Some(&window_frame));
     install_resize_handles(&shell, &window);
     window.set_child(Some(&shell));
-    eprintln!("[startup] build_main_window: ready in {:?}", _t_build.elapsed());
 
     // Any debounced save scheduled within the debounce window of shutdown
     // would otherwise be lost: the timer's main loop never gets to fire.
@@ -348,12 +345,12 @@ pub(crate) fn build_main_window(
 }
 
 /// Defer the cost of populating the Albums view until the user
-/// actually switches to it. Building the grid involves grouping every
-/// track in the library and kicking off artwork loads for thousands of
-/// covers; doing that at startup blocks the window from appearing for
-/// a perceptible amount of time on large libraries. Hooking into the
-/// content stack's visible-child notification keeps the activation
-/// trigger in one place — any caller that flips the stack to ALBUMS_VIEW
+/// actually switches to it. Activation groups the current library into
+/// album rows and lets the virtualized Albums view bind only visible
+/// rows; doing that at startup still provides no benefit while Songs is
+/// the initial mode. Hooking into the content stack's visible-child
+/// notification keeps the activation trigger in one place — any caller
+/// that flips the stack to ALBUMS_VIEW
 /// (the mode-bar toggle, the reveal-album action, future shortcuts)
 /// automatically picks it up. `activate()` is idempotent, so the
 /// notification firing on every later switch is harmless.
@@ -744,22 +741,26 @@ fn sidebar_selection_changed_callback(
 /// the user pauses. No flush-on-close: search state is purely
 /// in-memory and never persisted, so dropping a pending rebuild at
 /// shutdown loses nothing.
-fn install_search_wiring(
-    titlebar: &Titlebar,
-    current_search_text: &Rc<RefCell<String>>,
-    runtime: &SharedRuntime,
-    songs_table: &TrackTable,
-    albums_view: &AlbumsView,
-    playlists_table: &TrackTable,
-    sidebar: &PlaylistSidebar,
+struct SearchWiringContext {
+    current_search_text: Rc<RefCell<String>>,
+    runtime: SharedRuntime,
+    songs_table: TrackTable,
+    albums_view: AlbumsView,
+    playlists_table: TrackTable,
+    sidebar: PlaylistSidebar,
     visible_summary_refresh: ViewModeChangedCallback,
-) {
-    let current_search_text = current_search_text.clone();
-    let runtime = runtime.clone();
-    let songs_table = songs_table.clone();
-    let albums_view = albums_view.clone();
-    let playlists_table = playlists_table.clone();
-    let sidebar = sidebar.clone();
+}
+
+fn install_search_wiring(titlebar: &Titlebar, context: SearchWiringContext) {
+    let SearchWiringContext {
+        current_search_text,
+        runtime,
+        songs_table,
+        albums_view,
+        playlists_table,
+        sidebar,
+        visible_summary_refresh,
+    } = context;
     let pending_rebuild: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
 
     connect_titlebar_search(

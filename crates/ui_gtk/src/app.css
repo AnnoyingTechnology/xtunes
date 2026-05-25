@@ -229,7 +229,21 @@ button.now-playing-side-button:focus {
     background-color: @theme_bg_color;
 }
 
-.albums-grid {
+listview.albums-list,
+listview.albums-list > row,
+listview.albums-list > row:hover,
+listview.albums-list > row:active,
+listview.albums-list > row:focus {
+    background: none;
+    background-color: transparent;
+    background-image: none;
+    border: none;
+    margin: 0;
+    padding: 0;
+    min-height: 0;
+}
+
+.album-row {
     background-color: transparent;
 }
 
@@ -245,7 +259,8 @@ button.album-tile {
 
 button.album-tile:hover,
 button.album-tile:active,
-button.album-tile:focus {
+button.album-tile:focus,
+button.album-tile.selected {
     background-color: alpha(@theme_fg_color, 0.05);
     border: none;
     box-shadow: none;

@@ -26,6 +26,8 @@ use super::{
 const VOLUME_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 
 pub(crate) type SearchChangedCallback = Rc<dyn Fn(String)>;
+type VolumeSaveCallback = Rc<dyn Fn(VolumePercent)>;
+type VolumeSaveCallbackSlot = Rc<RefCell<Option<VolumeSaveCallback>>>;
 
 #[derive(Clone)]
 pub(crate) struct Titlebar {
@@ -37,7 +39,7 @@ pub(crate) struct Titlebar {
     volume: gtk::Scale,
     search: gtk::SearchEntry,
     volume_pending_save: Rc<RefCell<Option<glib::SourceId>>>,
-    volume_save_callback: Rc<RefCell<Option<Rc<dyn Fn(VolumePercent)>>>>,
+    volume_save_callback: VolumeSaveCallbackSlot,
 }
 
 pub(crate) fn build_titlebar(now_playing: gtk::Box, initial_volume: VolumePercent) -> Titlebar {
@@ -222,7 +224,7 @@ pub(crate) fn connect_titlebar_playback_controls(
 fn schedule_volume_save(
     volume: VolumePercent,
     pending_save: Rc<RefCell<Option<glib::SourceId>>>,
-    save_callback: Rc<RefCell<Option<Rc<dyn Fn(VolumePercent)>>>>,
+    save_callback: VolumeSaveCallbackSlot,
 ) {
     if let Some(previous) = pending_save.borrow_mut().take() {
         previous.remove();
