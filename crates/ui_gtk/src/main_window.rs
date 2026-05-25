@@ -64,6 +64,8 @@ pub(crate) fn build_main_window(
     app: &gtk::Application,
     runtime: SharedRuntime,
 ) -> gtk::ApplicationWindow {
+    let _t_build = std::time::Instant::now();
+    eprintln!("[startup] build_main_window: enter");
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .decorated(false)
@@ -164,12 +166,14 @@ pub(crate) fn build_main_window(
         Some(rating_changed.clone()),
     );
     songs_table_holder.replace(Some(songs_table.clone()));
+    let _t_albums_new = std::time::Instant::now();
     let albums_view = AlbumsView::new(
         runtime.clone(),
         command_controller.clone(),
         playback_changed.clone(),
         context_menu,
     );
+    eprintln!("[startup] AlbumsView::new (lazy) in {:?}", _t_albums_new.elapsed());
     albums_view_holder.replace(Some(albums_view.clone()));
     let playlists_table = build_track_table(
         Vec::new(),
@@ -197,6 +201,7 @@ pub(crate) fn build_main_window(
         &albums_view.widget(),
         &playlists_table.widget(),
     );
+    install_albums_view_activator(&content_stack, &albums_view);
     let visible_summary_refresh = visible_summary_refresh_callback(
         &runtime,
         &content_stack,
@@ -325,6 +330,7 @@ pub(crate) fn build_main_window(
     shell.set_child(Some(&window_frame));
     install_resize_handles(&shell, &window);
     window.set_child(Some(&shell));
+    eprintln!("[startup] build_main_window: ready in {:?}", _t_build.elapsed());
 
     // Any debounced save scheduled within the debounce window of shutdown
     // would otherwise be lost: the timer's main loop never gets to fire.
@@ -339,6 +345,25 @@ pub(crate) fn build_main_window(
     });
 
     window
+}
+
+/// Defer the cost of populating the Albums view until the user
+/// actually switches to it. Building the grid involves grouping every
+/// track in the library and kicking off artwork loads for thousands of
+/// covers; doing that at startup blocks the window from appearing for
+/// a perceptible amount of time on large libraries. Hooking into the
+/// content stack's visible-child notification keeps the activation
+/// trigger in one place — any caller that flips the stack to ALBUMS_VIEW
+/// (the mode-bar toggle, the reveal-album action, future shortcuts)
+/// automatically picks it up. `activate()` is idempotent, so the
+/// notification firing on every later switch is harmless.
+fn install_albums_view_activator(content_stack: &gtk::Stack, albums_view: &AlbumsView) {
+    let albums_view = albums_view.clone();
+    content_stack.connect_visible_child_name_notify(move |stack| {
+        if stack.visible_child_name().as_deref() == Some(ALBUMS_VIEW) {
+            albums_view.activate();
+        }
+    });
 }
 
 fn library_changed_callback(

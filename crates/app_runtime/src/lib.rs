@@ -24,7 +24,7 @@ pub use sustain_domain::{
     TrackPlaybackSource, TrackRelativePath, UserSettings, VolumePercent, matching_tracks,
 };
 use sustain_library_store::LibraryStore;
-use sustain_metadata::MetadataService;
+pub use sustain_metadata::MetadataService;
 use sustain_playback::PlaybackService;
 pub use sustain_playback::TrackEndedCallback;
 pub use sustain_search::{
@@ -291,6 +291,10 @@ impl ApplicationRuntime {
 
     pub fn settings(&self) -> &UserSettings {
         &self.settings
+    }
+
+    pub fn metadata_service(&self) -> Option<Arc<dyn MetadataService>> {
+        self.metadata_service.clone()
     }
 
     pub fn library_tracks(&self) -> &[Track] {

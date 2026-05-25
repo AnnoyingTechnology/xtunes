@@ -3,7 +3,6 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::BTreeMap,
     path::PathBuf,
     rc::Rc,
 };
@@ -18,9 +17,11 @@ use super::{
     PlaybackChangedCallback, SharedRuntime, artwork_color::ArtworkPalette,
     command_controller::SharedCommandController, track_context::TrackRowContextMenu,
 };
+use artwork_loader::{AlbumArtworkLoader, DecodedArtwork};
 use model::{AlbumViewModel, album_subtitle, group_albums};
 use track_list::AlbumTrackListView;
 
+mod artwork_loader;
 mod model;
 mod track_list;
 
@@ -33,8 +34,14 @@ pub(crate) struct AlbumsView {
     command_controller: SharedCommandController,
     playback_changed: PlaybackChangedCallback,
     context_menu: TrackRowContextMenu,
-    /// All grouped albums from the most recent `replace_tracks` call,
-    /// unfiltered. `albums` (below) is derived from this by `apply_search`.
+    /// Most recent library track list handed to the view. Always kept up
+    /// to date so the deferred first activation reflects whatever the
+    /// rest of the app has dispatched since startup. Source of truth for
+    /// the grouped `all_albums` once the view actually builds.
+    pending_tracks: Rc<RefCell<Vec<Track>>>,
+    /// All grouped albums from the most recent group pass, unfiltered.
+    /// `albums` (below) is derived from this by `apply_search`. Empty
+    /// until the view is activated.
     all_albums: Rc<RefCell<Vec<AlbumViewModel>>>,
     /// Albums currently shown in the grid, after the active search filter.
     /// The renderer, `reveal_album_for_track`, and selection indexing all
@@ -46,15 +53,14 @@ pub(crate) struct AlbumsView {
     selected_tile: Rc<RefCell<Option<gtk::Button>>>,
     visible_columns: Rc<Cell<usize>>,
     last_width: Rc<Cell<i32>>,
-    artwork_cache: Rc<RefCell<BTreeMap<PathBuf, CachedArtwork>>>,
+    artwork_loader: AlbumArtworkLoader,
+    /// Switches from `false` to `true` the first time `activate()` is
+    /// called. Tile construction, grouping, and the width-watcher tick
+    /// callback all key off this — they are skipped while the view is
+    /// dormant so the cost stays out of startup.
+    activated: Rc<Cell<bool>>,
     playing_track_id: Rc<Cell<Option<TrackId>>>,
     live_track_lists: Rc<RefCell<Vec<AlbumTrackListView>>>,
-}
-
-#[derive(Clone, Default)]
-struct CachedArtwork {
-    texture: Option<gdk::Texture>,
-    palette: Option<ArtworkPalette>,
 }
 
 const ALBUM_TILE_WIDTH: i32 = 150;
@@ -103,7 +109,20 @@ impl AlbumsView {
         viewport.set_child(Some(&container));
         scroller.set_child(Some(&viewport));
 
-        let view = Self {
+        // The loader is created at startup so background workers and the
+        // result poller exist regardless of whether the user ever opens
+        // the Albums view. They sit idle until `activate()` queues the
+        // first batch of artwork requests, and shut down when the loader
+        // is dropped at app teardown.
+        let metadata_service = runtime
+            .borrow()
+            .metadata_service()
+            .expect("metadata service must be installed before AlbumsView is built");
+        let artwork_loader = AlbumArtworkLoader::new(metadata_service);
+
+        let initial_tracks = runtime.borrow().library_tracks().to_vec();
+
+        Self {
             scroller,
             viewport,
             container,
@@ -111,6 +130,7 @@ impl AlbumsView {
             command_controller,
             playback_changed,
             context_menu,
+            pending_tracks: Rc::new(RefCell::new(initial_tracks)),
             all_albums: Rc::new(RefCell::new(Vec::new())),
             albums: Rc::new(RefCell::new(Vec::new())),
             search_text: Rc::new(RefCell::new(String::new())),
@@ -118,25 +138,49 @@ impl AlbumsView {
             selected_tile: Rc::new(RefCell::new(None)),
             visible_columns: Rc::new(Cell::new(1)),
             last_width: Rc::new(Cell::new(0)),
-            artwork_cache: Rc::new(RefCell::new(BTreeMap::new())),
+            artwork_loader,
+            activated: Rc::new(Cell::new(false)),
             playing_track_id: Rc::new(Cell::new(None)),
             live_track_lists: Rc::new(RefCell::new(Vec::new())),
-        };
-        view.replace_tracks(view.runtime.borrow().library_tracks().to_vec());
-        view.install_width_watcher();
-        view
+        }
     }
 
     pub(crate) fn widget(&self) -> gtk::ScrolledWindow {
         self.scroller.clone()
     }
 
+    /// Build the grid for the first time. Called when the Albums tab is
+    /// selected, either by the user clicking the mode button or by a
+    /// reveal request that needs the view populated to find an album.
+    /// Idempotent: repeated calls are no-ops, so callers don't need to
+    /// track activation state themselves.
+    pub(crate) fn activate(&self) {
+        if self.activated.replace(true) {
+            return;
+        }
+        let _t = std::time::Instant::now();
+        self.install_width_watcher();
+        self.regroup_and_apply_search();
+        eprintln!(
+            "[startup] AlbumsView.activate: {} albums in {:?}",
+            self.albums.borrow().len(),
+            _t.elapsed()
+        );
+        let _t_idle = std::time::Instant::now();
+        glib::idle_add_local_once(move || {
+            eprintln!(
+                "[startup] AlbumsView.activate: first idle reached after {:?}",
+                _t_idle.elapsed()
+            );
+        });
+    }
+
     pub(crate) fn replace_tracks(&self, tracks: Vec<Track>) {
-        *self.all_albums.borrow_mut() = group_albums(&tracks);
-        self.artwork_cache.borrow_mut().clear();
-        self.visible_columns
-            .set(columns_for_width(self.scroller.width()));
-        self.apply_search();
+        *self.pending_tracks.borrow_mut() = tracks;
+        if !self.activated.get() {
+            return;
+        }
+        self.regroup_and_apply_search();
     }
 
     /// Update the active search filter and re-derive the visible album set.
@@ -146,6 +190,9 @@ impl AlbumsView {
             return;
         }
         *self.search_text.borrow_mut() = search_text;
+        if !self.activated.get() {
+            return;
+        }
         self.apply_search();
     }
 
@@ -168,11 +215,25 @@ impl AlbumsView {
         self.rebuild();
     }
 
+    /// Group the stashed tracks into albums and re-derive the visible
+    /// set under the current search filter. The width snapshot keeps
+    /// the column count consistent with whatever size the scroller
+    /// happened to reach before activation.
+    fn regroup_and_apply_search(&self) {
+        *self.all_albums.borrow_mut() = group_albums(&self.pending_tracks.borrow());
+        self.visible_columns
+            .set(columns_for_width(self.scroller.width()));
+        self.apply_search();
+    }
+
     pub(crate) fn set_playing_track_id(&self, playing_track_id: Option<TrackId>) {
         if self.playing_track_id.get() == playing_track_id {
             return;
         }
         self.playing_track_id.set(playing_track_id);
+        // Pre-activation, `live_track_lists` is empty so this loop is a
+        // no-op; the cell update is enough on its own because the first
+        // `rebuild` after activation reads from it.
         for list in self.live_track_lists.borrow().iter() {
             list.set_playing_track_id(playing_track_id);
         }
@@ -234,6 +295,9 @@ impl AlbumsView {
     }
 
     fn rebuild(&self) {
+        if !self.activated.get() {
+            return;
+        }
         // TODO: clicking an album currently scrolls the viewport back to
         // the top because the full clear-and-rebuild leaves the viewport
         // with no stable descendant to anchor. Context-menu reveal wants
@@ -251,6 +315,12 @@ impl AlbumsView {
             return;
         }
 
+        // Bump the artwork loader's generation up front so any callbacks
+        // still queued from a previous rebuild are discarded before we
+        // start handing out fresh widget references. The new generation
+        // stamps every artwork request made in this rebuild pass.
+        let generation = self.artwork_loader.begin_generation();
+
         let selected_album = self.selected_album.get();
         let columns = self.visible_columns.get().max(1);
         let mut album_index = 0;
@@ -263,6 +333,7 @@ impl AlbumsView {
                 row_start,
                 columns,
                 selected_album,
+                generation,
             );
             self.container.append(&tile_row);
 
@@ -287,6 +358,7 @@ impl AlbumsView {
         row_start: usize,
         columns: usize,
         selected_album: Option<usize>,
+        generation: u64,
     ) -> gtk::Box {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, ALBUM_GRID_COLUMN_SPACING);
         row.set_homogeneous(true);
@@ -296,7 +368,7 @@ impl AlbumsView {
         for offset in 0..columns {
             if let Some(album) = albums.get(offset) {
                 let index = row_start + offset;
-                let tile = self.album_tile(index, album, selected_album == Some(index));
+                let tile = self.album_tile(index, album, selected_album == Some(index), generation);
                 row.append(&tile);
             } else {
                 // Empty placeholder keeps later rows aligned with full-width rows.
@@ -312,6 +384,7 @@ impl AlbumsView {
         album_index: usize,
         album: &AlbumViewModel,
         is_selected: bool,
+        generation: u64,
     ) -> gtk::Button {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
         // No `set_width_request` here on purpose: pinning the content's min to
@@ -323,12 +396,28 @@ impl AlbumsView {
         // `ALBUM_TILE_WIDTH` naturally because the row is homogeneous.
         content.set_halign(gtk::Align::Center);
 
-        let artwork = self.album_artwork(album);
-        content.append(&album_cover(
-            artwork.texture,
-            ALBUM_TILE_COVER_SIZE,
-            "album-cover",
-        ));
+        // The cover starts as a placeholder. Artwork loading runs on a
+        // background thread; when the result arrives the loader fires
+        // the callback below and swaps the placeholder for the decoded
+        // image. If the album's representative track can't be resolved
+        // (no library root yet, or every track missing), the placeholder
+        // stays — which is what the synchronous path used to show too.
+        let cover = build_cover_widget(ALBUM_TILE_COVER_SIZE, "album-cover");
+        content.append(&cover);
+        if let Some(absolute_path) = self.album_artwork_path(album) {
+            let cover_for_callback = cover.clone();
+            self.artwork_loader.request(
+                generation,
+                absolute_path,
+                Box::new(move |decoded| {
+                    apply_cover_texture(
+                        &cover_for_callback,
+                        decoded.texture,
+                        ALBUM_TILE_COVER_SIZE,
+                    );
+                }),
+            );
+        }
 
         let title = gtk::Label::new(Some(&album.title));
         title.add_css_class("album-tile-title");
@@ -378,8 +467,8 @@ impl AlbumsView {
         let content = gtk::Box::new(gtk::Orientation::Horizontal, 40);
         content.add_css_class("album-detail");
         content.set_hexpand(true);
-        let artwork = self.album_artwork(album);
-        let palette_provider = artwork.palette.map(album_detail_palette_provider);
+        let artwork = self.album_artwork_for_detail(album);
+        let palette_provider = artwork.palette.clone().map(album_detail_palette_provider);
         install_palette_provider(&content, palette_provider.as_ref());
         apply_palette_style(
             &content,
@@ -467,7 +556,7 @@ impl AlbumsView {
         let artwork_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         artwork_column.set_halign(gtk::Align::End);
         artwork_column.set_valign(gtk::Align::End);
-        let detail_cover = album_cover(
+        let detail_cover = album_cover_with(
             artwork.texture,
             ALBUM_DETAIL_ARTWORK_SIZE,
             "album-detail-cover",
@@ -555,38 +644,40 @@ impl AlbumsView {
         lists
     }
 
-    fn album_artwork(&self, album: &AlbumViewModel) -> CachedArtwork {
-        let Some(root) = self.runtime.borrow().settings().library.path.clone() else {
-            return CachedArtwork::default();
-        };
-        let Some(track) = album
-            .tracks
-            .iter()
-            .find(|track| !track.is_missing)
-            .or_else(|| album.tracks.first())
-        else {
-            return CachedArtwork::default();
-        };
-        let artwork_path = if track.file_path.is_absolute() {
-            track.file_path.clone()
-        } else {
-            root.join(&track.file_path)
-        };
-
-        if let Some(cached) = self.artwork_cache.borrow().get(&artwork_path) {
-            return cached.clone();
+    /// Resolves the on-disk path the artwork loader should read for an
+    /// album cover. Mirrors what the synchronous reader used to do
+    /// inline: prefer the first non-missing track, fall back to the
+    /// first track of any kind, and turn relative paths into absolute
+    /// paths against the configured library root. Returns `None` only
+    /// when no library root is set or no representative track exists.
+    fn album_artwork_path(&self, album: &AlbumViewModel) -> Option<PathBuf> {
+        let relative = album.representative_track_path.as_ref()?;
+        if relative.is_absolute() {
+            return Some(relative.clone());
         }
+        let root = self.runtime.borrow().settings().library_path()?.to_path_buf();
+        Some(root.join(relative))
+    }
 
-        let artwork = self
-            .runtime
-            .borrow()
-            .read_artwork(&artwork_path)
-            .and_then(artwork_from_bytes)
-            .unwrap_or_default();
-        self.artwork_cache
-            .borrow_mut()
-            .insert(artwork_path, artwork.clone());
-        artwork
+    /// Decoded artwork for the album-detail panel. The panel needs both
+    /// the texture and the palette synchronously to render in one go,
+    /// so we first try the loader's cache (most clicks hit it because
+    /// the tile already requested the same path), and only fall back
+    /// to a direct synchronous read for the rare cold-cache click.
+    /// The synchronous read populates the loader's cache, so any
+    /// callbacks still queued for the same path will see the hit.
+    fn album_artwork_for_detail(&self, album: &AlbumViewModel) -> DecodedArtwork {
+        let Some(absolute_path) = self.album_artwork_path(album) else {
+            return DecodedArtwork::default();
+        };
+        if let Some(cached) = self.artwork_loader.cached(&absolute_path) {
+            return cached;
+        }
+        let Some(metadata_service) = self.runtime.borrow().metadata_service() else {
+            return DecodedArtwork::default();
+        };
+        self.artwork_loader
+            .ensure_cached_sync(&absolute_path, metadata_service.as_ref())
     }
 }
 
@@ -615,7 +706,7 @@ fn empty_albums_label() -> gtk::Label {
     label
 }
 
-fn album_cover(texture: Option<gdk::Texture>, size: i32, css_class: &str) -> gtk::Box {
+fn build_cover_widget(size: i32, css_class: &str) -> gtk::Box {
     let cover = gtk::Box::new(gtk::Orientation::Vertical, 0);
     cover.add_css_class(css_class);
     cover.set_size_request(size, size);
@@ -624,6 +715,18 @@ fn album_cover(texture: Option<gdk::Texture>, size: i32, css_class: &str) -> gtk
     cover.set_hexpand(false);
     cover.set_vexpand(false);
     cover.set_overflow(gtk::Overflow::Hidden);
+    apply_cover_texture(&cover, None, size);
+    cover
+}
+
+/// Replaces the cover widget's current contents with either the decoded
+/// image or the placeholder icon. Used both at construction time (called
+/// with `None` to install the placeholder) and from the artwork loader
+/// callback (called with the decoded texture once it arrives).
+fn apply_cover_texture(cover: &gtk::Box, texture: Option<gdk::Texture>, size: i32) {
+    while let Some(child) = cover.first_child() {
+        cover.remove(&child);
+    }
 
     match texture {
         Some(texture) => {
@@ -644,7 +747,17 @@ fn album_cover(texture: Option<gdk::Texture>, size: i32, css_class: &str) -> gtk
             }
         }
     }
+}
 
+/// Build a cover widget with an immediately-applied texture. Used by
+/// the album detail panel, which resolves artwork synchronously via
+/// the loader's cache (or a one-off sync read) and has the texture in
+/// hand at construction time.
+fn album_cover_with(texture: Option<gdk::Texture>, size: i32, css_class: &str) -> gtk::Box {
+    let cover = build_cover_widget(size, css_class);
+    if texture.is_some() {
+        apply_cover_texture(&cover, texture, size);
+    }
     cover
 }
 
@@ -866,14 +979,6 @@ fn ensure_shuffle_enabled(command_controller: &SharedCommandController) {
 
     let _result =
         command_controller.dispatch(ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle));
-}
-
-fn artwork_from_bytes(bytes: Vec<u8>) -> Option<CachedArtwork> {
-    let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(bytes)).ok()?;
-    Some(CachedArtwork {
-        texture: Some(gdk::Texture::for_pixbuf(&pixbuf)),
-        palette: ArtworkPalette::from_pixbuf(&pixbuf),
-    })
 }
 
 #[cfg(test)]

@@ -6,12 +6,30 @@ use std::path::PathBuf;
 
 use sustain_app_runtime::{Track, TrackId, TrackMetadata};
 
+/// Stable identity for an album, derived from the normalized
+/// (artist, title) pair used to bucket tracks. Equality matches the
+/// bucketing logic, so two `AlbumViewModel`s produced from different
+/// `group_albums` calls share a key iff they cover the same tracks.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub(super) struct AlbumKey {
+    artist: String,
+    title: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct AlbumViewModel {
+    pub(super) key: AlbumKey,
     pub(super) title: String,
     pub(super) artist: String,
     pub(super) year: Option<i32>,
     pub(super) tracks: Vec<AlbumTrackViewModel>,
+    /// Audio file the artwork loader should read to extract this album's
+    /// cover, expressed as the track's `TrackLocation::path()` (relative
+    /// when the library has a root, absolute when imported as such). The
+    /// view resolves it against the current library root before queueing.
+    /// `None` when every track is missing on disk and the album is being
+    /// rendered purely from cached metadata.
+    pub(super) representative_track_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -27,6 +45,7 @@ pub(super) struct AlbumTrackViewModel {
 
 #[derive(Clone, Debug)]
 struct AlbumBucket {
+    key: AlbumKey,
     title: String,
     artist: String,
     year: Option<i32>,
@@ -37,18 +56,24 @@ const UNKNOWN_ALBUM: &str = "Unknown Album";
 const UNKNOWN_ARTIST: &str = "Unknown Artist";
 
 pub(super) fn group_albums(tracks: &[Track]) -> Vec<AlbumViewModel> {
-    let mut albums = BTreeMap::<(String, String), AlbumBucket>::new();
+    let mut albums = BTreeMap::<AlbumKey, AlbumBucket>::new();
 
     for track in tracks {
         let title = album_title(&track.metadata);
         let artist = album_artist(&track.metadata);
-        let key = (normalize_album_key(&artist), normalize_album_key(&title));
-        let bucket = albums.entry(key).or_insert_with(|| AlbumBucket {
-            title,
-            artist,
-            year: track.metadata.year,
-            tracks: Vec::new(),
-        });
+        let key = AlbumKey {
+            artist: normalize_album_key(&artist),
+            title: normalize_album_key(&title),
+        };
+        let bucket = albums
+            .entry(key.clone())
+            .or_insert_with(|| AlbumBucket {
+                key,
+                title,
+                artist,
+                year: track.metadata.year,
+                tracks: Vec::new(),
+            });
         if bucket.year.is_none() {
             bucket.year = track.metadata.year;
         }
@@ -59,11 +84,19 @@ pub(super) fn group_albums(tracks: &[Track]) -> Vec<AlbumViewModel> {
         .into_values()
         .map(|mut bucket| {
             bucket.tracks.sort_by(compare_album_tracks);
+            let representative_track_path = bucket
+                .tracks
+                .iter()
+                .find(|track| !track.is_missing)
+                .or_else(|| bucket.tracks.first())
+                .map(|track| track.file_path.clone());
             AlbumViewModel {
+                key: bucket.key,
                 title: bucket.title,
                 artist: bucket.artist,
                 year: bucket.year,
                 tracks: bucket.tracks,
+                representative_track_path,
             }
         })
         .collect()
@@ -201,6 +234,38 @@ mod tests {
     }
 
     #[test]
+    fn representative_track_prefers_first_non_missing() {
+        let tracks = vec![
+            missing_track(1, "missing.flac", "Album", "Artist"),
+            track(2, "present.flac", "Album", "Artist", Some(2), Some(200)),
+        ];
+
+        let albums = group_albums(&tracks);
+
+        assert_eq!(albums.len(), 1);
+        assert_eq!(
+            albums[0].representative_track_path.as_deref(),
+            Some(std::path::Path::new("present.flac"))
+        );
+    }
+
+    #[test]
+    fn representative_track_falls_back_to_first_when_all_missing() {
+        let tracks = vec![
+            missing_track(1, "a.flac", "Album", "Artist"),
+            missing_track(2, "b.flac", "Album", "Artist"),
+        ];
+
+        let albums = group_albums(&tracks);
+
+        assert_eq!(albums.len(), 1);
+        // Track ordering inside the bucket runs through `compare_album_tracks`,
+        // which here ties on disc/track and falls back to title comparison; the
+        // important contract is just "some path, not None".
+        assert!(albums[0].representative_track_path.is_some());
+    }
+
+    #[test]
     fn uses_unknown_album_and_artist_when_metadata_is_missing() {
         let albums = group_albums(&[Track {
             id: track_id(1),
@@ -254,6 +319,12 @@ mod tests {
             rating: Rating::unrated(),
             statistics: PlayStatistics::default(),
         }
+    }
+
+    fn missing_track(id: i64, path: &str, album: &str, artist: &str) -> Track {
+        let mut track = track(id, path, album, artist, None, None);
+        track.location = TrackLocation::missing(relative_path(path));
+        track
     }
 
     fn album_track(disc_number: Option<u32>, track_number: Option<u32>) -> AlbumTrackViewModel {
