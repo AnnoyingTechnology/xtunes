@@ -83,6 +83,8 @@ pub(crate) type SharedMprisService = Rc<sustain_desktop::MprisService>;
 pub(crate) type MprisCommandReceiver = async_channel::Receiver<sustain_desktop::MprisCommand>;
 pub(crate) type MetadataWriteResultReceiver =
     async_channel::Receiver<sustain_app_runtime::MetadataWriteResult>;
+pub(crate) type ArtworkFetchResultReceiver =
+    async_channel::Receiver<sustain_app_runtime::ArtworkFetchResult>;
 
 pub fn run(mut runtime: ApplicationRuntime) {
     let app = gtk::Application::builder().application_id(APP_ID).build();
@@ -99,6 +101,26 @@ pub fn run(mut runtime: ApplicationRuntime) {
     let (write_result_tx, write_result_rx) =
         async_channel::unbounded::<sustain_app_runtime::MetadataWriteResult>();
     runtime.set_metadata_write_result_sink(write_result_tx);
+
+    // Start the artwork fetcher and install its result sink. The
+    // fetcher only runs when a remote metadata service was installed
+    // by the app entry; otherwise this is a no-op and any
+    // `FetchArtwork` command returns `ArtworkFetchingUnavailable` at
+    // dispatch time. The matching receiver is wired into the main
+    // window below so successful fetches drive a `SetArtwork`
+    // follow-up on the GTK main thread.
+    let (fetch_result_tx, fetch_result_rx) =
+        async_channel::unbounded::<sustain_app_runtime::ArtworkFetchResult>();
+    runtime.set_artwork_fetch_result_sink(fetch_result_tx);
+    if let Err(error) = runtime.start_artwork_fetcher() {
+        // The only legitimate failure here is "no remote metadata
+        // service installed", which is a normal state for builds
+        // without networking enabled. Log and continue; the click-
+        // to-fetch affordance simply stays inert.
+        eprintln!(
+            "Sustain: remote artwork retrieval disabled ({error:?}); the missing-artwork tile will not be clickable."
+        );
+    }
 
     let runtime = Rc::new(RefCell::new(runtime));
 
@@ -124,18 +146,22 @@ pub fn run(mut runtime: ApplicationRuntime) {
         Rc::new(RefCell::new(Some(mpris_command_rx)));
     let write_result_rx_holder: Rc<RefCell<Option<MetadataWriteResultReceiver>>> =
         Rc::new(RefCell::new(Some(write_result_rx)));
+    let fetch_result_rx_holder: Rc<RefCell<Option<ArtworkFetchResultReceiver>>> =
+        Rc::new(RefCell::new(Some(fetch_result_rx)));
 
     app.connect_activate({
         let runtime = runtime.clone();
         move |app| {
             let mpris_command_rx = mpris_command_rx_holder.borrow_mut().take();
             let write_result_rx = write_result_rx_holder.borrow_mut().take();
+            let fetch_result_rx = fetch_result_rx_holder.borrow_mut().take();
             let window = build_main_window(
                 app,
                 runtime.clone(),
                 mpris_service.clone(),
                 mpris_command_rx,
                 write_result_rx,
+                fetch_result_rx,
             );
             window.present();
         }
@@ -147,7 +173,9 @@ pub fn run(mut runtime: ApplicationRuntime) {
     // clicked moments before close is not lost. `shutdown_metadata_writer`
     // joins the worker thread; the channel sender is dropped first so the
     // worker's `recv` returns once the queue is empty.
-    runtime.borrow_mut().shutdown_metadata_writer();
+    let mut runtime_guard = runtime.borrow_mut();
+    runtime_guard.shutdown_metadata_writer();
+    runtime_guard.shutdown_artwork_fetcher();
 }
 
 fn start_mpris(

@@ -55,6 +55,27 @@ fn main() {
         runtime = runtime.with_playback_service(Box::new(playback_service));
     }
 
+    // Install the networked metadata service. The User-Agent is
+    // mandatory for MusicBrainz; the contact URL points back at the
+    // project repository so the maintainer reaches a human if abuse
+    // reports come in. The AcoustID key is a compile-time secret —
+    // builds without `SUSTAIN_ACOUSTID_API_KEY` set are still
+    // functional for tag-based identification and graceful no-ops for
+    // fingerprint-based identification.
+    let user_agent = format!(
+        "Sustain/{version} ( {homepage} )",
+        version = env!("CARGO_PKG_VERSION"),
+        homepage = "https://github.com/AnnoyingTechnology/Sustain",
+    );
+    let http_client = std::sync::Arc::new(sustain_metadata_remote::HttpClient::new(
+        sustain_metadata_remote::HttpClientConfig { user_agent },
+    ));
+    let remote_service = sustain_metadata_remote::ComposedRemoteMetadataService::from_http_client(
+        http_client,
+        sustain_metadata_remote::acoustid_api_key(),
+    );
+    runtime.set_remote_metadata_service(Arc::new(remote_service));
+
     // Known GTK/GDK runtime warning on some Wayland/Vulkan setups:
     // `vkAcquireNextImageKHR(): ... VK_SUBOPTIMAL_KHR`.
     // This is emitted below Sustain by GTK's Vulkan renderer when the swapchain

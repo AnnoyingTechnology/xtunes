@@ -79,6 +79,13 @@ pub enum ApplicationCommand {
         track_id: TrackId,
         artwork: Option<Vec<u8>>,
     },
+    /// Trigger an explicit remote artwork lookup for `track_id`.
+    /// The runtime enqueues the work on the background fetcher and
+    /// returns immediately; the outcome is delivered later through
+    /// the runtime's artwork-fetch result sink.
+    FetchArtwork {
+        track_id: TrackId,
+    },
     RemoveTrackFromLibrary {
         track_id: TrackId,
     },

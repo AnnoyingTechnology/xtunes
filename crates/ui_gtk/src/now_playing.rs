@@ -16,13 +16,14 @@ use super::{
     artwork_color::ArtworkPalette,
     artwork_loader::{ArtworkLoader, ArtworkSource, DecodedArtwork},
     command_controller::SharedCommandController,
+    status_bar::StatusBar,
 };
 use model::{
     artist_album_text, playback_position, progress_fraction, remaining_time_text, time_text,
     track_title,
 };
 use progress_hit_area::ProgressHitArea;
-use sustain_app_runtime::{ApplicationCommand, NowPlaying, PlaybackCommand, Track};
+use sustain_app_runtime::{ApplicationCommand, NowPlaying, PlaybackCommand, Track, TrackId};
 
 mod model;
 mod progress_hit_area;
@@ -33,6 +34,23 @@ mod progress_hit_area;
 /// — applied via the static stylesheet — intact for the no-artwork
 /// state without any extra removal step.
 const ARTWORK_DOMINANT_COLOR_CLASS: &str = "now-playing-artwork-dominant";
+
+/// CSS class added to the artwork box while it sits in the missing
+/// state and is therefore clickable. Lets the stylesheet shift the
+/// cursor and apply a hover tint without the now-playing module
+/// reaching for runtime cursor APIs.
+const ARTWORK_CLICKABLE_CLASS: &str = "now-playing-artwork-clickable";
+
+const ARTWORK_INNER_STACK_PRESENT: &str = "present";
+const ARTWORK_INNER_STACK_MISSING: &str = "missing";
+const ARTWORK_INNER_STACK_FETCHING: &str = "fetching";
+
+/// Icon shown in the inner stack's "missing" page. Standard freedesktop
+/// symbolic icon name; falls back gracefully on systems with a
+/// different theme.
+const ARTWORK_MISSING_ICON_NAME: &str = "image-missing-symbolic";
+
+const ARTWORK_MISSING_TOOLTIP: &str = "Fetch artwork";
 
 #[derive(Clone)]
 pub(crate) struct NowPlayingView {
@@ -49,7 +67,13 @@ pub(crate) struct NowPlayingView {
     repeat_icon: gtk::Image,
     repeat_button: gtk::Button,
     artwork_box: gtk::Box,
+    /// Inner stack of three pages — `present` (the artwork itself),
+    /// `missing` (the click-to-fetch icon), `fetching` (the spinner).
+    /// Switching pages keeps the tile geometry stable even while the
+    /// content swaps in and out.
+    artwork_inner_stack: gtk::Stack,
     artwork_image: gtk::Image,
+    artwork_spinner: gtk::Spinner,
     artwork_loader: ArtworkLoader,
     /// Last absolute path passed to the artwork loader, used to avoid
     /// re-issuing a request when `refresh()` runs on the same track
@@ -65,6 +89,11 @@ pub(crate) struct NowPlayingView {
     /// once on the display at construction and stays for the window's
     /// lifetime.
     artwork_color_provider: gtk::CssProvider,
+    /// Track for which a remote artwork fetch is currently in flight.
+    /// Used to show the spinner on the right tile (even across track
+    /// switches mid-fetch) and to make additional clicks during the
+    /// fetch idempotent.
+    pending_fetch_track_id: Rc<Cell<Option<TrackId>>>,
     duration: Rc<Cell<Duration>>,
 }
 
@@ -107,6 +136,7 @@ impl NowPlayingView {
         runtime: SharedRuntime,
         command_controller: SharedCommandController,
         artwork_loader: ArtworkLoader,
+        status_bar: StatusBar,
     ) -> Self {
         let area = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         area.add_css_class("now-playing-area");
@@ -126,10 +156,30 @@ impl NowPlayingView {
         artwork_image.set_pixel_size(TITLEBAR_HEIGHT);
         artwork_image.set_halign(gtk::Align::Fill);
         artwork_image.set_valign(gtk::Align::Fill);
-        artwork_image.set_visible(false);
-        artwork_box.append(&artwork_image);
+
+        let artwork_missing_icon = gtk::Image::from_icon_name(ARTWORK_MISSING_ICON_NAME);
+        artwork_missing_icon.add_css_class("now-playing-artwork-missing-icon");
+        artwork_missing_icon.set_pixel_size(TITLEBAR_HEIGHT / 2);
+        artwork_missing_icon.set_halign(gtk::Align::Center);
+        artwork_missing_icon.set_valign(gtk::Align::Center);
+
+        let artwork_spinner = gtk::Spinner::new();
+        artwork_spinner.add_css_class("now-playing-artwork-spinner");
+        artwork_spinner.set_halign(gtk::Align::Center);
+        artwork_spinner.set_valign(gtk::Align::Center);
+
+        let artwork_inner_stack = gtk::Stack::new();
+        artwork_inner_stack.set_hexpand(true);
+        artwork_inner_stack.set_vexpand(true);
+        artwork_inner_stack.add_named(&artwork_image, Some(ARTWORK_INNER_STACK_PRESENT));
+        artwork_inner_stack.add_named(&artwork_missing_icon, Some(ARTWORK_INNER_STACK_MISSING));
+        artwork_inner_stack.add_named(&artwork_spinner, Some(ARTWORK_INNER_STACK_FETCHING));
+        artwork_inner_stack.set_visible_child_name(ARTWORK_INNER_STACK_MISSING);
+        artwork_box.append(&artwork_inner_stack);
+
         let artwork_path: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
         let artwork_color_provider = install_artwork_color_provider();
+        let pending_fetch_track_id: Rc<Cell<Option<TrackId>>> = Rc::new(Cell::new(None));
 
         let details = gtk::Box::new(gtk::Orientation::Vertical, 0);
         details.set_hexpand(true);
@@ -193,17 +243,38 @@ impl NowPlayingView {
             repeat_icon: repeat.icon,
             repeat_button: repeat.button,
             artwork_box,
+            artwork_inner_stack,
             artwork_image,
+            artwork_spinner,
             artwork_loader,
             artwork_path,
             artwork_generation: Rc::new(Cell::new(0)),
             artwork_color_provider,
+            pending_fetch_track_id,
             duration,
         };
-        install_playback_option_controls(&view, command_controller);
+        install_playback_option_controls(&view, command_controller.clone());
+        install_artwork_click_handler(&view, command_controller, status_bar);
         view.refresh(&runtime.borrow().now_playing());
         install_refresh_timer(&view, runtime);
         view
+    }
+
+    /// Called by the result consumer when a remote artwork fetch
+    /// finishes. Clears the pending-fetch state if this is the track
+    /// we were waiting on, and resets the tracked artwork path so
+    /// the next refresh re-evaluates from the (now-primed or
+    /// invalidated) cache instead of short-circuiting on
+    /// "same track, same path". Without that reset the freshly
+    /// primed cache entry would never be drawn until something else
+    /// caused a track-change refresh.
+    pub(crate) fn notify_artwork_fetch_complete(&self, track_id: TrackId) {
+        if self.pending_fetch_track_id.get() == Some(track_id) {
+            self.pending_fetch_track_id.set(None);
+        }
+        if self.runtime.borrow().playback_queue_current_track_id() == Some(track_id) {
+            *self.artwork_path.borrow_mut() = None;
+        }
     }
 
     pub(crate) fn widget(&self) -> gtk::Box {
@@ -213,7 +284,14 @@ impl NowPlayingView {
     fn sync_artwork(&self, track: Option<&Track>) {
         let new_source = track.and_then(|track| self.artwork_source(track));
         let new_path = new_source.as_ref().map(absolute_path_of);
-        if *self.artwork_path.borrow() == new_path {
+        let track_id = track.map(|track| track.id);
+        let same_track = *self.artwork_path.borrow() == new_path;
+        if same_track {
+            // Geometry hasn't changed — still re-apply the visible-state
+            // because a fetch result may have arrived (cache primed
+            // by the result consumer) or completed (pending cleared)
+            // without changing the underlying source path.
+            self.apply_artwork_state(track_id, new_source.as_ref());
             return;
         }
         *self.artwork_path.borrow_mut() = new_path;
@@ -228,6 +306,7 @@ impl NowPlayingView {
 
         let Some(source) = new_source else {
             self.apply_decoded_artwork(&DecodedArtwork::default());
+            self.apply_artwork_state(track_id, None);
             return;
         };
 
@@ -237,6 +316,7 @@ impl NowPlayingView {
         // the async loader.
         if let Some(decoded) = self.artwork_loader.cached(&source) {
             self.apply_decoded_artwork(&decoded);
+            self.apply_artwork_state(track_id, Some(&source));
             return;
         }
 
@@ -244,8 +324,11 @@ impl NowPlayingView {
         // stale dominant color from the previous track doesn't linger
         // in the gap before the new palette arrives.
         self.apply_decoded_artwork(&DecodedArtwork::default());
+        self.apply_artwork_state(track_id, Some(&source));
 
         let view = self.clone();
+        let source_for_callback = source.clone();
+        let track_id_for_callback = track_id;
         self.artwork_loader.request(
             source,
             Box::new(move |decoded| {
@@ -253,8 +336,108 @@ impl NowPlayingView {
                     return;
                 }
                 view.apply_decoded_artwork(&decoded);
+                view.apply_artwork_state(track_id_for_callback, Some(&source_for_callback));
             }),
         );
+    }
+
+    /// Pick the inner stack page and clickable affordance based on
+    /// what we currently know about the track's artwork. Called both
+    /// after the synchronous cache check and after the async loader
+    /// callback lands.
+    fn apply_artwork_state(&self, track_id: Option<TrackId>, source: Option<&ArtworkSource>) {
+        let pending = self.pending_fetch_track_id.get();
+        let is_fetching = match (track_id, pending) {
+            (Some(track_id), Some(pending)) => track_id == pending,
+            _ => false,
+        };
+        if is_fetching {
+            self.set_artwork_inner_page(ARTWORK_INNER_STACK_FETCHING);
+            return;
+        }
+        let has_artwork = source
+            .and_then(|source| self.artwork_loader.cached(source))
+            .and_then(|decoded| {
+                decoded
+                    .tile_texture
+                    .as_ref()
+                    .or(decoded.detail_texture.as_ref())
+                    .map(|_| ())
+            })
+            .is_some();
+        if has_artwork {
+            self.set_artwork_inner_page(ARTWORK_INNER_STACK_PRESENT);
+        } else {
+            self.set_artwork_inner_page(ARTWORK_INNER_STACK_MISSING);
+        }
+    }
+
+    fn set_artwork_inner_page(&self, name: &'static str) {
+        self.artwork_inner_stack.set_visible_child_name(name);
+        self.artwork_spinner
+            .set_spinning(name == ARTWORK_INNER_STACK_FETCHING);
+        if name == ARTWORK_INNER_STACK_MISSING {
+            self.artwork_box.add_css_class(ARTWORK_CLICKABLE_CLASS);
+            self.artwork_box
+                .set_tooltip_text(Some(ARTWORK_MISSING_TOOLTIP));
+            // GTK4's CSS `cursor` property is honoured inconsistently
+            // across distributions, so set the cursor on the widget
+            // directly. Falls back to the parent's cursor when the
+            // named cursor isn't available on the active theme.
+            let cursor = gdk::Cursor::from_name("pointer", None);
+            self.artwork_box.set_cursor(cursor.as_ref());
+        } else {
+            self.artwork_box.remove_css_class(ARTWORK_CLICKABLE_CLASS);
+            self.artwork_box.set_tooltip_text(None);
+            self.artwork_box.set_cursor(None);
+        }
+    }
+
+    /// Click handler entry point. Returns true if a fetch was
+    /// dispatched (so the caller knows to refresh into the spinner
+    /// state); false if the click was ignored (no current track, no
+    /// fetch path, or another fetch already in flight for this
+    /// track).
+    fn handle_artwork_click(
+        &self,
+        command_controller: &SharedCommandController,
+        status_bar: &StatusBar,
+    ) -> bool {
+        // We only act when the missing-state icon is visible. Any
+        // other state means there is artwork to display or a fetch
+        // is already running — clicks become no-ops in both cases.
+        if self.artwork_inner_stack.visible_child_name().as_deref()
+            != Some(ARTWORK_INNER_STACK_MISSING)
+        {
+            return false;
+        }
+        let Some(track_id) = self.runtime.borrow().playback_queue_current_track_id() else {
+            return false;
+        };
+        // PLAN: "The click is idempotent: further clicks while a fetch
+        // is in flight do nothing." We additionally treat a click as
+        // idempotent if any other track is being fetched for, because
+        // the worker is single-slot and we don't want to enqueue
+        // background work the user has no surface for.
+        if self.pending_fetch_track_id.get().is_some() {
+            return false;
+        }
+        if !command_controller.dispatch_succeeded(ApplicationCommand::FetchArtwork { track_id }) {
+            // Dispatch already surfaced an error in the status bar
+            // (e.g. ArtworkFetchingUnavailable). Leave the tile in
+            // the missing state so the user can retry once whatever
+            // blocked the call is resolved.
+            return false;
+        }
+        self.pending_fetch_track_id.set(Some(track_id));
+        self.set_artwork_inner_page(ARTWORK_INNER_STACK_FETCHING);
+        // Mirror the tile-local spinner with a bottom-right status
+        // message so an in-flight fetch is noticeable even when the
+        // user isn't looking at the artwork tile. The result consumer
+        // in `main_window` later replaces this with the outcome
+        // message.
+        status_bar.show_task_message("Fetching artwork…", true);
+        true
     }
 
     fn artwork_source(&self, track: &Track) -> Option<ArtworkSource> {
@@ -269,6 +452,10 @@ impl NowPlayingView {
     }
 
     fn apply_decoded_artwork(&self, decoded: &DecodedArtwork) {
+        // Page selection is decided by `apply_artwork_state`; this
+        // method only loads the texture (or clears it). Keeping the
+        // two concerns separate avoids flicker when a callback lands
+        // after a fetch result has primed the cache.
         let texture = decoded
             .tile_texture
             .as_ref()
@@ -276,11 +463,9 @@ impl NowPlayingView {
         match texture {
             Some(texture) => {
                 self.artwork_image.set_paintable(Some(texture));
-                self.artwork_image.set_visible(true);
             }
             None => {
                 self.artwork_image.set_paintable(None::<&gdk::Paintable>);
-                self.artwork_image.set_visible(false);
             }
         }
         self.apply_dominant_color(decoded.palette);
@@ -401,6 +586,25 @@ fn install_playback_option_controls(
             );
         }
     });
+}
+
+fn install_artwork_click_handler(
+    view: &NowPlayingView,
+    command_controller: SharedCommandController,
+    status_bar: StatusBar,
+) {
+    let click = gtk::GestureClick::new();
+    click.set_button(gtk::gdk::BUTTON_PRIMARY);
+    let view_for_click = view.clone();
+    click.connect_released(move |gesture, _n_press, _x, _y| {
+        // Consume the click so it does not propagate to ancestors
+        // (e.g. the titlebar drag-to-move handler). Without this,
+        // clicking the artwork could also start a window drag in
+        // some compositors.
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        let _ = view_for_click.handle_artwork_click(&command_controller, &status_bar);
+    });
+    view.artwork_box.add_controller(click);
 }
 
 fn install_refresh_timer(view: &NowPlayingView, runtime: SharedRuntime) {

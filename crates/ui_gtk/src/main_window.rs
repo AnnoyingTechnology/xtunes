@@ -17,10 +17,11 @@ use sustain_app_runtime::{
 };
 
 use super::{
-    ALBUMS_VIEW, APP_ID, ApplicationCommand, ApplicationRuntime, LibraryChangedCallback,
-    LibraryChangedHolder, MetadataWriteResultReceiver, MprisCommandReceiver, PLAYLISTS_VIEW,
-    PlaybackChangedCallback, SONGS_VIEW, SharedMprisService, SharedRuntime, ShowAlbumAction,
-    ShowAlbumHolder, TrackRowChangedCallback, TrackRowChangedHolder,
+    ALBUMS_VIEW, APP_ID, ApplicationCommand, ApplicationRuntime, ArtworkFetchResultReceiver,
+    LibraryChangedCallback, LibraryChangedHolder, MetadataWriteResultReceiver,
+    MprisCommandReceiver, PLAYLISTS_VIEW, PlaybackChangedCallback, SONGS_VIEW, SharedMprisService,
+    SharedRuntime, ShowAlbumAction, ShowAlbumHolder, TrackRowChangedCallback,
+    TrackRowChangedHolder,
     accent::install_accent_css,
     albums::AlbumsView,
     app_css::install_app_css,
@@ -68,6 +69,7 @@ pub(crate) fn build_main_window(
     mpris_service: Option<SharedMprisService>,
     mpris_command_rx: Option<MprisCommandReceiver>,
     metadata_write_result_rx: Option<MetadataWriteResultReceiver>,
+    artwork_fetch_result_rx: Option<ArtworkFetchResultReceiver>,
 ) -> gtk::ApplicationWindow {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
@@ -116,6 +118,7 @@ pub(crate) fn build_main_window(
         runtime.clone(),
         command_controller.clone(),
         artwork_loader.clone(),
+        status_bar.clone(),
     );
     let initial_volume = runtime.borrow().settings().playback.volume;
     let titlebar = build_titlebar(now_playing.widget(), initial_volume);
@@ -259,6 +262,16 @@ pub(crate) fn build_main_window(
         status_bar.clone(),
         track_row_changed_holder.clone(),
     );
+    install_artwork_fetch_result_consumer(ArtworkFetchResultConsumerContext {
+        receiver: artwork_fetch_result_rx,
+        runtime: runtime.clone(),
+        command_controller: command_controller.clone(),
+        artwork_loader: artwork_loader.clone(),
+        now_playing: now_playing.clone(),
+        playback_changed: playback_changed.clone(),
+        status_bar: status_bar.clone(),
+        track_row_changed_holder: track_row_changed_holder.clone(),
+    });
     sidebar.set_selection_changed(sidebar_selection_changed_callback(
         &runtime,
         &playlists_table,
@@ -1217,6 +1230,105 @@ fn install_metadata_write_result_consumer(
             }
         }
     });
+}
+
+/// Drains [`ArtworkFetchResult`](sustain_app_runtime::ArtworkFetchResult)s
+/// posted by the background artwork fetcher.
+///
+/// On a successful fetch, the cache is invalidated, the freshly-
+/// decoded bytes are primed into the loader's in-memory cache (so
+/// the imminent now-playing refresh paints the new cover without
+/// waiting for the async tag write), and a follow-up `SetArtwork`
+/// command persists the bytes through the standard tag-writing
+/// path. Failure modes surface a non-modal status-bar message.
+/// Every outcome clears the now-playing tile's pending-fetch state
+/// and triggers a `playback_changed` refresh so the tile and every
+/// downstream view (Albums grid, track-table cover columns) settles
+/// on the new visual state.
+struct ArtworkFetchResultConsumerContext {
+    receiver: Option<ArtworkFetchResultReceiver>,
+    runtime: SharedRuntime,
+    command_controller: SharedCommandController,
+    artwork_loader: ArtworkLoader,
+    now_playing: crate::now_playing::NowPlayingView,
+    playback_changed: PlaybackChangedCallback,
+    status_bar: StatusBar,
+    track_row_changed_holder: TrackRowChangedHolder,
+}
+
+fn install_artwork_fetch_result_consumer(context: ArtworkFetchResultConsumerContext) {
+    let ArtworkFetchResultConsumerContext {
+        receiver,
+        runtime,
+        command_controller,
+        artwork_loader,
+        now_playing,
+        playback_changed,
+        status_bar,
+        track_row_changed_holder,
+    } = context;
+    let Some(receiver) = receiver else {
+        return;
+    };
+    glib::MainContext::default().spawn_local(async move {
+        while let Ok(result) = receiver.recv().await {
+            use sustain_app_runtime::ArtworkFetchOutcome;
+            match result.outcome {
+                ArtworkFetchOutcome::Fetched(bytes) => {
+                    if let Some(source) = artwork_source_for_track(&runtime, result.track_id) {
+                        // Drop the existing in-memory + disk-cache
+                        // entry, then prime the in-memory entry with
+                        // the freshly fetched bytes. The disk-cache
+                        // row is left dropped: the next miss after
+                        // the metadata writer lands the tag write
+                        // will rebuild it from the file, with the
+                        // correct post-write fingerprint.
+                        artwork_loader.invalidate(&source);
+                        artwork_loader.prime(source, bytes.clone());
+                    }
+                    let _ = command_controller.dispatch(
+                        sustain_app_runtime::ApplicationCommand::SetArtwork {
+                            track_id: result.track_id,
+                            artwork: Some(bytes),
+                        },
+                    );
+                    status_bar.show_task_message("Artwork updated.", false);
+                }
+                ArtworkFetchOutcome::NoMatch => {
+                    status_bar.show_task_message("No cover art found for this track.", false);
+                }
+                ArtworkFetchOutcome::Failed => {
+                    status_bar.show_task_message("Could not fetch cover art.", false);
+                }
+            }
+            now_playing.notify_artwork_fetch_complete(result.track_id);
+            playback_changed();
+            if let Some(callback) = track_row_changed_holder.borrow().as_ref() {
+                callback(result.track_id);
+            }
+        }
+    });
+}
+
+/// Resolve the [`ArtworkSource`](crate::artwork_loader::ArtworkSource)
+/// for a track in the current library. Returns `None` when the track
+/// no longer exists (removed mid-flight) or no library root is
+/// configured — both safe states for the caller to treat as
+/// "nothing to invalidate".
+fn artwork_source_for_track(
+    runtime: &SharedRuntime,
+    track_id: TrackId,
+) -> Option<crate::artwork_loader::ArtworkSource> {
+    let runtime = runtime.borrow();
+    let track = runtime
+        .library_tracks()
+        .iter()
+        .find(|track| track.id == track_id)?;
+    let absolute = runtime.absolute_track_path(track)?;
+    let cache_path = track.location.path().to_path_buf();
+    Some(crate::artwork_loader::ArtworkSource::embedded_track(
+        cache_path, absolute,
+    ))
 }
 
 fn handle_mpris_command(

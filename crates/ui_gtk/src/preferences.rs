@@ -508,6 +508,9 @@ fn scan_error_text(error: ApplicationRuntimeError) -> &'static str {
         ApplicationRuntimeError::SettingsLoadFailed
         | ApplicationRuntimeError::SettingsSaveFailed => "The library path could not be saved.",
         ApplicationRuntimeError::TrackTrashFailed => "The track could not be moved to trash.",
+        ApplicationRuntimeError::ArtworkFetchingUnavailable => {
+            "Remote artwork retrieval is not available in this build."
+        }
         ApplicationRuntimeError::UnsupportedCommand(_) => "This action is not available yet.",
     }
 }

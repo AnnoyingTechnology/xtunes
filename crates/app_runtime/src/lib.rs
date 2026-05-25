@@ -25,6 +25,10 @@ pub use sustain_domain::{
 };
 use sustain_library_store::LibraryStore;
 pub use sustain_metadata::MetadataService;
+pub use sustain_metadata_remote::{
+    AudioFingerprint, FetchedArtwork, RemoteError, RemoteMetadataService, RemoteResult, TrackMatch,
+    TrackMatchSource, TrackQuery,
+};
 use sustain_playback::PlaybackService;
 pub use sustain_playback::TrackEndedCallback;
 pub use sustain_search::{
@@ -32,6 +36,7 @@ pub use sustain_search::{
 };
 use sustain_settings::SettingsStore;
 
+pub(crate) mod artwork_fetcher;
 mod commands;
 mod library_mutation;
 mod library_scan;
@@ -43,6 +48,7 @@ mod playlist_items;
 mod playlists;
 mod smart_playlists;
 
+pub use artwork_fetcher::{ArtworkFetchOutcome, ArtworkFetchResult};
 pub use library_scan::run_library_scan_task;
 pub use managed_library::{run_library_consolidation_task, run_library_import_task};
 pub use metadata_writer::{MetadataWriteKind, MetadataWriteOutcome, MetadataWriteResult};
@@ -51,6 +57,7 @@ pub type ApplicationRuntimeResult<T> = Result<T, ApplicationRuntimeError>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ApplicationRuntimeError {
+    ArtworkFetchingUnavailable,
     LibraryPathUnavailable,
     LibraryConsolidationFailed,
     LibraryImportFailed,
@@ -199,6 +206,9 @@ pub struct ApplicationRuntime {
     library_consolidation_cancellation: Option<Arc<AtomicBool>>,
     metadata_writer: Option<metadata_writer::MetadataWriter>,
     metadata_write_result_sink: Option<async_channel::Sender<MetadataWriteResult>>,
+    remote_metadata_service: Option<Arc<dyn RemoteMetadataService>>,
+    artwork_fetcher: Option<artwork_fetcher::ArtworkFetcher>,
+    artwork_fetch_result_sink: Option<async_channel::Sender<ArtworkFetchResult>>,
 }
 
 impl ApplicationRuntime {
@@ -222,6 +232,9 @@ impl ApplicationRuntime {
             library_consolidation_cancellation: None,
             metadata_writer: None,
             metadata_write_result_sink: None,
+            remote_metadata_service: None,
+            artwork_fetcher: None,
+            artwork_fetch_result_sink: None,
         }
     }
 
@@ -251,6 +264,9 @@ impl ApplicationRuntime {
             library_consolidation_cancellation: None,
             metadata_writer: None,
             metadata_write_result_sink: None,
+            remote_metadata_service: None,
+            artwork_fetcher: None,
+            artwork_fetch_result_sink: None,
         })
     }
 
@@ -328,6 +344,64 @@ impl ApplicationRuntime {
         if let Some(writer) = self.metadata_writer.take() {
             writer.shutdown();
         }
+    }
+
+    /// Install a networked metadata service. The service is consumed
+    /// by the artwork fetcher (and, in time, by tag-backfill and
+    /// fingerprint-identification pipelines). Calling this without
+    /// also calling [`Self::start_artwork_fetcher`] simply stores
+    /// the handle; submissions return
+    /// [`ApplicationRuntimeError::ArtworkFetchingUnavailable`] until
+    /// the worker is started.
+    pub fn set_remote_metadata_service(&mut self, service: Arc<dyn RemoteMetadataService>) {
+        self.remote_metadata_service = Some(service);
+    }
+
+    pub fn remote_metadata_service(&self) -> Option<Arc<dyn RemoteMetadataService>> {
+        self.remote_metadata_service.clone()
+    }
+
+    /// Spin up the artwork-fetcher worker against the previously
+    /// installed remote metadata service. Returns
+    /// [`ApplicationRuntimeError::ArtworkFetchingUnavailable`] if no
+    /// service has been set — that state is legitimate (a build
+    /// without a remote service still has to start).
+    pub fn start_artwork_fetcher(&mut self) -> ApplicationRuntimeResult<()> {
+        let service = self
+            .remote_metadata_service
+            .clone()
+            .ok_or(ApplicationRuntimeError::ArtworkFetchingUnavailable)?;
+        self.artwork_fetcher = Some(artwork_fetcher::ArtworkFetcher::start(service));
+        Ok(())
+    }
+
+    /// Register the sink that receives per-fetch outcomes. The UI
+    /// layer typically holds the matching receiver and consumes from
+    /// the GTK main loop, dispatching `SetArtwork` for successful
+    /// outcomes and surfacing a status-bar message otherwise.
+    pub fn set_artwork_fetch_result_sink(
+        &mut self,
+        sink: async_channel::Sender<ArtworkFetchResult>,
+    ) {
+        self.artwork_fetch_result_sink = Some(sink);
+    }
+
+    /// Drop the fetcher's sender and join its worker. Safe at app
+    /// shutdown; idempotent across multiple calls.
+    pub fn shutdown_artwork_fetcher(&mut self) {
+        if let Some(fetcher) = self.artwork_fetcher.take() {
+            fetcher.shutdown();
+        }
+    }
+
+    pub(crate) fn artwork_fetcher(&self) -> Option<&artwork_fetcher::ArtworkFetcher> {
+        self.artwork_fetcher.as_ref()
+    }
+
+    pub(crate) fn artwork_fetch_result_sink(
+        &self,
+    ) -> Option<async_channel::Sender<ArtworkFetchResult>> {
+        self.artwork_fetch_result_sink.clone()
     }
 
     pub(crate) fn metadata_writer(&self) -> Option<&metadata_writer::MetadataWriter> {
@@ -711,6 +785,10 @@ mod tests {
             ),
             (
                 ApplicationCommand::MoveTrackToTrash { track_id },
+                Err(ApplicationRuntimeError::TrackUnavailable),
+            ),
+            (
+                ApplicationCommand::FetchArtwork { track_id },
                 Err(ApplicationRuntimeError::TrackUnavailable),
             ),
             (

@@ -5,7 +5,8 @@ use sustain_domain::{LibraryManagementMode, MetadataChange, Rating, TrackId};
 
 use crate::MetadataWriteKind;
 use crate::{
-    ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult,
+    ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult, ArtworkFetchResult,
+    artwork_fetcher::{ArtworkFetchRequest, query_from_metadata},
     managed_library::{metadata_change_affects_managed_path, save_managed_metadata_update},
     metadata_writer::{
         MetadataWriteJob, MetadataWriteOutcome, MetadataWriteRequest, MetadataWriteResult,
@@ -155,6 +156,40 @@ impl ApplicationRuntime {
             MetadataWriteJob::Artwork { path, artwork },
         );
 
+        Ok(())
+    }
+
+    /// Submit a remote artwork fetch for `track_id`. Returns
+    /// `Err(ArtworkFetchingUnavailable)` if no remote service is
+    /// installed or the fetcher worker was never started — both are
+    /// build-time conditions, not runtime ones, so the UI can decide
+    /// up front whether to expose the click-to-fetch affordance.
+    ///
+    /// The fetch itself is asynchronous: the worker runs the network
+    /// roundtrip and posts an [`ArtworkFetchResult`] through the
+    /// runtime's result sink. The UI consumer dispatches a follow-up
+    /// `SetArtwork` command on success to persist via the existing
+    /// tag-writing path.
+    pub(super) fn fetch_artwork(&self, track_id: TrackId) -> ApplicationRuntimeResult<()> {
+        self.ensure_no_background_library_task()?;
+        let track = self
+            .library_tracks
+            .iter()
+            .find(|track| track.id == track_id && !track.location.is_missing())
+            .ok_or(ApplicationRuntimeError::TrackUnavailable)?;
+        let fetcher = self
+            .artwork_fetcher()
+            .ok_or(ApplicationRuntimeError::ArtworkFetchingUnavailable)?;
+
+        let query = query_from_metadata(&track.metadata);
+        let sink = self.artwork_fetch_result_sink();
+        let completion: crate::artwork_fetcher::ArtworkFetchCompletionCallback =
+            Box::new(move |outcome| {
+                if let Some(sink) = sink {
+                    let _ = sink.try_send(ArtworkFetchResult { track_id, outcome });
+                }
+            });
+        fetcher.submit(ArtworkFetchRequest { query, completion });
         Ok(())
     }
 

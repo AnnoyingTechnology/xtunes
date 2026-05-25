@@ -45,6 +45,14 @@
     min-width: 72px;
 }
 
+.now-playing-artwork-missing-icon {
+    color: alpha(@theme_fg_color, 0.48);
+}
+
+.now-playing-artwork-clickable:hover .now-playing-artwork-missing-icon {
+    color: alpha(@theme_fg_color, 0.78);
+}
+
 .now-playing-title {
     font-weight: bold;
 }

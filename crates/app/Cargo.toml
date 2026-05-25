@@ -17,6 +17,7 @@ path = "src/main.rs"
 sustain-app-runtime = { path = "../app_runtime" }
 sustain-library-store = { path = "../library_store" }
 sustain-metadata = { path = "../metadata" }
+sustain-metadata-remote = { path = "../metadata_remote" }
 sustain-playback = { path = "../playback" }
 sustain-settings = { path = "../settings" }
 sustain-ui-gtk = { path = "../ui_gtk" }

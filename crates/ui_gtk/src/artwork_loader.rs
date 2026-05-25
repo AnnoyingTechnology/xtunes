@@ -257,6 +257,54 @@ impl ArtworkLoader {
         }
     }
 
+    /// Drop the cached entry (in-memory and on-disk) for `source`.
+    ///
+    /// Used after a write changes the underlying artwork — e.g. when
+    /// the user accepts a fetched cover for the now-playing track. A
+    /// fresh request after invalidation re-reads the source through
+    /// the worker pool, so any view holding a stale texture redraws
+    /// with the new bytes the next time it asks for them.
+    ///
+    /// We do not proactively repaint anything from here: views that
+    /// care about the change are expected to re-issue their request
+    /// (typically via their existing track-row-changed callback).
+    /// That keeps the invalidation hook narrowly responsible and
+    /// avoids reaching across the UI tree from a model-layer cache.
+    pub(crate) fn invalidate(&self, source: &ArtworkSource) {
+        // Forget the decoded value, drop any callbacks queued against
+        // it, and tell the on-disk cache to evict the matching row.
+        // The order matters: invalidate the in-memory entry first so
+        // a callback fired between the disk-cache drop and the
+        // in-memory drop cannot reinstate the stale entry.
+        self.inner.cache.borrow_mut().remove(source);
+        let _ = self.inner.pending.borrow_mut().remove(source);
+        if let Some(disk_cache) = self.inner.repository.disk_cache() {
+            disk_cache.delete(source);
+        }
+    }
+
+    /// Insert decoded artwork built from already-in-memory bytes.
+    ///
+    /// Used after a remote fetch lands: the tag-write that persists
+    /// the bytes is asynchronous, so a naive "invalidate then
+    /// re-request" path would race the writer and briefly display
+    /// the missing-artwork state. Priming the in-memory cache
+    /// directly with the freshly-decoded artwork makes the new cover
+    /// visible on the very next [`Self::cached`] / [`Self::request`]
+    /// call without depending on disk write ordering.
+    ///
+    /// Only the in-memory cache is touched: the disk cache row was
+    /// dropped by [`Self::invalidate`] and will be repopulated by
+    /// the next miss-driven worker load once the tag write has
+    /// landed and the file fingerprint has updated.
+    pub(crate) fn prime(&self, source: ArtworkSource, bytes: Vec<u8>) {
+        let decoded = decode_artwork(Some(bytes));
+        self.inner
+            .cache
+            .borrow_mut()
+            .insert(source, decoded.artwork);
+    }
+
     /// Synchronously read and cache `source`. Used by the album detail
     /// panel when the user clicks an album whose tile hasn't been
     /// resolved yet — the panel needs the palette to render at all,
@@ -354,6 +402,10 @@ impl ArtworkRepository {
             metadata_service,
             disk_cache: ArtworkDiskCache::open(),
         }
+    }
+
+    fn disk_cache(&self) -> Option<&ArtworkDiskCache> {
+        self.disk_cache.as_ref()
     }
 
     fn load(&self, source: &ArtworkSource) -> DecodedArtwork {
@@ -490,6 +542,21 @@ impl ArtworkDiskCache {
                 .flatten()?
         };
         cached.decode()
+    }
+
+    fn delete(&self, source: &ArtworkSource) {
+        let (source_kind, source_key) = source.cache_key();
+        let Ok(connection) = self.connection.lock() else {
+            return;
+        };
+        let _ = connection.execute(
+            r#"
+            DELETE FROM artwork_cache
+             WHERE source_kind = ?1
+               AND source_key = ?2
+            "#,
+            params![source_kind, source_key],
+        );
     }
 
     fn store(

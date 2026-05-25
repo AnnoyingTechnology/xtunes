@@ -105,6 +105,21 @@ impl StatusBar {
         self.command_label.set_text("");
         self.command_label.set_visible(false);
     }
+
+    /// Display a transient background-activity message in the
+    /// bottom-right slot (alongside the rotating sync icon used by
+    /// library scans and imports). Used for one-shot background
+    /// activities that aren't modelled as a [`BackgroundTaskStatus`]
+    /// because they don't block the library — currently artwork
+    /// fetches. The spinner toggle is exposed so the caller can opt
+    /// in to "task in progress" UX or just leave it static for an
+    /// outcome message.
+    pub(crate) fn show_task_message(&self, message: &str, with_spinner: bool) {
+        self.task_label.set_text(message);
+        self.task_spinner.set_visible(with_spinner);
+        self.task_spinner.set_spinning(with_spinner);
+        self.task_box.set_visible(true);
+    }
 }
 
 fn task_status_text(status: &BackgroundTaskStatus) -> String {
@@ -198,6 +213,9 @@ pub(crate) fn runtime_error_text(error: &ApplicationRuntimeError) -> &'static st
         | ApplicationRuntimeError::PlaybackServiceUnavailable
         | ApplicationRuntimeError::TrackUnavailable => "Playback is not available.",
         ApplicationRuntimeError::TrackTrashFailed => "The track could not be moved to trash.",
+        ApplicationRuntimeError::ArtworkFetchingUnavailable => {
+            "Remote artwork retrieval is not available in this build."
+        }
         ApplicationRuntimeError::UnsupportedCommand(_) => "This action is not available yet.",
     }
 }

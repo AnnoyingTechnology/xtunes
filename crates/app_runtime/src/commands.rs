@@ -135,6 +135,9 @@ impl ApplicationRuntime {
             ApplicationCommand::SetArtwork { track_id, artwork } => {
                 self.set_artwork(track_id, artwork)?;
             }
+            ApplicationCommand::FetchArtwork { track_id } => {
+                self.fetch_artwork(track_id)?;
+            }
             ApplicationCommand::AddExternalLibraryItems { paths } => {
                 self.add_external_library_items(paths)?;
             }
