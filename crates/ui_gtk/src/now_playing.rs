@@ -609,8 +609,19 @@ fn install_artwork_click_handler(
 
 fn install_refresh_timer(view: &NowPlayingView, runtime: SharedRuntime) {
     let view = view.clone();
+    // The 1 Hz cadence here is doing double duty: it drives the
+    // now-playing UI refresh (seek bar, time labels, MPRIS-adjacent
+    // state) AND it is the heartbeat that lets the runtime accumulate
+    // listened time toward the play threshold. The two run together so
+    // that an attempt to disable one (e.g. by detaching the now-playing
+    // panel) does not silently break play-count tracking.
     glib::timeout_add_seconds_local(1, move || {
-        view.refresh(&runtime.borrow().now_playing());
+        let now_playing = {
+            let mut runtime = runtime.borrow_mut();
+            let _ = runtime.on_playback_tick(std::time::Duration::from_secs(1));
+            runtime.now_playing()
+        };
+        view.refresh(&now_playing);
         glib::ControlFlow::Continue
     });
 }

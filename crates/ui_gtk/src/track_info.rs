@@ -21,8 +21,10 @@ use file_page::build_file_page;
 use lyrics::LyricsPage;
 
 const DIALOG_WIDTH: i32 = 540;
-const COVER_THUMB_SIZE: i32 = 64;
+const COVER_THUMB_SIZE: i32 = 96;
 const ARTWORK_PREVIEW_SIZE: i32 = 320;
+const DIALOG_SIDE_MARGIN: i32 = 18;
+const HEADER_GAP_BELOW: i32 = 14;
 const NUMBER_ENTRY_WIDTH_CHARS: i32 = 5;
 const PAIR_ENTRY_WIDTH_CHARS: i32 = 4;
 
@@ -49,7 +51,7 @@ pub(crate) fn open_track_info_dialog(
 
     let initial_metadata = track.metadata.clone();
     let initial_rating = track.rating;
-    let initial_play_count = track.statistics.play_count;
+    let initial_statistics = track.statistics.clone();
 
     let window = gtk::Window::builder()
         .title("Get Info")
@@ -61,10 +63,7 @@ pub(crate) fn open_track_info_dialog(
     window.add_css_class("track-info-window");
 
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    outer.set_margin_top(16);
     outer.set_margin_bottom(16);
-    outer.set_margin_start(18);
-    outer.set_margin_end(18);
 
     let artwork_bytes = absolute_path
         .as_deref()
@@ -78,8 +77,10 @@ pub(crate) fn open_track_info_dialog(
     stack.set_hexpand(true);
     stack.set_vhomogeneous(false);
     stack.set_margin_top(12);
+    stack.set_margin_start(DIALOG_SIDE_MARGIN);
+    stack.set_margin_end(DIALOG_SIDE_MARGIN);
 
-    let details = DetailsPage::new(&initial_metadata, initial_rating, initial_play_count);
+    let details = DetailsPage::new(&initial_metadata, initial_rating, &initial_statistics);
     stack.add_titled(&details.widget, Some("details"), "Details");
 
     let artwork = ArtworkPage::new(
@@ -101,12 +102,17 @@ pub(crate) fn open_track_info_dialog(
     let switcher = gtk::StackSwitcher::new();
     switcher.set_stack(Some(&stack));
     switcher.set_halign(gtk::Align::Center);
+    switcher.set_margin_top(HEADER_GAP_BELOW);
+    switcher.set_margin_start(DIALOG_SIDE_MARGIN);
+    switcher.set_margin_end(DIALOG_SIDE_MARGIN);
     outer.append(&switcher);
     outer.append(&stack);
 
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     buttons.set_halign(gtk::Align::End);
     buttons.set_margin_top(14);
+    buttons.set_margin_start(DIALOG_SIDE_MARGIN);
+    buttons.set_margin_end(DIALOG_SIDE_MARGIN);
     let cancel = gtk::Button::with_label("Cancel");
     let ok = gtk::Button::with_label("OK");
     ok.add_css_class("suggested-action");
@@ -191,12 +197,14 @@ struct Header {
 }
 
 fn build_header(track: &Track, artwork_bytes: Option<&[u8]>) -> Header {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 14);
     row.add_css_class("track-info-header");
+    row.set_hexpand(true);
 
     let cover_frame = gtk::Frame::new(None);
     cover_frame.add_css_class("track-info-cover");
     cover_frame.set_size_request(COVER_THUMB_SIZE, COVER_THUMB_SIZE);
+    cover_frame.set_valign(gtk::Align::Center);
     update_artwork_frame(&cover_frame, artwork_bytes, COVER_THUMB_SIZE);
     row.append(&cover_frame);
 

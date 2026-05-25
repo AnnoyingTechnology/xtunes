@@ -75,11 +75,31 @@ Core feature set:
 - settings/preferences
 - playback controls and state
 
-Rating persistence:
+Persistence and tag mirroring:
 
-- ratings must be written to audio file metadata tags IN ADDITION TO the SQLite db
-- support MP3/ID3, Ogg, MP4/M4A, and FLAC rating metadata
-- SQLite may cache ratings for fast UI/search, but file tags are the durable source
+- SQLite is the source of truth for every value that exists in the
+  library: ratings, play count, skip count, last-played, last-skipped,
+  and every editable metadata field. Once a track has been imported,
+  file tags are NOT consulted to override SQLite values for that
+  track, even on rescan. The library wins.
+- File tags are read only as INITIAL VALUES when a track is first
+  added to the library (e.g. its first scan, before any SQLite row
+  exists). After that point, only the SQLite value is authoritative.
+- For metadata that the user edits in Sustain (rating, title, artist,
+  genre, etc.), the new value IS mirrored back to the file's tags as
+  a courtesy to other applications. This applies to MP3/ID3, Ogg,
+  MP4/M4A, and FLAC where a standard tag exists for the field. Do
+  NOT invent custom tags to bridge format gaps.
+- Listening statistics — play count, skip count, last-played,
+  last-skipped — are NEVER written to file tags. iTunes never did
+  either; they live exclusively in the library database. This also
+  avoids touching audio files on every play, which would needlessly
+  rewrite tags during playback.
+- Sustain writes that touch shared tag frames must not clobber data
+  belonging to other tools. For example, writing a rating into POPM
+  must preserve any existing `play_counter` in the same frame, even
+  though Sustain itself does not consume that counter.
+- Artwork is cached separately and is not subject to this policy.
 
 ## Performance
 

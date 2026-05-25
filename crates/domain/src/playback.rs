@@ -9,7 +9,17 @@ use crate::{PlaylistId, TrackId};
 pub enum PlaybackCommand {
     PlayTrack(TrackId),
     PlayPreviousTrack,
+    /// Auto-advance to the next track. Used by the GStreamer EOS callback
+    /// when the current track ends naturally. NOT a user-initiated skip;
+    /// does not affect skip statistics.
     PlayNextTrack,
+    /// User-initiated skip of the currently playing track. Counts as a
+    /// skip (increments `skip_count`, sets `last_skipped_at`) when the
+    /// play threshold has not yet been reached, then advances to the
+    /// next track. Dispatched by the titlebar Next button and any other
+    /// surface where the user is explicitly choosing to abandon the
+    /// current track in favor of the next one (e.g. media-key Next).
+    SkipCurrentTrack,
     EnqueueNext(Vec<TrackId>),
     ToggleShuffle,
     ToggleRepeat,

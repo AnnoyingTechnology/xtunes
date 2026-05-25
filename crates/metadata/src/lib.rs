@@ -301,12 +301,31 @@ impl MetadataService for LoftyMetadataService {
             .primary_tag_mut()
             .ok_or(MetadataError::WriteFailed)?;
 
+        // Preserve any existing POPM play counter when overwriting the
+        // frame with a new rating. Sustain itself never reads or writes
+        // this counter — listening statistics live in SQLite, per the
+        // persistence policy in AGENTS.md — but other applications
+        // (MusicBee, Foobar2000, …) store play counts in the POPM
+        // counter field, and silently zeroing them out on every rating
+        // edit would clobber data that doesn't belong to us.
+        let preserved_counter = tag
+            .ratings()
+            .next()
+            .map(|popularimeter| popularimeter.play_counter)
+            .unwrap_or(0);
+
         if rating == Rating::unrated() {
+            // The high-level Popularimeter API has no representation
+            // for "POPM with rating=0", so transitioning a rated track
+            // to unrated removes the frame entirely. In the rare case
+            // where another tool stored a play counter there, it is
+            // lost. Sustain does not use the counter for its own
+            // accounting, so this only affects external readers.
             let _removed = tag.take(ItemKey::Popularimeter).count();
         } else {
             tag.insert_text(
                 ItemKey::Popularimeter,
-                popularimeter_from_rating(rating).to_string(),
+                popularimeter_from_rating(rating, preserved_counter).to_string(),
             );
         }
 
@@ -538,13 +557,13 @@ fn star_rating_value(rating: StarRating) -> u8 {
     }
 }
 
-fn popularimeter_from_rating(rating: Rating) -> Popularimeter<'static> {
+fn popularimeter_from_rating(rating: Rating, play_counter: u64) -> Popularimeter<'static> {
     match rating.stars() {
-        1 => Popularimeter::musicbee(StarRating::One, 0),
-        2 => Popularimeter::musicbee(StarRating::Two, 0),
-        3 => Popularimeter::musicbee(StarRating::Three, 0),
-        4 => Popularimeter::musicbee(StarRating::Four, 0),
-        5 => Popularimeter::musicbee(StarRating::Five, 0),
+        1 => Popularimeter::musicbee(StarRating::One, play_counter),
+        2 => Popularimeter::musicbee(StarRating::Two, play_counter),
+        3 => Popularimeter::musicbee(StarRating::Three, play_counter),
+        4 => Popularimeter::musicbee(StarRating::Four, play_counter),
+        5 => Popularimeter::musicbee(StarRating::Five, play_counter),
         _ => unreachable!("unrated ratings are removed before conversion"),
     }
 }

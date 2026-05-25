@@ -163,9 +163,14 @@ pub(crate) fn connect_titlebar_playback_controls(
     let command_controller_for_next = command_controller.clone();
     let playback_changed_for_next = playback_changed.clone();
     titlebar.next.connect_clicked(move |_| {
-        if command_controller_for_next
-            .dispatch_succeeded(ApplicationCommand::Playback(PlaybackCommand::PlayNextTrack))
-        {
+        // The Next button is the canonical user-initiated skip surface:
+        // it records a skip on the currently playing track (when the
+        // play threshold has not yet been reached) before advancing.
+        // EOS auto-advance uses PlaybackCommand::PlayNextTrack instead
+        // and never increments skip_count.
+        if command_controller_for_next.dispatch_succeeded(ApplicationCommand::Playback(
+            PlaybackCommand::SkipCurrentTrack,
+        )) {
             playback_changed_for_next();
         }
     });

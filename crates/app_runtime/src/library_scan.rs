@@ -178,37 +178,47 @@ fn tracks_by_path(tracks: Vec<Track>) -> BTreeMap<TrackRelativePath, Track> {
         .collect()
 }
 
+// Reconciles a freshly scanned file with whatever the library already
+// knows. Per the persistence policy in AGENTS.md, SQLite wins over file
+// tags for every value tied to an already-imported track: ratings,
+// play statistics, and every tag-derived metadata field. Audio-stream
+// properties (duration, bitrate, sample rate, channels) and the file
+// size are refreshed from the scan because they describe the bytes on
+// disk, not the user-managed library. For a brand-new file (no
+// existing row) the scanned values seed the initial state.
 fn track_from_scanned_track(
     scanned_track: ScannedTrack,
     existing_track: Option<Track>,
     next_track_id: &mut i64,
 ) -> ApplicationRuntimeResult<Track> {
-    let (id, statistics) = match existing_track {
-        Some(track) => (track.id, track.statistics),
+    match existing_track {
+        Some(mut track) => {
+            track
+                .metadata
+                .refresh_audio_stream_properties_from(&scanned_track.metadata);
+            track.location = TrackLocation::available(scanned_track.relative_path);
+            track.file_size_bytes = scanned_track.file_size_bytes;
+            Ok(track)
+        }
         None => {
             let Some(track_id) = TrackId::new(*next_track_id) else {
                 return Err(ApplicationRuntimeError::LibraryStoreFailed);
             };
             *next_track_id += 1;
-            (
-                track_id,
-                PlayStatistics {
+            Ok(Track {
+                id: track_id,
+                location: TrackLocation::available(scanned_track.relative_path),
+                content_hash: None,
+                metadata: scanned_track.metadata,
+                rating: scanned_track.rating,
+                statistics: PlayStatistics {
                     date_added_at: Some(SystemTime::now()),
                     ..PlayStatistics::default()
                 },
-            )
+                file_size_bytes: scanned_track.file_size_bytes,
+            })
         }
-    };
-
-    Ok(Track {
-        id,
-        location: TrackLocation::available(scanned_track.relative_path),
-        content_hash: None,
-        metadata: scanned_track.metadata,
-        rating: scanned_track.rating,
-        statistics,
-        file_size_bytes: scanned_track.file_size_bytes,
-    })
+    }
 }
 
 pub(super) fn track_with_current_availability(library_path: &Path, track: Track) -> Track {

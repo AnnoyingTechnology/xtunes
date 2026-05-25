@@ -5,7 +5,9 @@ use std::{cell::Cell, rc::Rc};
 
 use gtk::glib;
 use gtk::prelude::*;
-use sustain_app_runtime::{FieldChange, MetadataChange, Rating, TrackMetadata};
+use sustain_app_runtime::{FieldChange, MetadataChange, PlayStatistics, Rating, TrackMetadata};
+
+use crate::date_format::format_system_time_short;
 
 use super::{
     NUMBER_ENTRY_WIDTH_CHARS, PAIR_ENTRY_WIDTH_CHARS,
@@ -40,7 +42,7 @@ impl DetailsPage {
     pub(super) fn new(
         initial: &TrackMetadata,
         initial_rating: Rating,
-        initial_play_count: u64,
+        initial_statistics: &PlayStatistics,
     ) -> Self {
         let widget = gtk::Box::new(gtk::Orientation::Vertical, 8);
         widget.add_css_class("track-info-details");
@@ -121,31 +123,62 @@ impl DetailsPage {
         attach_field(&grid, row, "Rating", &rating_widget);
         row += 1;
 
+        // Statistics block: counts on the left, dates underneath.
+        // The Reset button is shared across play+skip counts because
+        // they represent two halves of the same per-track listening
+        // history; resetting one half in isolation is rarely what the
+        // user wants. The labels snapshot the values at dialog open
+        // and stay frozen until the next time the dialog is reopened.
+        let stats_reset = Rc::new(Cell::new(false));
+
         let play_count_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let play_count_label = gtk::Label::new(None);
         play_count_label.set_xalign(0.0);
         play_count_label.set_hexpand(true);
-        play_count_label.set_text(&initial_play_count.to_string());
-        // The label snapshots the count at dialog open. The Reset button stages
-        // a reset that is dispatched on OK; the displayed number doesn't change
-        // until the dialog is reopened.
-        let play_count_reset = Rc::new(Cell::new(false));
+        play_count_label.set_text(&initial_statistics.play_count.to_string());
         let reset_button = gtk::Button::with_label("Reset");
-        let reset_state = play_count_reset.clone();
-        let label_for_reset = play_count_label.clone();
+        let reset_state = stats_reset.clone();
+        let play_label_for_reset = play_count_label.clone();
         reset_button.connect_clicked(move |button| {
             reset_state.set(true);
             button.set_sensitive(false);
-            label_for_reset.set_text("0 (will reset on OK)");
+            play_label_for_reset.set_text("0 (will reset on OK)");
         });
         play_count_row.append(&play_count_label);
         play_count_row.append(&reset_button);
         attach_field(&grid, row, "Play count", &play_count_row);
         row += 1;
 
+        let skip_count_label = gtk::Label::new(None);
+        skip_count_label.set_xalign(0.0);
+        skip_count_label.set_hexpand(true);
+        skip_count_label.set_text(&initial_statistics.skip_count.to_string());
+        attach_field(&grid, row, "Skip count", &skip_count_label);
+        row += 1;
+
+        let last_played_label = gtk::Label::new(None);
+        last_played_label.set_xalign(0.0);
+        last_played_label.set_hexpand(true);
+        last_played_label.set_text(&format_stat_date(initial_statistics.last_played_at));
+        attach_field(&grid, row, "Last played", &last_played_label);
+        row += 1;
+
+        let last_skipped_label = gtk::Label::new(None);
+        last_skipped_label.set_xalign(0.0);
+        last_skipped_label.set_hexpand(true);
+        last_skipped_label.set_text(&format_stat_date(initial_statistics.last_skipped_at));
+        attach_field(&grid, row, "Last skipped", &last_skipped_label);
+        row += 1;
+
+        let play_count_reset = stats_reset;
+
         let comments = gtk::TextView::new();
         comments.set_wrap_mode(gtk::WrapMode::WordChar);
         comments.set_accepts_tab(false);
+        comments.set_top_margin(16);
+        comments.set_bottom_margin(16);
+        comments.set_left_margin(16);
+        comments.set_right_margin(16);
         if let Some(text) = initial.comments.as_deref() {
             comments.buffer().set_text(text);
         }
@@ -258,6 +291,12 @@ fn refresh_rating_buttons(parent: &gtk::Box, rating: u8) {
 
 fn next_rating(current: u8, clicked: u8) -> u8 {
     if current == clicked { 0 } else { clicked }
+}
+
+fn format_stat_date(value: Option<std::time::SystemTime>) -> String {
+    value
+        .and_then(format_system_time_short)
+        .unwrap_or_else(|| "Never".to_owned())
 }
 
 #[cfg(test)]

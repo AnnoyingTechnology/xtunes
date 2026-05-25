@@ -9,6 +9,7 @@ mod id;
 mod managed_library;
 mod metadata;
 mod playback;
+mod playback_session;
 mod playlist;
 mod playlist_folder;
 mod query;
@@ -32,6 +33,7 @@ pub use playback::{
     PlaybackCommand, PlaybackOptions, PlaybackQueue, PlaybackQueueSource, PlaybackState,
     RepeatMode, TrackPlaybackSource, VolumePercent,
 };
+pub use playback_session::PlaybackSession;
 pub use playlist::{Playlist, PlaylistEntry};
 pub use playlist_folder::{PlaylistFolder, PlaylistItem};
 pub use query::{LibraryQuery, SortDirection, TrackSort, TrackSortColumn};

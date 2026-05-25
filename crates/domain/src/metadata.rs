@@ -48,6 +48,21 @@ impl TrackMetadata {
         apply_field_change(&mut self.comments, &change.comments);
         apply_field_change(&mut self.lyrics, &change.lyrics);
     }
+
+    /// Refresh the fields that describe the audio stream itself —
+    /// duration, bitrate, sample rate, channel count — from a freshly
+    /// scanned copy, leaving every tag-derived field (title, artist,
+    /// album, year, bpm, comments, …) untouched. Used during library
+    /// rescan: per the persistence policy in AGENTS.md, SQLite is the
+    /// source of truth for tag-derived metadata once a track has been
+    /// imported, but if the underlying file has been re-encoded the
+    /// audio-stream properties need to catch up.
+    pub fn refresh_audio_stream_properties_from(&mut self, scanned: &Self) {
+        self.duration = scanned.duration;
+        self.bitrate_kbps = scanned.bitrate_kbps;
+        self.sample_rate_hz = scanned.sample_rate_hz;
+        self.channels = scanned.channels;
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

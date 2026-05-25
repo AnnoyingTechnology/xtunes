@@ -20,7 +20,9 @@ pub(super) enum TrackTableColumn {
     Duration,
     Rating,
     Plays,
+    Skips,
     LastPlayed,
+    LastSkipped,
     DateAdded,
     TrackNumber,
 }
@@ -37,7 +39,9 @@ pub(super) const TRACK_TABLE_COLUMNS: &[TrackTableColumn] = &[
     TrackTableColumn::Duration,
     TrackTableColumn::Rating,
     TrackTableColumn::Plays,
+    TrackTableColumn::Skips,
     TrackTableColumn::LastPlayed,
+    TrackTableColumn::LastSkipped,
     TrackTableColumn::DateAdded,
     TrackTableColumn::TrackNumber,
 ];
@@ -56,7 +60,9 @@ impl TrackTableColumn {
             Self::Duration => "Duration",
             Self::Rating => "Rating",
             Self::Plays => "Plays",
+            Self::Skips => "Skips",
             Self::LastPlayed => "Last Played",
+            Self::LastSkipped => "Last Skipped",
             Self::DateAdded => "Date Added",
             Self::TrackNumber => "Track #",
         }
@@ -75,7 +81,9 @@ impl TrackTableColumn {
             Self::Duration => "duration",
             Self::Rating => "rating",
             Self::Plays => "plays",
+            Self::Skips => "skips",
             Self::LastPlayed => "last_played",
+            Self::LastSkipped => "last_skipped",
             Self::DateAdded => "date_added",
             Self::TrackNumber => "track_number",
         }
@@ -94,7 +102,9 @@ impl TrackTableColumn {
             Self::Duration => 86,
             Self::Rating => 94,
             Self::Plays => 76,
+            Self::Skips => 76,
             Self::LastPlayed => 120,
+            Self::LastSkipped => 120,
             Self::DateAdded => 120,
             Self::TrackNumber => 86,
         }
@@ -105,7 +115,11 @@ impl TrackTableColumn {
     }
 
     pub(super) fn default_visible(self) -> bool {
-        true
+        // Skips and Last Skipped exist for users who care about the
+        // signal but are noisier than most tracks need, so they ship
+        // off by default. The user surfaces them through the column
+        // selector menu like any other optional column.
+        !matches!(self, Self::Skips | Self::LastSkipped)
     }
 
     pub(super) fn xalign(self) -> f32 {
@@ -116,6 +130,7 @@ impl TrackTableColumn {
             | Self::Genre
             | Self::FileType
             | Self::LastPlayed
+            | Self::LastSkipped
             | Self::DateAdded => 0.0,
             Self::Year
             | Self::Bpm
@@ -123,6 +138,7 @@ impl TrackTableColumn {
             | Self::Duration
             | Self::Rating
             | Self::Plays
+            | Self::Skips
             | Self::TrackNumber => 1.0,
         }
     }
@@ -143,7 +159,9 @@ impl TrackTableColumn {
             Self::Duration => track_duration_text(row.duration_seconds),
             Self::Rating => row.rating.to_string(),
             Self::Plays => row.plays.to_string(),
+            Self::Skips => row.skips.to_string(),
             Self::LastPlayed => optional_date_text(row.last_played),
+            Self::LastSkipped => optional_date_text(row.last_skipped),
             Self::DateAdded => optional_date_text(row.date_added),
             Self::TrackNumber => optional_number_text(row.track_number),
         }
@@ -162,7 +180,9 @@ impl TrackTableColumn {
             Self::Duration => left.duration_seconds.cmp(&right.duration_seconds),
             Self::Rating => left.rating.cmp(&right.rating),
             Self::Plays => left.plays.cmp(&right.plays),
+            Self::Skips => left.skips.cmp(&right.skips),
             Self::LastPlayed => left.last_played.cmp(&right.last_played),
+            Self::LastSkipped => left.last_skipped.cmp(&right.last_skipped),
             Self::DateAdded => left.date_added.cmp(&right.date_added),
             Self::TrackNumber => left.track_number.cmp(&right.track_number),
         }
@@ -218,7 +238,9 @@ mod tests {
                 "Duration",
                 "Rating",
                 "Plays",
+                "Skips",
                 "Last Played",
+                "Last Skipped",
                 "Date Added",
                 "Track #",
             ]
@@ -246,7 +268,9 @@ mod tests {
                 "duration",
                 "rating",
                 "plays",
+                "skips",
                 "last_played",
+                "last_skipped",
                 "date_added",
                 "track_number",
             ]

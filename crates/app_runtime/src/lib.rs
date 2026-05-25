@@ -14,15 +14,15 @@ use std::{
 pub use sustain_domain::{
     ApplicationCommand, ApplicationQuery, Clock, DEFAULT_PLAYBACK_VOLUME_PERCENT, FieldChange,
     LibraryManagementMode, LibrarySettings, MetadataChange, PlayStatistics, PlaybackCommand,
-    PlaybackOptions, PlaybackQueue, PlaybackQueueSource, PlaybackSettings, PlaybackState, Playlist,
-    PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId, PlaylistItem, Rating, RepeatMode,
-    SmartPlaylist, SmartPlaylistDateField, SmartPlaylistId, SmartPlaylistLimit,
-    SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistNumberField,
-    SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField,
-    SmartPlaylistTextOperator, SystemClock, Track, TrackAvailability, TrackColumnEntry,
-    TrackColumnLayout, TrackColumnLayoutScope, TrackContentHash, TrackId, TrackLocation,
-    TrackMetadata, TrackPlaybackSource, TrackRelativePath, UserSettings, VolumePercent,
-    matching_tracks,
+    PlaybackOptions, PlaybackQueue, PlaybackQueueSource, PlaybackSession, PlaybackSettings,
+    PlaybackState, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId,
+    PlaylistItem, Rating, RepeatMode, SmartPlaylist, SmartPlaylistDateField, SmartPlaylistId,
+    SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind,
+    SmartPlaylistNumberField, SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet,
+    SmartPlaylistTextField, SmartPlaylistTextOperator, SystemClock, Track, TrackAvailability,
+    TrackColumnEntry, TrackColumnLayout, TrackColumnLayoutScope, TrackContentHash, TrackId,
+    TrackLocation, TrackMetadata, TrackPlaybackSource, TrackRelativePath, UserSettings,
+    VolumePercent, matching_tracks,
 };
 use sustain_library_store::LibraryStore;
 pub use sustain_metadata::MetadataService;
@@ -205,6 +205,10 @@ pub struct ApplicationRuntime {
     metadata_service: Option<Arc<dyn MetadataService>>,
     playback_service: Option<Box<dyn PlaybackService>>,
     playback_queue: PlaybackQueue,
+    // Tracks how much of the currently playing track the listener has
+    // actually heard, so we can decide whether to register a play or a
+    // skip when the track changes. `None` whenever nothing is playing.
+    pub(crate) playback_session: Option<PlaybackSession>,
     library_tracks: Vec<Track>,
     playlists: Vec<Playlist>,
     playlist_folders: Vec<PlaylistFolder>,
@@ -234,6 +238,7 @@ impl ApplicationRuntime {
             metadata_service: None,
             playback_service: None,
             playback_queue: PlaybackQueue::default(),
+            playback_session: None,
             library_tracks: Vec::new(),
             playlists: Vec::new(),
             playlist_folders: Vec::new(),
@@ -269,6 +274,7 @@ impl ApplicationRuntime {
             metadata_service: None,
             playback_service: None,
             playback_queue: PlaybackQueue::default(),
+            playback_session: None,
             library_tracks: Vec::new(),
             playlists: Vec::new(),
             playlist_folders: Vec::new(),
@@ -2913,6 +2919,410 @@ mod tests {
         fn write_artwork(&self, _path: &Path, _artwork: Option<Vec<u8>>) -> MetadataResult<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn on_playback_tick_registers_play_after_threshold() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+        std::fs::write(root.join("song.flac"), b"not real audio").expect("write fake track");
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let id = track_id(1);
+        let mut track = test_track(id, "song.flac");
+        track.metadata.duration = Some(std::time::Duration::from_secs(60));
+        assert_eq!(store.save_track(track), Ok(()));
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(root.clone()))),
+        ))
+        .expect("load settings")
+        .with_library_services(store, Arc::new(TestMetadataService))
+        .expect("library services initialize")
+        .with_playback_service(Box::new(NullPlaybackService::new()));
+
+        runtime
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(id)))
+            .expect("play track");
+
+        // Threshold for a 60s track is 30s. 29 ticks of 1s each must
+        // not be enough to register the play.
+        for _ in 0..29 {
+            runtime
+                .on_playback_tick(std::time::Duration::from_secs(1))
+                .expect("tick");
+        }
+        let track = runtime
+            .library_tracks()
+            .iter()
+            .find(|track| track.id == id)
+            .expect("track present");
+        assert_eq!(
+            track.statistics.play_count, 0,
+            "play count must not increment before threshold cross"
+        );
+
+        runtime
+            .on_playback_tick(std::time::Duration::from_secs(1))
+            .expect("tick that crosses threshold");
+        let track = runtime
+            .library_tracks()
+            .iter()
+            .find(|track| track.id == id)
+            .expect("track present");
+        assert_eq!(
+            track.statistics.play_count, 1,
+            "play count must increment exactly once when threshold is crossed"
+        );
+        assert!(
+            track.statistics.last_played_at.is_some(),
+            "last_played_at must be set when play registers"
+        );
+
+        // Further ticks past threshold must not re-increment within the
+        // same listening session.
+        for _ in 0..60 {
+            runtime
+                .on_playback_tick(std::time::Duration::from_secs(1))
+                .expect("post-threshold tick");
+        }
+        let track = runtime
+            .library_tracks()
+            .iter()
+            .find(|track| track.id == id)
+            .expect("track present");
+        assert_eq!(
+            track.statistics.play_count, 1,
+            "play must register exactly once per session"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
+    #[test]
+    fn skip_current_track_registers_skip_before_play_threshold() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+        std::fs::write(root.join("a.flac"), b"audio").expect("write a");
+        std::fs::write(root.join("b.flac"), b"audio").expect("write b");
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut a = test_track(track_id(1), "a.flac");
+        a.metadata.duration = Some(std::time::Duration::from_secs(60));
+        let mut b = test_track(track_id(2), "b.flac");
+        b.metadata.duration = Some(std::time::Duration::from_secs(60));
+        assert_eq!(store.save_track(a), Ok(()));
+        assert_eq!(store.save_track(b), Ok(()));
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(root.clone()))),
+        ))
+        .expect("load settings")
+        .with_library_services(store, Arc::new(TestMetadataService))
+        .expect("library services initialize")
+        .with_playback_service(Box::new(NullPlaybackService::new()));
+
+        runtime
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
+                track_id(1),
+            )))
+            .expect("play A");
+
+        // Listen briefly — well short of the 30s threshold — then skip.
+        for _ in 0..5 {
+            runtime
+                .on_playback_tick(std::time::Duration::from_secs(1))
+                .expect("tick");
+        }
+
+        runtime
+            .handle_command(ApplicationCommand::Playback(
+                PlaybackCommand::SkipCurrentTrack,
+            ))
+            .expect("skip current track");
+
+        let track_a = runtime
+            .library_tracks()
+            .iter()
+            .find(|track| track.id == track_id(1))
+            .expect("track A present");
+        assert_eq!(
+            track_a.statistics.skip_count, 1,
+            "skip must increment when threshold not yet reached"
+        );
+        assert!(
+            track_a.statistics.last_skipped_at.is_some(),
+            "last_skipped_at must be set on skip"
+        );
+        assert_eq!(
+            track_a.statistics.play_count, 0,
+            "skip must not also register a play"
+        );
+
+        // Track B is now playing as a result of the advance.
+        match runtime.playback_state() {
+            PlaybackState::Playing {
+                track_id: playing, ..
+            } => assert_eq!(playing, track_id(2)),
+            other => panic!("expected B to be playing, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
+    #[test]
+    fn skip_current_track_does_not_register_skip_after_play_threshold() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+        std::fs::write(root.join("a.flac"), b"audio").expect("write a");
+        std::fs::write(root.join("b.flac"), b"audio").expect("write b");
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut a = test_track(track_id(1), "a.flac");
+        a.metadata.duration = Some(std::time::Duration::from_secs(60));
+        let b = test_track(track_id(2), "b.flac");
+        assert_eq!(store.save_track(a), Ok(()));
+        assert_eq!(store.save_track(b), Ok(()));
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(root.clone()))),
+        ))
+        .expect("load settings")
+        .with_library_services(store, Arc::new(TestMetadataService))
+        .expect("library services initialize")
+        .with_playback_service(Box::new(NullPlaybackService::new()));
+
+        runtime
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
+                track_id(1),
+            )))
+            .expect("play A");
+
+        // Cross the play threshold for the 60s track.
+        for _ in 0..30 {
+            runtime
+                .on_playback_tick(std::time::Duration::from_secs(1))
+                .expect("tick");
+        }
+
+        runtime
+            .handle_command(ApplicationCommand::Playback(
+                PlaybackCommand::SkipCurrentTrack,
+            ))
+            .expect("skip after play registered");
+
+        let track_a = runtime
+            .library_tracks()
+            .iter()
+            .find(|track| track.id == track_id(1))
+            .expect("track A present");
+        assert_eq!(
+            track_a.statistics.play_count, 1,
+            "play already counted before skip"
+        );
+        assert_eq!(
+            track_a.statistics.skip_count, 0,
+            "post-threshold next must not increment skip"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
+    #[test]
+    fn play_next_track_never_registers_skip() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+        std::fs::write(root.join("a.flac"), b"audio").expect("write a");
+        std::fs::write(root.join("b.flac"), b"audio").expect("write b");
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut a = test_track(track_id(1), "a.flac");
+        a.metadata.duration = Some(std::time::Duration::from_secs(60));
+        let b = test_track(track_id(2), "b.flac");
+        assert_eq!(store.save_track(a), Ok(()));
+        assert_eq!(store.save_track(b), Ok(()));
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(root.clone()))),
+        ))
+        .expect("load settings")
+        .with_library_services(store, Arc::new(TestMetadataService))
+        .expect("library services initialize")
+        .with_playback_service(Box::new(NullPlaybackService::new()));
+
+        runtime
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
+                track_id(1),
+            )))
+            .expect("play A");
+
+        // Briefly listen — well short of the play threshold.
+        for _ in 0..5 {
+            runtime
+                .on_playback_tick(std::time::Duration::from_secs(1))
+                .expect("tick");
+        }
+
+        // EOS-style auto-advance must never affect skip statistics,
+        // regardless of how much of the previous track was listened.
+        runtime
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayNextTrack))
+            .expect("auto-advance");
+
+        let track_a = runtime
+            .library_tracks()
+            .iter()
+            .find(|track| track.id == track_id(1))
+            .expect("track A present");
+        assert_eq!(
+            track_a.statistics.skip_count, 0,
+            "auto-advance must never inflate skip count"
+        );
+        assert_eq!(
+            track_a.statistics.play_count, 0,
+            "auto-advance below threshold must not register a play either"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
+    #[test]
+    fn on_playback_tick_does_not_accumulate_when_stopped() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(root.clone()))),
+        ))
+        .expect("load settings")
+        .with_library_services(store, Arc::new(TestMetadataService))
+        .expect("library services initialize")
+        .with_playback_service(Box::new(NullPlaybackService::new()));
+
+        // No PlayTrack — runtime is in the Stopped state, no session.
+        for _ in 0..100 {
+            runtime
+                .on_playback_tick(std::time::Duration::from_secs(1))
+                .expect("tick is a no-op while stopped");
+        }
+        assert!(
+            runtime.playback_session.is_none(),
+            "no session should be created when nothing is playing"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
+    #[test]
+    fn play_track_starts_session_immediately_so_rapid_skip_counts() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+        std::fs::write(root.join("a.flac"), b"audio").expect("write a");
+        std::fs::write(root.join("b.flac"), b"audio").expect("write b");
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut a = test_track(track_id(1), "a.flac");
+        a.metadata.duration = Some(std::time::Duration::from_secs(60));
+        let b = test_track(track_id(2), "b.flac");
+        assert_eq!(store.save_track(a), Ok(()));
+        assert_eq!(store.save_track(b), Ok(()));
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(root.clone()))),
+        ))
+        .expect("load settings")
+        .with_library_services(store, Arc::new(TestMetadataService))
+        .expect("library services initialize")
+        .with_playback_service(Box::new(NullPlaybackService::new()));
+
+        runtime
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
+                track_id(1),
+            )))
+            .expect("play A");
+
+        // No ticks have fired yet. Skip immediately. The session must
+        // already exist (populated synchronously by play_track) so the
+        // skip is captured rather than silently dropped.
+        runtime
+            .handle_command(ApplicationCommand::Playback(
+                PlaybackCommand::SkipCurrentTrack,
+            ))
+            .expect("immediate skip");
+
+        let track_a = runtime
+            .library_tracks()
+            .iter()
+            .find(|track| track.id == track_id(1))
+            .expect("track A present");
+        assert_eq!(
+            track_a.statistics.skip_count, 1,
+            "skip must register even with zero listened time"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
+    #[test]
+    fn rapid_double_skip_does_not_double_count() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+        std::fs::write(root.join("a.flac"), b"audio").expect("write a");
+        std::fs::write(root.join("b.flac"), b"audio").expect("write b");
+        std::fs::write(root.join("c.flac"), b"audio").expect("write c");
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let mut a = test_track(track_id(1), "a.flac");
+        a.metadata.duration = Some(std::time::Duration::from_secs(60));
+        let mut b = test_track(track_id(2), "b.flac");
+        b.metadata.duration = Some(std::time::Duration::from_secs(60));
+        let c = test_track(track_id(3), "c.flac");
+        assert_eq!(store.save_track(a), Ok(()));
+        assert_eq!(store.save_track(b), Ok(()));
+        assert_eq!(store.save_track(c), Ok(()));
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(root.clone()))),
+        ))
+        .expect("load settings")
+        .with_library_services(store, Arc::new(TestMetadataService))
+        .expect("library services initialize")
+        .with_playback_service(Box::new(NullPlaybackService::new()));
+
+        runtime
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack(
+                track_id(1),
+            )))
+            .expect("play A");
+        runtime
+            .handle_command(ApplicationCommand::Playback(
+                PlaybackCommand::SkipCurrentTrack,
+            ))
+            .expect("first skip — A → B");
+        // Immediately skip again before any tick has accumulated time
+        // on B. A second skip on A would be a double-count bug; this
+        // exercises the "play_track installs a fresh session" guard.
+        runtime
+            .handle_command(ApplicationCommand::Playback(
+                PlaybackCommand::SkipCurrentTrack,
+            ))
+            .expect("second skip — B → C");
+
+        let track_a = runtime
+            .library_tracks()
+            .iter()
+            .find(|track| track.id == track_id(1))
+            .expect("track A present");
+        let track_b = runtime
+            .library_tracks()
+            .iter()
+            .find(|track| track.id == track_id(2))
+            .expect("track B present");
+        assert_eq!(track_a.statistics.skip_count, 1, "A skipped exactly once");
+        assert_eq!(track_b.statistics.skip_count, 1, "B skipped exactly once");
+
+        std::fs::remove_dir_all(root).expect("remove test library");
     }
 
     fn unique_test_directory() -> PathBuf {

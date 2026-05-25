@@ -1348,7 +1348,12 @@ fn handle_mpris_command(
         MprisCommand::Play => PlaybackCommand::Resume,
         MprisCommand::Pause => PlaybackCommand::Pause,
         MprisCommand::Stop => PlaybackCommand::Stop,
-        MprisCommand::Next => PlaybackCommand::PlayNextTrack,
+        // Treat the desktop-integration Next (media keys, MPRIS clients,
+        // GNOME shortcuts) as a user-initiated skip, matching the
+        // titlebar Next button. Only the EOS auto-advance path stays on
+        // PlayNextTrack so natural track endings never inflate
+        // skip_count.
+        MprisCommand::Next => PlaybackCommand::SkipCurrentTrack,
         MprisCommand::Previous => PlaybackCommand::PlayPreviousTrack,
     };
     if command_controller.dispatch_succeeded(ApplicationCommand::Playback(playback_command)) {
