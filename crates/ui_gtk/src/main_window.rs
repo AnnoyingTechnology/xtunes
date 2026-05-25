@@ -18,8 +18,8 @@ use sustain_app_runtime::{
 
 use super::{
     ALBUMS_VIEW, APP_ID, ApplicationCommand, ApplicationRuntime, LibraryChangedCallback,
-    LibraryChangedHolder, PLAYLISTS_VIEW, PlaybackChangedCallback, SONGS_VIEW, SharedRuntime,
-    ShowAlbumAction, ShowAlbumHolder,
+    LibraryChangedHolder, MprisCommandReceiver, PLAYLISTS_VIEW, PlaybackChangedCallback,
+    SONGS_VIEW, SharedMprisService, SharedRuntime, ShowAlbumAction, ShowAlbumHolder,
     accent::install_accent_css,
     albums::AlbumsView,
     app_css::install_app_css,
@@ -63,6 +63,8 @@ use super::{
 pub(crate) fn build_main_window(
     app: &gtk::Application,
     runtime: SharedRuntime,
+    mpris_service: Option<SharedMprisService>,
+    mpris_command_rx: Option<MprisCommandReceiver>,
 ) -> gtk::ApplicationWindow {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
@@ -105,6 +107,7 @@ pub(crate) fn build_main_window(
         songs_table_holder.clone(),
         albums_view_holder.clone(),
         playlists_table_holder.clone(),
+        mpris_service.clone(),
     );
     connect_titlebar_playback_controls(
         &titlebar,
@@ -113,6 +116,13 @@ pub(crate) fn build_main_window(
         playback_changed.clone(),
     );
     install_track_ended_callback(&runtime, &command_controller, &playback_changed);
+    install_mpris_command_consumer(
+        mpris_command_rx,
+        command_controller.clone(),
+        playback_changed.clone(),
+        app.clone(),
+        window.clone(),
+    );
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.add_css_class("app-shell");
@@ -1059,6 +1069,7 @@ fn playback_changed_callback(
     songs_table_holder: Rc<RefCell<Option<TrackTable>>>,
     albums_view_holder: Rc<RefCell<Option<AlbumsView>>>,
     playlists_table_holder: Rc<RefCell<Option<TrackTable>>>,
+    mpris_service: Option<SharedMprisService>,
 ) -> PlaybackChangedCallback {
     let runtime = runtime.clone();
     let now_playing = now_playing.clone();
@@ -1078,7 +1089,91 @@ fn playback_changed_callback(
             playlists_table.set_playing_track_id(playing_track_id);
         }
         now_playing.refresh(&now_playing_state);
+        if let Some(service) = mpris_service.as_deref() {
+            service.publish_playback_state(now_playing_state.state.clone());
+            service.publish_now_playing(now_playing_to_mpris_metadata(&now_playing_state));
+        }
     })
+}
+
+fn now_playing_to_mpris_metadata(
+    now_playing: &sustain_app_runtime::NowPlaying,
+) -> sustain_desktop::NowPlayingMetadata {
+    let Some(track) = now_playing.track.as_ref() else {
+        return sustain_desktop::NowPlayingMetadata::default();
+    };
+    sustain_desktop::NowPlayingMetadata {
+        track_id: Some(track.id),
+        title: track.metadata.title.clone(),
+        artist: track.metadata.artist.clone(),
+        album: track.metadata.album.clone(),
+        album_artist: track.metadata.album_artist.clone(),
+        genre: track.metadata.genre.clone(),
+        track_number: track.metadata.track_number,
+        disc_number: track.metadata.disc_number,
+        duration: track.metadata.duration,
+    }
+}
+
+fn install_mpris_command_consumer(
+    receiver: Option<MprisCommandReceiver>,
+    command_controller: SharedCommandController,
+    playback_changed: PlaybackChangedCallback,
+    app: gtk::Application,
+    window: gtk::ApplicationWindow,
+) {
+    // No receiver means MPRIS startup failed; the UI just runs without
+    // a media-key bridge, and the dropped sender on the desktop side
+    // means future try_send calls would silently no-op anyway.
+    let Some(receiver) = receiver else {
+        return;
+    };
+    glib::MainContext::default().spawn_local(async move {
+        while let Ok(command) = receiver.recv().await {
+            handle_mpris_command(command, &command_controller, &playback_changed, &app, &window);
+        }
+    });
+}
+
+fn handle_mpris_command(
+    command: sustain_desktop::MprisCommand,
+    command_controller: &SharedCommandController,
+    playback_changed: &PlaybackChangedCallback,
+    app: &gtk::Application,
+    window: &gtk::ApplicationWindow,
+) {
+    use sustain_desktop::MprisCommand;
+
+    // Mapping MPRIS semantics into Sustain's PlaybackCommand surface:
+    //
+    // * `Play` is "resume from paused/stopped"; MPRIS clients use it as a
+    //   distinct verb from `Pause`/`PlayPause` for state machines that
+    //   want to be explicit. Map to `Resume`, which the runtime no-ops
+    //   when there is no track loaded — the equivalent of MPRIS's
+    //   "Play has no effect" clause for an empty queue.
+    // * `Stop` is a hard stop with position reset; map to the existing
+    //   `Stop` command.
+    // * `Raise` / `Quit` are not playback at all; they are routed to GTK
+    //   window/application actions directly.
+    let playback_command = match command {
+        MprisCommand::Raise => {
+            window.present();
+            return;
+        }
+        MprisCommand::Quit => {
+            app.quit();
+            return;
+        }
+        MprisCommand::PlayPause => PlaybackCommand::TogglePlayPause,
+        MprisCommand::Play => PlaybackCommand::Resume,
+        MprisCommand::Pause => PlaybackCommand::Pause,
+        MprisCommand::Stop => PlaybackCommand::Stop,
+        MprisCommand::Next => PlaybackCommand::PlayNextTrack,
+        MprisCommand::Previous => PlaybackCommand::PlayPreviousTrack,
+    };
+    if command_controller.dispatch_succeeded(ApplicationCommand::Playback(playback_command)) {
+        playback_changed();
+    }
 }
 
 fn track_activated_callback(

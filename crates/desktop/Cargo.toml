@@ -10,7 +10,10 @@ name = "sustain_desktop"
 path = "src/lib.rs"
 
 [dependencies]
+async-channel = "2"
+async-io = "2"
 sustain-app-runtime = { path = "../app_runtime" }
+zbus = "5"
 
 [lints]
 workspace = true

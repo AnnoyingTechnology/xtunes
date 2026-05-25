@@ -22,6 +22,7 @@ mod app_css;
 mod artwork_color;
 mod command_controller;
 mod content_stack;
+mod date_format;
 mod library_consolidation;
 mod library_import;
 mod library_scan;
@@ -75,15 +76,57 @@ pub(crate) type LibraryChangedHolder = Rc<RefCell<Option<LibraryChangedCallback>
 pub(crate) type PlaybackChangedCallback = Rc<dyn Fn()>;
 pub(crate) type ShowAlbumAction = Rc<dyn Fn(sustain_app_runtime::TrackId)>;
 pub(crate) type ShowAlbumHolder = Rc<RefCell<Option<ShowAlbumAction>>>;
+pub(crate) type SharedMprisService = Rc<sustain_desktop::MprisService>;
+pub(crate) type MprisCommandReceiver = async_channel::Receiver<sustain_desktop::MprisCommand>;
 
 pub fn run(runtime: ApplicationRuntime) {
     let app = gtk::Application::builder().application_id(APP_ID).build();
     let runtime = Rc::new(RefCell::new(runtime));
 
+    // Start the MPRIS server before any window is built so the bus name
+    // is claimed (or refused) deterministically at startup. The inbound
+    // channel carries method calls from the MPRIS worker thread to the
+    // GTK main thread, where they can safely touch the runtime.
+    let (mpris_command_tx, mpris_command_rx) =
+        async_channel::unbounded::<sustain_desktop::MprisCommand>();
+    let mpris_service = match start_mpris(mpris_command_tx) {
+        Ok(service) => Some(Rc::new(service)),
+        Err(error) => {
+            eprintln!("Sustain: MPRIS (media key) integration disabled: {error}");
+            None
+        }
+    };
+    // `connect_activate` may be invoked more than once over the
+    // application lifetime (e.g. a second `gtk::Application::activate`
+    // call), but the inbound receiver must only be consumed once — a
+    // second consumer would race for the same commands. Take it on the
+    // first activation; later activations skip the setup.
+    let mpris_command_rx_holder: Rc<RefCell<Option<MprisCommandReceiver>>> =
+        Rc::new(RefCell::new(Some(mpris_command_rx)));
+
     app.connect_activate(move |app| {
-        let window = build_main_window(app, runtime.clone());
+        let mpris_command_rx = mpris_command_rx_holder.borrow_mut().take();
+        let window = build_main_window(
+            app,
+            runtime.clone(),
+            mpris_service.clone(),
+            mpris_command_rx,
+        );
         window.present();
     });
 
     app.run();
+}
+
+fn start_mpris(
+    command_tx: async_channel::Sender<sustain_desktop::MprisCommand>,
+) -> sustain_desktop::DesktopResult<sustain_desktop::MprisService> {
+    sustain_desktop::MprisService::start(sustain_desktop::MprisStartConfig {
+        command_sink: sustain_desktop::MprisPlaybackSink::new(move |command| {
+            // Unbounded channel: try_send only fails if closed, i.e. the
+            // GTK main loop has exited and the receiver was dropped.
+            // Silent drop is the right behavior at shutdown.
+            let _ = command_tx.try_send(command);
+        }),
+    })
 }
