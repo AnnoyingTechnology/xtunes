@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet},
-    rc::Rc,
-};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use sustain_app_runtime::{
-    PlaybackCommand, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId,
-    PlaylistItem, Rating, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
+    PlaybackCommand, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistItem,
+    Rating, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
     filter_tracks_by_search_text, track_matches_search_text,
 };
 
@@ -35,10 +31,13 @@ use super::{
     mode_bar::{ShowSongsViewCallback, ViewModeChangedCallback, build_mode_bar},
     now_playing::NowPlayingView,
     preferences::install_preferences_action,
+    shortcuts::{
+        GlobalShortcutContext, create_new_playlist, install_global_shortcuts,
+        open_new_smart_playlist_editor,
+    },
     sidebar::{PlaylistSidebar, SidebarSelection, build_content_area},
     sidebar_context::{
-        NEW_PLAYLIST_DEFAULT_NAME, NEW_PLAYLIST_FOLDER_DEFAULT_NAME,
-        NEW_SMART_PLAYLIST_DEFAULT_NAME, SidebarActionCallback, SidebarContextAction,
+        NEW_PLAYLIST_FOLDER_DEFAULT_NAME, SidebarActionCallback, SidebarContextAction,
         SidebarContextMenu, unique_default_name,
     },
     smart_playlist_editor::{SmartPlaylistEditorMode, open_smart_playlist_editor},
@@ -346,6 +345,7 @@ pub(crate) fn build_main_window(
     main_content.set_hexpand(true);
     main_content.set_vexpand(true);
     let command_controller_for_shortcuts = command_controller.clone();
+    let command_controller_for_global_shortcuts = command_controller.clone();
     let mode_bar = build_mode_bar(
         &window,
         &sidebar_widget,
@@ -375,6 +375,19 @@ pub(crate) fn build_main_window(
             show_songs: mode_bar.show_songs.clone(),
         },
     );
+    install_global_shortcuts(GlobalShortcutContext {
+        app: app.clone(),
+        window: window.clone(),
+        command_controller: command_controller_for_global_shortcuts,
+        runtime: runtime.clone(),
+        sidebar: sidebar.clone(),
+        titlebar: titlebar.clone(),
+        songs_table: songs_table.clone(),
+        playlists_table: playlists_table.clone(),
+        content_stack: content_stack.clone(),
+        show_playlists: mode_bar.show_playlists.clone(),
+        library_changed_holder: library_changed_holder.clone(),
+    });
     main_content.append(&mode_bar.widget);
     main_content.append(&content_stack);
 
@@ -513,32 +526,7 @@ fn sidebar_action_callback(
 
     Rc::new(move |action| match action {
         SidebarContextAction::Playlist => {
-            let (existing_ids, existing_names): (HashSet<PlaylistId>, Vec<String>) = {
-                let runtime = runtime.borrow();
-                let ids = runtime.playlists().iter().map(|p| p.id).collect();
-                let names = runtime
-                    .playlists()
-                    .iter()
-                    .map(|playlist| playlist.name.clone())
-                    .collect();
-                (ids, names)
-            };
-            let name = unique_default_name(existing_names, NEW_PLAYLIST_DEFAULT_NAME);
-            if command_controller.dispatch_succeeded(ApplicationCommand::CreatePlaylist {
-                name,
-                parent_folder_id: None,
-            }) {
-                let new_id = runtime
-                    .borrow()
-                    .playlists()
-                    .iter()
-                    .map(|playlist| playlist.id)
-                    .find(|id| !existing_ids.contains(id));
-                if let Some(id) = new_id {
-                    sidebar.arm_pending_rename(PlaylistItem::Playlist(id));
-                }
-                sidebar.refresh();
-            }
+            create_new_playlist(&command_controller, &runtime, &sidebar);
         }
         SidebarContextAction::PlaylistFolder => {
             let existing_names: Vec<String> = runtime
@@ -556,20 +544,7 @@ fn sidebar_action_callback(
             }
         }
         SidebarContextAction::SmartPlaylist => {
-            let existing_names: Vec<String> = runtime
-                .borrow()
-                .smart_playlists()
-                .iter()
-                .map(|smart| smart.name.clone())
-                .collect();
-            let name = unique_default_name(existing_names, NEW_SMART_PLAYLIST_DEFAULT_NAME);
-            let sidebar_for_created = sidebar.clone();
-            open_smart_playlist_editor(
-                &parent,
-                command_controller.clone(),
-                Rc::new(move || sidebar_for_created.refresh()),
-                SmartPlaylistEditorMode::Create { name },
-            );
+            open_new_smart_playlist_editor(&parent, command_controller.clone(), &runtime, &sidebar);
         }
     })
 }

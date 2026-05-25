@@ -246,6 +246,15 @@ fn schedule_volume_save(
 }
 
 impl Titlebar {
+    /// Move keyboard focus to the topbar search field and select whatever
+    /// text is currently in it. Pressing the Ctrl+F accelerator should
+    /// behave like a standard GNOME find action: a fresh keystroke
+    /// replaces any prior query rather than appending to it.
+    pub(crate) fn focus_search(&self) {
+        self.search.grab_focus();
+        self.search.select_region(0, -1);
+    }
+
     /// Cancel any pending debounced volume save and run it now. Invoked from
     /// the window-close path so an adjustment made within
     /// [`VOLUME_SAVE_DEBOUNCE`] of shutdown is still persisted.

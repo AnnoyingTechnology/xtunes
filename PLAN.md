@@ -920,65 +920,109 @@ translated to Linux/GTK conventions (`Ctrl` instead of `Cmd`, GNOME-native
 modifiers). The goal is not a literal port but a familiar muscle-memory
 experience for ex-iTunes users on GNOME.
 
-`Ctrl+L` Jump to Current Track is wired. A broader shortcut pass for
-playback, navigation, selection/editing, playlists, and window management
-still needs to be specified — including conflict review against GNOME
-conventions and in-app shortcut discoverability.
+`Ctrl+L` Jump to Current Track is wired (raw key controller, see note
+below). A broader shortcut pass for playback, navigation,
+selection/editing, playlists, and window management still needs to be
+specified — including conflict review against GNOME conventions and
+in-app shortcut discoverability.
 
-### Committed shortcuts
+The work splits into two independent tracks that must not be conflated:
 
-The following shortcuts are committed and must be wired as part of the
-broader shortcut pass. They are the iTunes-equivalents translated to
-`Ctrl`, and they must be exposed through the GTK action system (not
-hard-coded key handlers on individual widgets) so they work globally
-across the window, surface uniformly in the GTK shortcuts overlay, and
-can be inspected/overridden through standard GNOME mechanisms.
+1. **Shortcut execution** — registering `gio::Action`s on the
+   `gtk::Application` with the matching `set_accels_for_action` calls
+   so each key combination invokes the right behavior anywhere in the
+   window.
+2. **Context-menu accel-label display** — surfacing each shortcut as
+   muted right-aligned text on the matching context-menu entry. This
+   requires the menus to be built from a `gio::Menu` model rendered
+   through `GtkPopoverMenu`, which is a context-menu architecture
+   migration in its own right (see "Context-menu accel-label display"
+   below).
 
-| Action                                            | Shortcut         |
-|---------------------------------------------------|------------------|
-| Create a new playlist                             | `Ctrl+N`         |
-| Create a new playlist from the current selection  | `Ctrl+Shift+N`   |
-| Create a new Smart Playlist                       | `Ctrl+Alt+N`     |
-| Focus the search field                            | `Ctrl+F`         |
-| Show the selected track's file in the file manager| `Ctrl+R`         |
-| Open the Get Info window for the selected track   | `Ctrl+I`         |
+### Committed shortcuts (execution)
 
-Notes per shortcut:
+The following shortcuts are committed and must be wired through the GTK
+action system (not hard-coded key handlers on individual widgets) so
+they work globally across the window, surface uniformly in the GTK
+shortcuts overlay, and can be inspected/overridden through standard
+GNOME mechanisms.
 
-- `Ctrl+Shift+N` (from-selection) operates on the current Songs-table
-  selection. If the selection is empty, the action is disabled (greyed
-  in the menu, no-op from the keyboard). It must not silently fall
-  back to creating an empty playlist — that's what `Ctrl+N` is for.
+| Action                                             | Shortcut         | Status   |
+|----------------------------------------------------|------------------|----------|
+| Create a new playlist                              | `Ctrl+N`         | Wired    |
+| Create a new Smart Playlist                        | `Ctrl+Alt+N`     | Wired    |
+| Focus the search field                             | `Ctrl+F`         | Wired    |
+| Show the selected track's file in the file manager | `Ctrl+R`         | Wired    |
+| Open the Get Info window for the selected track    | `Ctrl+I`         | Wired    |
+| Jump to Current Track                              | `Ctrl+L`         | Wired*   |
+
+\* `Ctrl+L` is currently bound through a raw `EventControllerKey` on the
+window because it needs focus-aware bypass logic (don't intercept while
+a text field has focus). Migrating it to a `gio::Action` requires
+generalising that bypass through the action enabled-state, which is a
+deliberate later cleanup and not part of the initial shortcut pass.
+
+Behavior notes per shortcut:
+
+- `Ctrl+N` creates an empty playlist with a unique default name,
+  switches the main view to Playlists so the new entry is visible, and
+  arms the inline rename so the next keystrokes type the playlist's
+  name. The view switch is required: the sidebar is hidden in Songs and
+  Albums modes, so arming a rename without it would silently lose the
+  user's keystrokes.
+- `Ctrl+Alt+N` opens the Smart Playlist editor with a unique default
+  name pre-filled. Switching to Playlists view happens for the same
+  reason as `Ctrl+N`; on save, the sidebar refreshes to show the new
+  entry.
 - `Ctrl+R` reuses the existing `Show in folder` context-menu action's
   underlying command (opens Nautilus, or the user's configured file
-  manager via XDG). On a multi-track selection, scope is to be settled
-  at implementation time (open one window per track is hostile; the
-  likely default is to act on the first selected track and disable the
-  shortcut when multiple tracks span multiple folders).
+  manager via XDG). On a multi-row selection it acts on the first
+  selected track — opening one window per track would be hostile, and a
+  single predictable parent directory matches the muscle-memory the
+  iTunes shortcut sets.
 - `Ctrl+I` reuses the existing `Get Info` context-menu action. With
   the deferred multi-track batch-editing question (`## Get Info`),
   multi-selection behavior tracks whatever Get Info itself settles on,
-  not a separate shortcut-level decision.
+  not a separate shortcut-level decision. The shortcut is a no-op when
+  the selection is empty or larger than one row, matching the
+  `Single`-selection contract the context-menu action already enforces.
 - `Ctrl+F` focuses the existing top-bar search field and selects any
   current query so a fresh keystroke replaces it, matching standard
   GNOME find-bar behavior.
+- A `Ctrl+Shift+N` "new playlist from the current selection" shortcut
+  remains on the long-term wishlist but is not part of this pass: the
+  selection-to-playlist flow is a feature in its own right (folder
+  placement, scope across views) and must be designed before being
+  bound to a key.
 
-### Discoverability: shortcut hints in context menus
+### Context-menu accel-label display
 
-Every context-menu entry whose action has a committed keyboard
-shortcut must show that shortcut as muted/secondary text aligned to the
-right edge of the row (e.g. `Get Info        Ctrl+I`). This is the
-standard GTK `MenuItem` accel-label behavior and falls out for free when
-menu items are built from `gio::Action` entries that have an
-accelerator registered against them — that is the required path. Do not
-hand-format shortcut strings into menu labels; the accelerator string
-must come from the action registration so menu text, the shortcuts
-overlay, and the actual key binding cannot drift apart.
+Every context-menu entry whose action has a committed keyboard shortcut
+should show that shortcut as muted/secondary text aligned to the right
+edge of the row (e.g. `Get Info        Ctrl+I`). This is the standard
+`MenuItem` accel-label behavior and falls out for free when menu items
+are built from `gio::Menu` entries pointing at registered actions —
+that is the required path. Do not hand-format shortcut strings into
+menu labels; the accelerator string must come from the action
+registration so menu text, the shortcuts overlay, and the actual key
+binding cannot drift apart.
 
 The hint is muted (dim-label / secondary text colour) so the menu still
 reads as a list of *actions*, with the shortcuts as ambient reference
 rather than competing for attention. This must work in both native
 light and dark modes.
+
+This is **not done yet** and is deliberately decoupled from the
+execution pass above. The current track context menu is a hand-built
+`gtk::Popover` of `gtk::Button` rows because it carries selection-
+sensitive enablement, a confirmation flow for trash, a dynamic nested
+"Add to Playlist" submenu derived from playlist folders, and bounded
+scrolled rendering for that submenu — all of which were stabilised
+through fragile bug fixes. A `GtkPopoverMenu` migration is a context-
+menu architecture migration, not a shortcut-wiring side quest. It must
+be approached and tested as such, starting from a small proof on the
+simpler entries (Get Info, Show in Folder, Remove) before tackling the
+Add to Playlist submenu deliberately.
 
 ## Search Bar
 

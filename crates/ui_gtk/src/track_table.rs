@@ -123,6 +123,32 @@ impl TrackTable {
         false
     }
 
+    /// Returns the [`TrackId`]s of the currently selected rows, in the
+    /// table's current sort order. Empty when the table is empty or no
+    /// rows are selected.
+    ///
+    /// Used by global keyboard shortcuts (Get Info, Show in Folder) that
+    /// must operate on whichever view the user is looking at; the caller
+    /// picks the right table based on the visible content stack.
+    pub(crate) fn selected_track_ids(&self) -> Vec<TrackId> {
+        let bitset = self.selection.selection();
+        let Some((iter, first)) = gtk::BitsetIter::init_first(&bitset) else {
+            return Vec::new();
+        };
+        std::iter::once(first)
+            .chain(iter)
+            .filter_map(|position| {
+                let row_object = self
+                    .selection
+                    .item(position)?
+                    .downcast::<glib::BoxedAnyObject>()
+                    .ok()?;
+                let row = row_object.try_borrow::<TrackTableRow>().ok()?;
+                row.track_id
+            })
+            .collect()
+    }
+
     pub(crate) fn set_playing_track_id(&self, playing_track_id: Option<TrackId>) {
         if self.playing_track_id.get() == playing_track_id {
             return;

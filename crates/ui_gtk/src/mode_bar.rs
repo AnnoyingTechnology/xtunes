@@ -22,11 +22,13 @@ enum MainViewMode {
 pub(crate) type ViewModeChangedCallback = Rc<dyn Fn()>;
 pub(crate) type ShowAlbumsViewCallback = Rc<dyn Fn()>;
 pub(crate) type ShowSongsViewCallback = Rc<dyn Fn()>;
+pub(crate) type ShowPlaylistsViewCallback = Rc<dyn Fn()>;
 
 pub(crate) struct ModeBar {
     pub(crate) widget: gtk::CenterBox,
     pub(crate) show_albums: ShowAlbumsViewCallback,
     pub(crate) show_songs: ShowSongsViewCallback,
+    pub(crate) show_playlists: ShowPlaylistsViewCallback,
 }
 
 pub(crate) fn build_mode_bar(
@@ -100,10 +102,16 @@ pub(crate) fn build_mode_bar(
         songs_for_callback.set_active(true);
     });
 
+    let playlists_for_callback = playlists.clone();
+    let show_playlists: ShowPlaylistsViewCallback = Rc::new(move || {
+        playlists_for_callback.set_active(true);
+    });
+
     ModeBar {
         widget: mode_bar,
         show_albums,
         show_songs,
+        show_playlists,
     }
 }
 

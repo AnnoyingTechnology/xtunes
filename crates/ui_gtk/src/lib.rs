@@ -31,6 +31,7 @@ mod main_window;
 mod mode_bar;
 mod now_playing;
 mod preferences;
+mod shortcuts;
 mod sidebar;
 mod sidebar_context;
 mod smart_playlist_editor;
