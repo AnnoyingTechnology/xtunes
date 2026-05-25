@@ -26,7 +26,7 @@ const STATUS_ICON_MISSING: &str = "dialog-warning-symbolic";
 pub(super) struct TrackTableContextMenu {
     menu: TrackRowContextMenu,
     selection: gtk::MultiSelection,
-    popover_parent: glib::WeakRef<gtk::ScrolledWindow>,
+    popover_anchor: gtk::MenuButton,
     cells: Rc<RefCell<Vec<TrackTableContextCell>>>,
 }
 
@@ -34,12 +34,12 @@ impl TrackTableContextMenu {
     pub(super) fn new(
         menu: TrackRowContextMenu,
         selection: gtk::MultiSelection,
-        popover_parent: gtk::ScrolledWindow,
+        popover_anchor: gtk::MenuButton,
     ) -> Self {
         Self {
             menu,
             selection,
-            popover_parent: popover_parent.downgrade(),
+            popover_anchor,
             cells: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -50,10 +50,7 @@ impl TrackTableContextMenu {
         gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
 
         let context = self.clone();
-        gesture.connect_pressed(move |gesture, _n_press, x, y| {
-            let Some(popover_parent) = context.popover_parent.upgrade() else {
-                return;
-            };
+        gesture.connect_released(move |gesture, _n_press, x, y| {
             let Some(widget) = gesture.widget() else {
                 return;
             };
@@ -74,9 +71,18 @@ impl TrackTableContextMenu {
             if track_ids.is_empty() {
                 return;
             }
-            context
-                .menu
-                .popup_at_parent(track_ids, &widget, &popover_parent, x, y);
+            let (anchor_x, anchor_y) = widget
+                .compute_point(
+                    &context.popover_anchor,
+                    &gtk::graphene::Point::new(x as f32, y as f32),
+                )
+                .map(|point| (point.x() as f64, point.y() as f64))
+                .unwrap_or((x, y));
+            let menu = context.menu.clone();
+            let popover_anchor = context.popover_anchor.clone();
+            glib::idle_add_local_once(move || {
+                menu.popup_from_menu_button(track_ids, &popover_anchor, anchor_x, anchor_y);
+            });
         });
         widget.add_controller(gesture);
     }

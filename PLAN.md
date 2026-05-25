@@ -54,19 +54,25 @@ than a drip of partial renames.
 
 ## Summary
 
-developer => desired contextual menu on tracks:
-- Add to playlist => list
-- Play Next (inject next in the queue)
-- Get Info (show the full edition window, multitab)
-- Show Album (switches to the associated Album view)
-- Copy (actually copy the audio file itself)
-- Show in folder (open nautilus or whatever)
-- Remove from library (already implemented)
-- Move to trash (already implemented)
-
 `Sustain` is a Linux-only, Debian-first music library/player built with Rust,
 GTK4, GStreamer, and SQLite. The product target is an iTunes 8~12-like desktop
 music manager centered on a dense table/list workflow.
+
+Track context menu — all shipped:
+
+- Add to playlist
+- Play Next
+- Get Info — multi-tab editor (see `## Get Info` for the two remaining
+  enhancements)
+- Show Album — switch to the associated Album view
+- Copy — copy the audio file itself
+- Show in folder — open Nautilus
+- Remove from library
+- Move to trash
+
+Adjacent playback action still pending: an explicit **Add to Queue**
+(append to tail), distinct from **Play Next** (insert at head). See
+`## Up Next Queue`.
 
 Rhythmbox is an import source only. The application owns its database, playlists,
 statistics, search behavior, settings, and playback state. Ratings are part of
@@ -157,6 +163,67 @@ The first schema should cover:
 - settings
 - schema migrations
 
+## Pre-Release Punch List
+
+A tight index of the small, well-scoped open items that are not large
+enough to warrant their own design section. Each links to the detailed
+section where applicable; items without a detailed section are scoped
+fully here.
+
+- **WAL on the library database** — see `## Library Scan Performance`.
+- **Scan cancellation token** — see `## Library Scan Performance`.
+- **Scan parallelization** — see `## Library Scan Performance`.
+- **Live per-phase scan progress in the status bar** — see
+  `## Library Scan Performance`.
+- **Gapless track-to-track playback** — see
+  `## Gapless Track-to-Track Playback`.
+- **`Add to Queue` (append) action** distinct from `Play Next` — see
+  `## Up Next Queue`.
+- **First-run smart-playlist defaults** — see the smart-playlist note in
+  `## UI Direction`.
+- **Injectable clock for smart-playlist relative-date rules** — see the
+  smart-playlist note in `## UI Direction`.
+- **Within-playlist drag reorder wiring**: `PlaybackCommand` for moving a
+  playlist entry exists in the runtime; the regular-playlist track table
+  must dispatch it on within-playlist row drags. No GTK-only row reorder
+  path.
+- **Now-playing consumes the shared artwork cache**: now-playing currently
+  decodes artwork inline. It should consume the same cache that Albums
+  view uses, so cache invalidations propagate to both surfaces with no
+  per-surface refetch.
+- **Get Info: track-to-track arrow navigation from the main window** —
+  see `## Get Info`. Batch editing in Get Info is a separate, deferred
+  product question.
+- **Preferences module split** — `preferences.rs` is now large enough that
+  the next non-trivial change should split it into per-section widget
+  modules backed by a settings view model, in line with the broader
+  split-when-touched pattern.
+- **BPM, Key, and Waveform analysis tickboxes in Settings** — three
+  independent opt-in toggles so users can pick which heavy local-CPU
+  pipelines they want. See `## Audio Analysis and Consolidation Grouping`.
+- **Single-instance enforcement** — see
+  `## Single-Instance Enforcement (Library Integrity)`.
+- **Developer-isolation CLI flags** (`--config`, `--database`,
+  `--local-scope`) — see `## Developer Isolation (CLI Data Paths)`.
+
+## Get Info
+
+The Get Info window is shipped: multi-tab editor, saving through
+`ApplicationCommand::UpdateMetadata`, with deterministic context-action
+availability. Two enhancements remain:
+
+- **Track-to-track navigation from the main window**: while Get Info is
+  open on a track, the main-window arrow keys (Up/Down on the Songs
+  table) should move the Get Info focus to the previous/next track in the
+  current view, committing any pending edits on leave and reloading the
+  editor's view model from the new track. This turns Get Info into a
+  walkable inspector over a selection or a sort, not a per-track modal.
+- **Batch editing across a multi-track selection** — desired, deferred.
+  Editing one field across multiple selected tracks (with explicit
+  mixed-value handling per field) is product-tricky and not on the
+  immediate path. The single-track edit model is the foundation; batch
+  editing lands after the multi-track field-change model is explicit.
+
 ## Schema Versioning and Migrations (Post-Release)
 
 The first public release must ship with a versioned schema and a migration
@@ -170,215 +237,176 @@ infrastructure lands as part of the release-prep work, with version 1
 defined as whatever schema ships in the first release. Every post-release
 schema change adds a new numbered migration and bumps the version.
 
-## Library Management Roadmap
+## Library Management
 
-Start with a non-destructive library model.
+Sustain supports two library-management modes, surfaced as a single tickbox
+under the library path in Preferences:
 
-In the first stage, scanning a configured library folder should index the files
-where they already are. Sustain must not rename, move, copy, or reorganize files
-unless the user explicitly enables a future managed-library setting. Manual file
-addition should also be accepted without forcing those files into a specific
-filesystem layout.
+- **Don't touch my files** (default): scan the configured library folder and
+  index the files where they already are. Sustain never renames, moves,
+  copies, or reorganizes files. Manual additions are accepted without forcing
+  a specific filesystem layout.
+- **Keep my library organized**: Sustain owns the library layout. Newly added
+  files are copied into the managed artist/album/track layout; existing
+  indexed files are reorganized in the background; every canonical track path
+  stays relative to the configured library root; files outside the library
+  root are never stored as canonical track locations.
 
-Keep the model compatible with a later `Keep my library organized` setting. When
-enabled, that mode should copy added/imported files into clean subfolders under
-the configured library folder. The exact naming template is still to be
-confirmed, but the intended shape is close to:
+There is no separate `Consolidate` / `Organize Existing Library` button.
+Enabling the tickbox starts the background organization task; disabling it
+during a run requests cooperative cancellation (the current file move
+finishes, no further tracks are moved). Disabling later does not move files
+back; it only changes behavior for future additions.
+
+### Non-negotiable safety rules
+
+These apply to managed mode and are not optional:
+
+- track locations are library-relative only
+- managed organization never copies in-library files to reorganize them; it
+  performs metadata-only same-filesystem moves
+- the move primitive must refuse to overwrite an existing destination
+- cross-device moves fail rather than falling back to copy/delete
+- missing tracks are skipped and reported
+- path planning for the batch happens before touching files
+- playlist membership, track IDs, ratings, metadata, and statistics are
+  preserved by retargeting existing tracks rather than creating new ones
+- no GTK widget implements its own file move/copy path
+- scan, import, and organization tasks are mutually exclusive
+- library path changes and manual scans are blocked while a library task is
+  running
+
+### Filesystem move shape
+
+Rust `std::fs::rename` overwrites existing destinations on Unix, which is
+unacceptable for user-owned audio files. The managed-mode move is therefore a
+same-filesystem metadata move: require a regular source file, refuse an
+existing destination, create the destination directory, hard-link the source
+to the destination, then remove the old source. This copies no content,
+spares the SSD, and gives atomic no-overwrite destination creation. If the
+filesystem does not support hard links or the paths are on different devices,
+the move fails — it never falls back to copy/delete.
+
+### Recovery journal
+
+Filesystem moves and SQLite updates are not one atomic transaction. Managed
+organization writes a small journal in the library root before moving files,
+containing the planned track id, source relative path, and destination
+relative path for each move. On startup, and before a new organization task,
+Sustain reconciles the journal:
+
+- destination exists and source does not: update SQLite to the destination
+- source and destination both exist as the same file: remove the old source
+  and update SQLite to the destination
+- source exists and destination does not: leave the track at the source
+- source and destination both exist but are different files: delete nothing
+  and leave the current database record untouched
+
+The journal is removed only after the task finishes or cancels with all
+completed moves reflected in SQLite.
+
+### Path planner
+
+The managed path is produced by a pure domain planner. First-pass layout:
 
 ```text
 Artist/Album/NN Title.ext
 ```
 
-The fuller candidate pattern is:
+Planner requirements:
+
+- preserve the original extension
+- never produce an absolute path
+- never produce `..` components
+- never produce empty components
+- sanitize path separators and control characters
+- handle missing metadata deterministically
+- resolve collisions deterministically
+- return structured plans
+
+Open product decisions:
+
+- exact artist and album fallback wording
+- multi-disc filename style
+- compilation handling
+- user-editable path templates
+
+The fuller pattern the maintainer is considering when templates land:
 
 ```text
 $if2(%albumartist%,%artist%)/$if($ne(%albumartist%,),%album%/,)$if($gt(%totaldiscs%,1),%discnumber%-,)$if($ne(%albumartist%,),$num(%tracknumber%,2) ,)$if(%_multiartist%,%artist% - ,)%title%
 ```
 
-When `Keep my library organized` is active, the main songs list must accept
+### Duplicate detection on managed add
+
+Managed add skips external files already present in the library by content
+hash. Normal library scans must not hash file contents. During managed
+import, existing tracks without hashes are checked lazily by file size
+first, then hashed only when size matches an incoming file. Automatic
+organization of existing files does not deduplicate tracks — it moves the
+existing indexed track records to their managed paths while preserving
+identity.
+
+Path-affecting metadata edits also participate in managed organization. When
+the user edits artist, album artist, composer, album, title, track number,
+disc number, disc total, or compilation status while managed mode is
+enabled, Sustain plans a new managed path and moves the existing file there
+if the path changes.
+
+### Drag-and-drop import
+
+When `Keep my library organized` is active, the main Songs list accepts
 drag-and-drop from the GNOME file manager as a first-class import path.
-Dropping one or more audio files on the songs list should copy each file
-into the managed library folder (using the active naming template) and
-index it. Once the copy has succeeded, ask the user whether to remove the
-original source files that lived outside the managed library folder.
-Concrete details (folder handling, dedupe rules, prompt defaults, behavior
-of the same gesture under `Don't touch my files`) are to be decided at
-implementation time.
+Dropping audio files copies each file into the managed library folder using
+the active naming template and indexes it. After a successful copy, ask the
+user whether to remove the original source files that lived outside the
+managed library folder. Concrete details (folder handling, dedupe rules,
+prompt defaults, behavior of the same gesture under `Don't touch my files`)
+are decided at implementation time.
 
-Do not implement managed-library organization in the first stage, but avoid
-scan and database assumptions that would make it painful later. In particular:
+### Track identity and missing files
 
-- track identity must remain stable and must not be derived only from the file
-  path
-- the database should be able to distinguish the track from its current file
-  location
-- rescans must update existing tracks instead of blindly appending duplicates
-- missing files should remain visible in the library instead of disappearing
-  silently
-- the scanner should report added, updated, missing, skipped, and failed files
-  as explicit outcomes
+Track identity must remain stable and must not be derived only from the file
+path. The database distinguishes a track from its current file location.
+Rescans update existing tracks instead of blindly appending duplicates.
+Missing files remain visible in the library instead of disappearing silently;
+the scanner reports added, updated, missing, skipped, and failed files as
+explicit outcomes.
 
 When a file recorded in the database no longer exists on disk, table views
-should show a warning symbol on that row. Attempting to play the missing track
-should offer a `Locate` workflow that lets the user choose the replacement file
-manually. Relocating should update the track location while preserving playlists,
+show a warning symbol on the row. Attempting to play a missing track offers
+a `Locate` workflow that lets the user choose the replacement file
+manually. Relocating updates the track location while preserving playlists,
 rating, metadata cache, and listening statistics.
 
-## Library Scan Performance (Known Issue)
+## Library Scan Performance
 
-Measurement context: the observations below were taken from an unoptimized
-debug build (`cargo run -p sustain-app`, `dev` profile, `unoptimized +
-debuginfo`). A release build is expected to be substantially faster on the
-CPU-bound phases (tag decoding, hashing, SQLite work), so the absolute
-numbers will move. The structural problem — synchronous work on the GTK
-main thread freezing the UI — is not a profile-level issue and will still
-be present in release; the hard requirements below must hold for both
-profiles, with the validation target re-measured on a release build before
-this is considered closed.
+The scan is off the GTK main thread (background worker + channel), SQLite
+writes are batched in transactions, and the status bar reports the final
+summary. The structural freeze that motivated this section is resolved.
+Remaining open work, in priority order:
 
-The current scan path does not survive a real-world library. Observed behavior
-on a ~10,000-track library:
+- enable WAL journaling on the library database so UI readers are never
+  blocked by the scan writer (only the artwork cache currently uses WAL)
+- add a cancellation token to the scan task so the user can abort a long
+  scan without quitting the app
+- parallelize the CPU/IO-bound phases (tag decoding, hashing, stat) across a
+  worker pool sized to the host (`num_cpus`-based, capped), keeping SQLite
+  writes funneled through a single writer to avoid lock contention
+- surface live per-phase progress in the status bar (files seen, files
+  indexed, current phase) alongside the rotating sync icon — not only the
+  final summary
 
-- the first 2–3 seconds appear to enumerate files from the filesystem
-- after enumeration, the UI freezes completely with one thread pinned at 100%
-- the freeze persisted for at least 45 seconds before the maintainer killed the
-  process
-- after restart, the status bar showed the correct counts/durations, meaning
-  scan progress was being written to SQLite throughout — the work was
-  succeeding, but on a thread that should not have been the UI thread
+Non-goals: no bespoke async runtime, no hand-rolled SQLite connection pool
+before measuring whether a single writer thread plus read-only connections
+suffices, no custom thread pools where `rayon` or a scoped worker pool
+would do.
 
-This is unacceptable. The UI must never freeze, regardless of library size,
-and a 10k-track library is small, not large. Scan responsiveness and
-throughput are a first-class concern, not a polish item.
-
-Hard requirements:
-
-- the GTK main thread must never block on scanning work; no synchronous
-  filesystem traversal, no synchronous tag reads, no synchronous SQLite
-  writes triggered from the UI thread
-- the scan runs entirely as a background task, communicating with the runtime
-  via typed messages
-- the status bar surfaces live progress (files seen, files indexed, current
-  phase) with the rotating sync icon, and the table remains fully interactive
-  while a scan is in flight
-- cancelling a scan is supported and prompt; the partial result already
-  written to SQLite is preserved and consistent
-- a scan can be interrupted by app exit at any point without corrupting the
-  library database
-
-Design directions to evaluate before committing to an implementation:
-
-- split the scan into explicit phases (enumerate, stat, tag-read, hash if
-  needed, persist) so each phase can be tuned and instrumented independently
-- parallelize the CPU/IO-bound phases across a worker pool sized to the host
-  (likely `num_cpus`-based, with a cap), keeping SQLite writes funneled
-  through a single writer to avoid lock contention
-- batch SQLite writes into transactions of a tuned size rather than one
-  statement per track; measure the sweet spot
-- use `WAL` journaling mode for the library database so readers (the UI) are
-  not blocked by the scan writer
-- prefer streaming the enumeration into the worker pool rather than
-  collecting the full file list first, so work begins overlapping with
-  enumeration
-- consider an explicit bounded channel between phases so a slow phase
-  applies backpressure instead of memory ballooning
-- measure before optimizing: add lightweight per-phase timing/counters that
-  can be inspected (debug log or a hidden diagnostics view) so future
-  regressions are catchable
-
-Non-goals for this work:
-
-- no premature caching layers, no custom thread pools where `rayon` or a
-  scoped worker pool would do, no bespoke async runtime
-- no hand-rolled SQLite connection pool before measuring whether a single
-  writer thread plus read-only connections suffices
-
-Validation target: on the maintainer's ~10k-track library, a full cold scan
-must complete without ever blocking the UI for more than a single animation
-frame, and a warm rescan (no changes) must be substantially faster than a
-cold scan because unchanged files are detected cheaply (mtime + size, not
-full tag re-read).
-
-## Table Interaction Performance (Known Issue)
-
-Measurement context: the observations below were taken from an unoptimized
-debug build (`cargo run -p sustain-app`, `dev` profile, `unoptimized +
-debuginfo`). Debug builds penalize per-row bind work, sort/filter passes,
-and any hot path that crosses generics or iterator chains, so the absolute
-sluggishness will partially shrink under `--release`. However, the
-Rhythmbox baseline cited below is also a distribution build, not a debug
-build, so the comparison is fair only after we re-measure Sustain in
-release. Before declaring a regression vs. Rhythmbox, the table targets
-must be re-validated on a release build; structural issues uncovered along
-the way (non-virtualized rows, per-bind allocations, synchronous queries
-on selection) are profile-independent and must be fixed regardless.
-
-Independently from the scan freeze, the Songs table itself does not stay
-responsive at real library sizes. Observed on the maintainer's ~10k-track
-library, on top-tier consumer hardware as of mid-2026:
-
-- scrolling is visibly sluggish, not 60+ fps
-- a single click to activate a row has a roughly 500 ms lag before the row
-  reflects the new selection
-- the rest of the UI feels heavy in proportion
-
-This is unacceptable. The target is fluid, instantaneous interaction at the
-scale of a real library, not at the scale of the in-memory fake fixtures used
-during interface-first development. 10k tracks is small; the table must
-remain crisp at that size and degrade gracefully well beyond it.
-
-Reference point: the exact same ~10k-track library is perfectly fluid in
-Rhythmbox on the same hardware. Scrolling is smooth and row selection is
-instantaneous. The performance target here is therefore known to be
-achievable on this machine with this dataset — this is not chasing a wild
-goose, it is matching a baseline that an existing GTK music player already
-hits. If Sustain cannot match it, the bottleneck is in our own code, not in
-GTK, the library, or the hardware.
-
-Hard requirements:
-
-- scrolling stays at the display's native refresh rate with no dropped frames
-  on a populated table
-- single-click row activation reflects in the UI within one frame; no
-  perceptible lag between input and visual feedback
-- sort, search/filter, and column resize stay interactive at 10k+ rows
-- nothing in the row activation path performs synchronous SQLite queries,
-  synchronous tag reads, or synchronous artwork decoding
-
-Design directions to evaluate before committing to an implementation:
-
-- confirm the table is using a virtualized GTK view (`GtkColumnView` /
-  `GtkListView` with a `GtkListItemFactory`) rather than materializing a
-  widget per row; the lag pattern strongly suggests the row set is not
-  virtualized or the factory is doing too much work per bind
-- audit the per-row bind path for unnecessary allocations, string
-  formatting, or property lookups that run on every scroll tick; precompute
-  display strings once and store them on the view model
-- ensure the underlying list model is a flat, indexable structure
-  (`GListModel`-backed) with O(1) item access and O(log n) or better
-  filtering/sorting via `GtkFilterListModel` / `GtkSortListModel`, not a
-  hand-rolled linear filter that re-scans on every change
-- decouple selection-change handling from any downstream work that is not
-  strictly required to draw the new selection state; defer artwork loads,
-  detail-pane updates, and metadata queries to idle callbacks
-- batch model invalidations: a single visible change should trigger one
-  redraw, not a cascade of per-row notifications
-- measure with `GTK_DEBUG=interactive` and frame timing before guessing;
-  the 500 ms click lag is large enough that it points at a specific
-  blocking call, not at general overhead
-
-Non-goals:
-
-- no custom virtualization layer; GTK4 already provides one and the task is
-  to use it correctly, not replace it
-- no premature caching of derived view data before profiling identifies
-  what is actually slow
-
-Validation target: on the maintainer's ~10k-track library, the Songs table
-scrolls smoothly with no perceptible jank, click-to-select is visually
-instantaneous, and search/sort/filter updates apply within one or two
-frames. These targets are gating for any claim that the interface-first
-shell is "done"; meeting them only on small fake fixtures does not count.
+Validation target: on the maintainer's ~10k-track library (release build), a
+full cold scan completes without blocking the UI for more than a single
+animation frame, and a warm rescan (no changes) is substantially faster than
+a cold scan because unchanged files are detected cheaply via mtime + size,
+not full tag re-read.
 
 ## Gapless Track-to-Track Playback (Known Issue)
 
@@ -455,30 +483,19 @@ Non-goals:
 
 ## Up Next Queue
 
-Sustain should expose a visible Up Next queue as a first-class playback
-surface, separate from the underlying play order derived from
-shuffle/repeat over a playlist or the library. The model is the iTunes 11
-"Up Next": an explicit list of upcoming tracks the user has queued, drained
-as playback advances; distinct from "what would play next if nothing else
-were queued".
+The queue model is in runtime: `PlaybackCommand::EnqueueNext` injects at the
+head, the queue takes precedence over the implicit play order, and a
+`Play Next` row context action dispatches it. Distinct from the iTunes 11
+"Up Next" target in two ways that still need addressing:
 
-In scope:
-
-- `Play Next` (inject at the head of the queue) and `Add to Queue` (append
-  to the tail) actions, both available from the Songs row context menu
-  and from selection-level actions
-- the queue takes precedence over the implicit play order; once empty,
-  playback falls back to the underlying ordering
-- queue state is owned and observed through the runtime, not stored in a
-  playlist
-
-Deferred — open questions to settle when this is scheduled:
-
-- where the queue is surfaced in the UI (popover from the now-playing area,
-  side panel, dedicated view, …)
-- whether queue entries are reorderable and individually removable, and
-  what those interactions look like (drag, context menu, …)
-- whether queue state persists across app restarts
+- add an explicit `Add to Queue` action that appends to the tail (separate
+  from `Play Next` which inserts at the head)
+- expose a visible Up Next surface so the user can see what is queued; the
+  UI placement (popover from the now-playing area, side panel, dedicated
+  view) is undecided
+- decide whether queue entries are reorderable and individually removable,
+  and what those interactions look like (drag, context menu)
+- decide whether queue state persists across app restarts
 
 ## Album-Centric Playback
 
@@ -815,44 +832,32 @@ changing its appearance:
 - the seek path goes through the existing playback command, not a direct
   pipeline call from the widget
 
-Smart playlists are in scope after regular playlist and table behavior is
-stable. They should be rule-based saved queries over the local library, not a
-cloud/recommendation feature.
+Smart playlists are shipped as rule-based saved queries over the local
+library (domain rules, runtime evaluation, sidebar rows, editor surface,
+folder grouping). Two follow-ups still pending:
 
-On first run, Sustain ships a small set of default smart playlists so a
-fresh library is immediately useful, in the iTunes tradition. These are
-ordinary user-editable smart playlists — the user can rename, modify, or
-delete them like any other. The default set deliberately excludes the
-iTunes entries that don't fit Sustain's pure-local-music scope (no
-Music Videos, no Purchased, no podcast/audiobook buckets unless those
-media kinds are introduced later).
+- **First-run defaults**: seed a small starter set on a fresh library so it
+  is immediately useful, in the iTunes tradition. These are ordinary
+  user-editable smart playlists — the user can rename, modify, or delete
+  them like any other. The default set deliberately excludes the iTunes
+  entries that don't fit Sustain's pure-local-music scope (no Music Videos,
+  no Purchased, no podcast/audiobook buckets unless those media kinds are
+  introduced later). Defaults to ship:
+  - **Recently Added** — added in the last 2 weeks, newest first
+  - **Recently Played** — played in the last 2 weeks, sorted by last-played
+    descending
+  - **Top 25 Most Played** — highest play count, limited to 25
+  - **Top Rated** — rating ≥ 4 stars
+  - **Unplayed** — play count is 0
+  - **Loved** — rating = 5 stars (the "favourites" bucket)
+- **Injectable clock for relative-date rules**: relative-date evaluation
+  currently reaches for `SystemTime::now()` directly. Plumb an injectable
+  clock through so the relative-date rules ("in the last 2 weeks") are
+  deterministic in tests.
 
-Defaults to ship:
-
-- **Recently Added** — added in the last 2 weeks, newest first
-- **Recently Played** — played in the last 2 weeks, sorted by last-played
-  descending
-- **Top 25 Most Played** — highest play count, limited to 25
-- **Top Rated** — rating ≥ 4 stars
-- **Unplayed** — play count is 0
-- **Loved** — rating = 5 stars (the "favourites" bucket)
-
-Exact rule shapes are open to refinement as the smart-playlist rule set
-grows; the principle is that a freshly populated library is never empty
+Exact default rule shapes are open to refinement as the smart-playlist rule
+set grows; the principle is that a freshly populated library is never empty
 of useful default organisation.
-
-Playback controls should be wired through the real command path:
-
-- previous track
-- play/pause
-- next track
-- volume
-
-The volume control must avoid accidental software amplification near the top of
-the range. Values from `95%` through `99.9%` should be magnetized to `100%` or
-back below the danger range so the user cannot casually leave the player at an
-almost-maximum software volume. This protects a clean listening chain from
-unintentional non-unity gain behavior.
 
 ## Keyboard Shortcuts
 
@@ -861,48 +866,22 @@ translated to Linux/GTK conventions (`Ctrl` instead of `Cmd`, GNOME-native
 modifiers). The goal is not a literal port but a familiar muscle-memory
 experience for ex-iTunes users on GNOME.
 
-The first required shortcut is **Jump to Current Track**: a single keypress
-that scrolls the main table to the currently playing track and selects its
-row. iTunes binds this to `Cmd+L`; on Linux this maps to `Ctrl+L`. This is
-the highest-priority shortcut — without it, a large library is unnavigable
-once playback has drifted away from the visible viewport.
+`Ctrl+L` Jump to Current Track is wired. A broader shortcut pass for
+playback, navigation, selection/editing, playlists, and window management
+still needs to be specified — including conflict review against GNOME
+conventions and in-app shortcut discoverability.
 
-A broader shortcut pass for playback, navigation, selection/editing,
-playlists, and window management still needs to be specified. The full
-mapping (iTunes shortcuts → Linux/GTK equivalents, conflicts with GNOME
-conventions, in-app shortcut discoverability) is to be decided when that
-pass is scheduled.
+## Search Bar
 
-## Search Bar Wiring
-
-The search field in the integrated top bar is currently a visual element
-only. It must be wired into the real query path so that typing in the
-search field filters the active view (Songs, Albums, Playlists) in
-realtime, with no submit button, no Enter-to-search, and no perceptible
-delay between keystroke and filtered result on a real-sized library.
-
-Hard requirements once this work begins:
-
-- typing updates the filtered result set as the user types, debounced
-  only as much as needed to stay smooth on a 10k+ track library; the
-  debounce must not feel like a delay
-- search runs through the existing query/command path; the widget must
-  not query SQLite, scan in-memory tracks, or touch metadata files
-  directly
-- the active view (Songs / Albums / Playlists) determines what the
-  search applies to; switching views while a query is active preserves
-  the query and re-applies it to the new view
-- clearing the field restores the unfiltered view immediately
-- the search field stays responsive while a scan or other background
-  task is in flight; search must never block on background work
-
-Open design questions to clarify with the maintainer before
-implementation:
+The top-bar search field is wired into the live query path with a debounced
+keystroke filter. The remaining design surface — which is product, not
+infrastructure — is still open and should be settled with the maintainer
+before extending the current behavior:
 
 - **searched fields**: which track fields participate in the match?
   Candidates include title, artist, album artist, album, genre, year,
-  composer, comment, and file path. The default set and whether the
-  user can scope the search to a specific field are both undecided.
+  composer, comment, and file path. Whether the user can scope the search
+  to a specific field is also undecided.
 - **match semantics**: substring vs. token-prefix vs. fuzzy; case
   sensitivity; diacritic folding; whether multiple whitespace-separated
   terms are ANDed across fields (typical library-search behavior) or
@@ -918,10 +897,6 @@ implementation:
   across all playlists?
 - **persistence**: whether the current query is preserved across app
   restarts or always starts empty.
-
-These decisions need to be made with the maintainer before the search
-behavior is implemented; this section captures the requirement and the
-open questions, not a chosen design.
 
 ## Later Statistics Views
 
@@ -1001,21 +976,28 @@ This slice should prove the full architecture without adding non-core features.
 ## Waveform Analysis (Tentative)
 
 Per-track waveform analysis would be a nice-to-have. Computing a downsampled
-amplitude envelope (peak/RMS bins) per track at import or first-play time,
-cached alongside the track in the library, would unlock a visual representation
-of the audio that could be displayed somewhere in the UI.
+amplitude envelope (peak/RMS bins) per track, cached alongside the track in
+the library, would unlock a visual representation of the audio that could
+be displayed somewhere in the UI.
 
-The placement is undecided. Candidates worth considering later include the
-now-playing area, a seek-bar replacement, or a track-detail surface. None of
-these are committed; the right home has to be found before this is worth
-implementing.
+Enablement and pipeline shape are not separate from the other local-CPU
+analyses: waveform analysis is one of the three independent tickboxes
+under `## Audio Analysis and Consolidation Grouping` and runs through the
+same opt-in, background-task, non-destructive contract as BPM and Key
+detection. Waveform-specific notes:
 
-Constraints if/when this is built:
-
-- analysis is a background task, never blocking the UI or playback start
-- the cached envelope is small, fixed-resolution, and detached from the audio
-  file itself so it survives metadata edits
+- the cached envelope is small, fixed-resolution, and detached from the
+  audio file itself so it survives metadata edits
+- storage is the SQLite cache (not embedded tags) since waveform envelopes
+  are not standard tag payloads
 - the renderer must work cleanly in both native light and dark modes
+
+UI placement is undecided. Candidates worth considering later include the
+now-playing area, a seek-bar replacement, or a track-detail surface. None
+of these are committed; the right home has to be found before the
+rendering side is worth building. The analysis tickbox can ship before
+the rendering surface exists — pre-computing envelopes for a library is
+useful on its own and avoids a stall when a renderer is later added.
 
 ## Metadata Backfill (Tentative)
 
@@ -1073,44 +1055,73 @@ This feature is out of scope for the first vertical slice. It should not be
 attempted before the local metadata scan, tag-writing path, and background-task
 status surface are solid.
 
-## Audio Analysis and Consolidation Grouping (Open Question)
+## Audio Analysis and Consolidation Grouping
 
-Two further per-track derived values are likely candidates for the library:
+Three per-track derived values are in scope as local-CPU analysis features:
 
 - **BPM detection** — analyze the audio to estimate beats per minute, write
   the result to the track's native tag and SQLite cache when no BPM is
   already present.
 - **Musical key detection** — analyze the audio to estimate the key (e.g.
   Camelot or standard notation), persisted the same way.
+- **Waveform analysis** — compute a downsampled amplitude envelope
+  (peak/RMS bins) per track and cache it alongside the track in the
+  library. Used by waveform-based UI surfaces (see
+  `## Waveform Analysis (Tentative)`).
 
-These two share the non-destructive contract of `Metadata Backfill` (never
-overwrite an existing tag value) but differ in shape: they are local CPU
-work, not network lookups, and they always produce a value (no
-"no-match-found" outcome). Library and crate choice (`aubio`, `essentia`,
-pure-Rust alternatives) is unresolved.
+All three share the non-destructive contract of `Metadata Backfill` (never
+overwrite an existing value) but differ in shape: they are local CPU work,
+not network lookups, and they always produce a value (no "no-match-found"
+outcome). Library and crate choice (`aubio`, `essentia`, pure-Rust
+alternatives) is unresolved.
 
-The open product question is how the four derived/fetched-data features
-should be grouped together so they stay consistent and discoverable:
+### Settings tickboxes
+
+The Settings window exposes **three distinct tickboxes** — BPM analysis,
+Key analysis, and Waveform analysis — not a single combined toggle. They
+are independent analysis pipelines, can succeed or fail independently, and
+the user must be able to enable any subset (e.g. enable BPM for Smart
+Shuffle ordering without committing to key detection's heavier processing
+or to waveform storage cost). The rationale is to insulate users from
+heavy work they don't want: each pipeline has its own CPU footprint and
+its own storage footprint, and each unlocks its own product surface.
+
+Behavior when a tickbox is enabled:
+
+- run the analysis as a background task over the library, scoped per the
+  shared scope controls (whole library vs current selection vs
+  missing-values-only)
+- respect the non-destructive contract: only fill tracks whose target
+  field/cache row is currently empty
+- write through the existing tag-writing path (BPM, Key) or the dedicated
+  waveform cache (Waveform) so the file on disk and the SQLite cache stay
+  consistent
+- surface per-track outcomes (filled, skipped-already-present, failed) and
+  overall progress in the bottom-right status bar, like other background
+  tasks
+
+Disabling a tickbox cancels any in-flight run for that analysis and stops
+future automatic runs. It does not remove already-written BPM/Key values
+from tags, nor already-computed waveform envelopes from the cache.
+
+### Grouping with metadata backfill
+
+The five derived/fetched-data features share one settings surface so they
+stay consistent and discoverable:
 
 - `Fetch missing artwork` (network)
 - `Fetch missing tags` (network)
 - `Detect BPM` (local CPU)
 - `Detect key` (local CPU)
+- `Analyze waveform` (local CPU)
 
-All four are opt-in, run as background tasks against the existing library,
+All five are opt-in, run as background tasks against the existing library,
 respect the same non-destructive contract, and produce per-track outcomes.
-A natural shape is a single `Consolidation` tab in the Settings window
-containing all four, with shared scope controls (whole library vs current
-selection vs missing-values-only) and a unified progress surface in the
-status bar.
-
-Stated here so the decision is not forgotten when the first of these
-features is implemented. Settling it once — naming, location, scope
-controls, background-task model — before any of the four ship will avoid
-ending up with four mismatched entry points scattered across the UI.
-
-This section is intentionally a placeholder. Concrete decisions belong in
-the dedicated sections for each feature once they are ready to ship.
+They share one `Consolidation` tab in Settings with shared scope controls
+(whole library vs current selection vs missing-values-only) and a unified
+progress surface in the status bar. Settling naming, location, scope
+controls, and background-task model once — before any of the five ship —
+avoids ending up with five mismatched entry points scattered across the UI.
 
 ## Smart Shuffle (Tentative)
 
@@ -1510,8 +1521,9 @@ Scope:
   each keystroke, table scroll smoothness with all columns visible,
   Albums-view tile rebuild on selection, and SQLite query time on the
   hot read paths
-- treat the existing "Known Issue" sections (Library Scan Performance,
-  Table Interaction Performance, Gapless Track-to-Track Playback) as the
+- treat the existing open performance items (`## Library Scan
+  Performance`, `## Gapless Track-to-Track Playback`, and the
+  `## Pre-Release Punch List` entries that touch hot paths) as the
   starting checklist, not the full surface — those captured what was
   visible at the time, not necessarily what will dominate once the rest
   of the product is in place

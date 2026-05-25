@@ -271,10 +271,10 @@ impl TrackRowContextMenu {
         self
     }
 
-    pub(crate) fn popup_at(
+    pub(crate) fn popup_from_menu_button(
         &self,
         track_ids: Vec<TrackId>,
-        anchor: &impl IsA<gtk::Widget>,
+        button: &gtk::MenuButton,
         x: f64,
         y: f64,
     ) {
@@ -282,47 +282,25 @@ impl TrackRowContextMenu {
             return;
         }
 
-        self.popup_at_parent(track_ids, anchor, anchor, x, y);
+        let popover = self.build_popover(track_ids);
+        let rect = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+        popover.set_pointing_to(Some(&rect));
+
+        let button_for_close = button.clone();
+        popover.connect_closed(move |_| {
+            button_for_close.set_popover(None::<&gtk::Popover>);
+        });
+
+        button.set_popover(Some(&popover));
+        button.popup();
     }
 
-    pub(crate) fn popup_at_parent(
-        &self,
-        track_ids: Vec<TrackId>,
-        anchor: &impl IsA<gtk::Widget>,
-        popover_parent: &impl IsA<gtk::Widget>,
-        x: f64,
-        y: f64,
-    ) {
-        if track_ids.is_empty() {
-            return;
-        }
-
-        let (parent_x, parent_y) = if anchor.as_ref() == popover_parent.as_ref() {
-            (x, y)
-        } else {
-            let Some(point) = anchor.as_ref().compute_point(
-                popover_parent.as_ref(),
-                &gtk::graphene::Point::new(x as f32, y as f32),
-            ) else {
-                return;
-            };
-            (point.x() as f64, point.y() as f64)
-        };
-
+    fn build_popover(&self, track_ids: Vec<TrackId>) -> gtk::Popover {
         let popover = gtk::Popover::new();
         popover.set_has_arrow(false);
         popover.add_css_class("compact-context-menu");
-        popover.set_parent(popover_parent.as_ref());
         popover.set_child(Some(&self.menu_content(&popover, track_ids)));
-
-        let popover_for_close = popover.clone();
-        popover.connect_closed(move |_| {
-            popover_for_close.unparent();
-        });
-
-        let rect = gdk::Rectangle::new(parent_x as i32, parent_y as i32, 1, 1);
-        popover.set_pointing_to(Some(&rect));
-        popover.popup();
+        popover
     }
 
     fn menu_content(&self, popover: &gtk::Popover, track_ids: Vec<TrackId>) -> gtk::Box {

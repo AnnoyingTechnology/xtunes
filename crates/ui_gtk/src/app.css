@@ -419,6 +419,15 @@ popover.compact-context-menu > contents {
     padding: 0;
 }
 
+button.context-popover-anchor {
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+}
+
 .smart-playlist-error {
     color: #e66100;
 }
