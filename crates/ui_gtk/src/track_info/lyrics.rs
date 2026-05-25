@@ -18,10 +18,10 @@ impl LyricsPage {
         view.add_css_class("track-info-lyrics-view");
         view.set_wrap_mode(gtk::WrapMode::WordChar);
         view.set_accepts_tab(false);
-        view.set_top_margin(8);
-        view.set_bottom_margin(8);
-        view.set_left_margin(8);
-        view.set_right_margin(8);
+        view.set_top_margin(16);
+        view.set_bottom_margin(16);
+        view.set_left_margin(16);
+        view.set_right_margin(16);
         if let Some(text) = initial.lyrics.as_deref() {
             view.buffer().set_text(text);
         }

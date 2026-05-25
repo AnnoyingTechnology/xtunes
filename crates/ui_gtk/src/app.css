@@ -656,3 +656,14 @@ columnview.track-table listview row:selected .track-table-status-missing,
 .track-table-cell.track-table-row-selected .track-table-status-missing {
     color: @theme_selected_fg_color;
 }
+
+.track-info-header {
+    background-color: @theme_base_color;
+    padding: 14px;
+}
+
+.track-info-cover {
+    background: none;
+    border: none;
+    box-shadow: none;
+}

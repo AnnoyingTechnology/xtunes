@@ -234,17 +234,115 @@ The Get Info window is shipped: multi-tab editor, saving through
 `ApplicationCommand::UpdateMetadata`, with deterministic context-action
 availability. Two enhancements remain:
 
-- **Track-to-track navigation from the main window**: while Get Info is
-  open on a track, the main-window arrow keys (Up/Down on the Songs
-  table) should move the Get Info focus to the previous/next track in the
-  current view, committing any pending edits on leave and reloading the
-  editor's view model from the new track. This turns Get Info into a
-  walkable inspector over a selection or a sort, not a per-track modal.
+- **In-dialog Previous/Next navigation across tracks** — planned, see
+  *Get Info: Track-to-Track Navigation* below.
 - **Batch editing across a multi-track selection** — desired, deferred.
   Editing one field across multiple selected tracks (with explicit
   mixed-value handling per field) is product-tricky and not on the
   immediate path. The single-track edit model is the foundation; batch
   editing lands after the multi-track field-change model is explicit.
+
+### Get Info: Track-to-Track Navigation
+
+Match the iTunes 11 affordance: a pair of Previous/Next arrow buttons in the
+bottom-left corner of the Get Info dialog walk a cursor over the displayed
+track list while the dialog stays open. Edits are committed implicitly on
+navigation — that is the explicit product decision, not the only option
+considered. The dialog becomes a walkable inspector over the current view's
+ordering rather than a strictly per-track modal.
+
+**Goal.** A user inspecting/editing many tracks in sequence can stay inside
+one dialog, hit Next, and continue editing the next track in the visible
+order without re-opening the dialog.
+
+**Cursor model.** At dialog open time the caller snapshots the current view's
+ordered list of `TrackId`s and the index of the track the user invoked Get
+Info on. The dialog owns that snapshot for its lifetime; it does not react to
+the underlying filter/sort changing. This matches iTunes and avoids the
+"cursor jumps because the live list reordered under you" surprise.
+
+**Save semantics: implicit commit on navigate.**
+
+- Clicking Previous/Next triggers the same commit pipeline as OK does today
+  (metadata diff, rating diff, play-count reset), then loads the new track.
+- Cancel still works on the currently visible track only — earlier
+  arrow-committed edits stay committed. This is the iTunes-faithful
+  behavior; the dialog title bar and an unobtrusive "saved" cue are out of
+  scope but worth considering once shipped.
+- If any dispatch fails (tag-write error, file gone, etc.), the dialog
+  stays on the current track and surfaces the error — navigation does not
+  swallow failures.
+
+**Bounds and disable state.** Previous is disabled at index 0; Next at
+`len-1`. No wrap-around. If a track in the snapshot has been removed from
+the library by the time the cursor reaches it (background task, external
+deletion), the dialog skips it transparently to the next valid neighbor in
+the navigation direction; if none exists, the corresponding arrow disables.
+
+**Window title.** Update the title from the static "Get Info" to include
+the current track's display name, so the user always knows which row of the
+snapshot they're editing. The title is the only chrome that changes on
+navigate.
+
+**Refactor scope.** The current dialog hard-codes "one track per instance":
+`initial_metadata`, `initial_rating`, `track_id` are captured by value into
+the OK closure and into the artwork add/remove closures. Generalizing this
+requires:
+
+- A shared `Rc<RefCell<DialogCursor>>` holding `{ ordered_ids, index,
+  current_track, baseline_metadata, baseline_rating, baseline_play_count }`.
+  Every closure that currently captures one of those values reads it through
+  the cursor instead.
+- Each page gains a `reload(track, baseline_metadata, artwork)` entry
+  point:
+  - `DetailsPage::reload` — repopulate every field, reset the rating-star
+    state, reset the play-count reset-button armed flag.
+  - `LyricsPage::reload` — replace the buffer text.
+  - `ArtworkPage::reload` — replace the frame contents, re-arm the Remove
+    button's sensitivity, swap the embedded-vs-missing note.
+  - `file_page` — currently a free function returning a `Widget`. Promote
+    to a struct with `reload(track, absolute_path)`.
+  - `build_header` — either return label refs in the `Header` struct and
+    mutate them on reload, or rebuild the row and swap it under the
+    full-width tinted container.
+- The diff-against-baseline contract becomes the single most important
+  invariant: the baseline must be re-snapshotted from the *new* track's
+  metadata every time the cursor advances. A stale baseline would leak
+  edits from track A into track B's commit. Worth a focused test once the
+  refactor lands.
+- The caller (`track_context.rs` action wiring) computes the displayed
+  ordered list of track IDs at the moment Get Info is invoked and hands it
+  to `open_track_info_dialog` alongside the starting index. The dialog
+  signature changes from `(track_id)` to `(track_ids, start_index)`. Other
+  callers — if any — that don't have a meaningful surrounding list pass a
+  single-element vec; the arrows stay disabled.
+
+**Keyboard.** Bind `Ctrl+]` / `Ctrl+[` (iTunes's bindings) to Next /
+Previous inside the dialog, alongside the buttons. `Esc` keeps its current
+"close without saving the current track" meaning.
+
+**Out of scope for this feature.** No schema changes, no new
+`ApplicationCommand` variants — every commit path already exists. No
+changes to the entry points other than the dialog signature. Batch editing
+remains separately deferred.
+
+**Risk surface.**
+
+- Stale baseline → cross-track edit leakage. Mitigated by structuring the
+  reload as "load track, snapshot baseline, then bind UI" and adding a
+  test that opens the dialog, edits track A, navigates, asserts the
+  in-flight commit was scoped to A.
+- Removed-track-during-navigation race. Mitigated by the
+  skip-to-next-valid rule above; if both directions exhaust, the dialog
+  closes with a status message rather than dead-arrowing.
+- Tag-write failure mid-walk. The existing OK error path stays the model:
+  surface the error, keep the dialog open on the current track, do not
+  advance the cursor.
+
+**Estimated effort.** Medium refactor, ~200–400 LOC across `track_info.rs`,
+the four page modules, and the single caller that opens the dialog. No new
+dependencies. Cleanly removes the latent "one track per dialog instance"
+assumption without leaving a hack surface.
 
 ## Schema Versioning and Migrations (Post-Release)
 
@@ -1763,6 +1861,86 @@ The pass ends with a documented before/after for each metric and a
 short note explaining any deliberately-deferred bottleneck (with the
 reason it was left alone). Performance regressions found after this
 pass should be treated as bugs against the established baselines.
+
+## Pre-Release Data-Loss Audit
+
+A dedicated audit pass for **data-loss prevention** is a hard gate before
+any public release. Music libraries are precious — they represent years of
+ripping, tagging, rating, and listening — and a single bad code path that
+truncates a file, overwrites a tag with empty data, or clears a play count
+on rescan is not recoverable from the user's perspective. This audit is
+separate from, and complementary to, the security audit: security is
+"can an attacker hurt the user"; this is "can our own code hurt the user."
+
+**Scope.** Every code path that writes to, mutates, replaces, or deletes:
+
+- audio files on disk (atomic-replace pipelines, tag writers, artwork
+  embed/strip, any future format conversion)
+- the SQLite library database (ratings, play counts, skip counts,
+  last-played / last-skipped timestamps, playlist membership, smart
+  playlist definitions, folder hierarchy, custom metadata)
+- on-disk caches that, if corrupted, could mask or destroy the
+  authoritative state (artwork cache, search index, lyric cache)
+
+**Audit checklist.** Each candidate path is reviewed for:
+
+- **Atomicity.** Tag writes must be write-to-temp + rename-into-place, not
+  in-place truncation. A power loss or kill -9 mid-write must leave the
+  original file intact. Same for SQLite — wrap multi-statement edits in a
+  transaction.
+- **Rescan idempotence.** Rescanning a library MUST NOT clobber values that
+  live only in SQLite (e.g. skip count in Vorbis Comments). The general
+  tag-mirroring rule says file tags win on conflict — but only for fields
+  that *have* a tag. SQLite-only fields are authoritative for their
+  formats and must survive a full rescan.
+- **Empty-string vs. missing.** Distinguish "user cleared the field" from
+  "we failed to read it." A read failure must never propagate as
+  "title = ''" and overwrite a valid file tag on the next save. Read
+  failures are explicit errors, not empty values.
+- **Diff direction.** Metadata commits use a diff-against-baseline model.
+  Every diff must be verified to write *only* the fields the user
+  actually changed. A buggy diff that emits every field on every save
+  amplifies the blast radius of any single bug into all fields.
+- **Destructive commands gated.** Delete-file, remove-from-library, clear
+  ratings, reset play counts, and similar irreversible actions require
+  explicit user confirmation and must never be the default of a keyboard
+  shortcut or auto-cleanup pass. No code path may reach a "rm" or a tag
+  wipe without a confirmed user intent in the call stack.
+- **Background tasks vs. live edits.** A long-running scan, organize,
+  metadata-write, or import job must cooperate with concurrent user
+  edits — last-writer-wins is acceptable only if both writers have the
+  same baseline. If the user edits a track while a background job is
+  rewriting that track's tags, the audit verifies which write wins and
+  whether the loser surfaces an error.
+- **Filesystem moves and renames.** "Organize library" / "consolidate"
+  flows must copy-then-verify-then-delete-source, not move-and-pray. A
+  failed move must leave the source file intact and a clear error trail.
+- **Removable media and missing files.** A track on an unmounted drive
+  must register as "unavailable", not be silently deleted from the
+  library on the next scan. The library row is the user's record that
+  the track existed; deleting it because the file is currently
+  unreachable is data loss.
+- **Database vacuum / migration paths.** Once migrations land
+  post-release, every migration is reviewed for "is the source data
+  recoverable if this migration fails halfway?" Pre-release we don't
+  carry migrations, but the audit covers the schema-rebuild path used
+  during development too.
+- **Backup-friendliness.** The library DB and any out-of-tree data
+  (artwork cache, etc.) should be in known, single-rooted locations so
+  the user can back them up with one rsync. The audit verifies nothing
+  important lives in a path the user wouldn't think to copy.
+
+**Method.** Same shape as the security audit — independent passes by LLM
+coding agents (Codex and Claude) over the codebase with this checklist,
+plus a manual review of any path either agent flagged. Findings classified
+as: must-fix-before-release / fix-but-acceptable-with-mitigation /
+documented-known-limitation. Anything that can silently destroy user data
+is must-fix; failures that surface a clear error to the user can be
+weighed against effort.
+
+**Non-goals.** Not a performance pass, not a UX pass, not a
+feature-completeness review. The single question is: "can this code lose
+a user's music or library state, ever, under any code path?"
 
 ## Pre-Release Security Audit
 
