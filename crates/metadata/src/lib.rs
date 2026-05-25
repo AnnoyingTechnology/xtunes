@@ -55,6 +55,7 @@ pub struct ScannedTrack {
     pub relative_path: TrackRelativePath,
     pub metadata: TrackMetadata,
     pub rating: Rating,
+    pub file_size_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -120,12 +121,18 @@ where
             if metadata.file_type().is_dir() {
                 self.scan_directory(library_path, &path, scan);
             } else if metadata.file_type().is_file() {
-                self.scan_file(library_path, path, scan);
+                self.scan_file(library_path, path, metadata.len(), scan);
             }
         }
     }
 
-    fn scan_file(&self, library_path: &Path, path: PathBuf, scan: &mut LibraryScan) {
+    fn scan_file(
+        &self,
+        library_path: &Path,
+        path: PathBuf,
+        file_size_bytes: u64,
+        scan: &mut LibraryScan,
+    ) {
         if audio_format_from_path(&path).is_err() {
             scan.skipped_unsupported_files += 1;
             return;
@@ -165,6 +172,7 @@ where
             relative_path,
             metadata,
             rating,
+            file_size_bytes: Some(file_size_bytes),
         });
     }
 }

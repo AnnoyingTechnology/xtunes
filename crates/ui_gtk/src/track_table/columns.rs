@@ -2,8 +2,10 @@
 // Copyright (C) 2026 AnnoyingTechnology
 
 use std::cmp::Ordering as CmpOrdering;
+use std::time::SystemTime;
 
 use super::row::TrackTableRow;
+use crate::date_format::format_system_time_short;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TrackTableColumn {
@@ -141,8 +143,8 @@ impl TrackTableColumn {
             Self::Duration => track_duration_text(row.duration_seconds),
             Self::Rating => row.rating.to_string(),
             Self::Plays => row.plays.to_string(),
-            Self::LastPlayed => row.last_played.clone().unwrap_or_default(),
-            Self::DateAdded => row.date_added.clone(),
+            Self::LastPlayed => optional_date_text(row.last_played),
+            Self::DateAdded => optional_date_text(row.date_added),
             Self::TrackNumber => optional_number_text(row.track_number),
         }
     }
@@ -173,6 +175,10 @@ fn compare_text(left: &str, right: &str) -> CmpOrdering {
 
 fn optional_number_text<T: std::fmt::Display>(value: Option<T>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+fn optional_date_text(value: Option<SystemTime>) -> String {
+    value.and_then(format_system_time_short).unwrap_or_default()
 }
 
 fn track_duration_text(duration_seconds: u64) -> String {

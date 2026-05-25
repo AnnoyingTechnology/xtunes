@@ -26,7 +26,8 @@ const STATUS_ICON_MISSING: &str = "dialog-warning-symbolic";
 pub(super) struct TrackTableContextMenu {
     menu: TrackRowContextMenu,
     selection: gtk::MultiSelection,
-    popover_parent: gtk::ScrolledWindow,
+    popover_parent: glib::WeakRef<gtk::ScrolledWindow>,
+    cells: Rc<RefCell<Vec<TrackTableContextCell>>>,
 }
 
 impl TrackTableContextMenu {
@@ -38,9 +39,77 @@ impl TrackTableContextMenu {
         Self {
             menu,
             selection,
-            popover_parent,
+            popover_parent: popover_parent.downgrade(),
+            cells: Rc::new(RefCell::new(Vec::new())),
         }
     }
+
+    pub(super) fn install_controller(&self, widget: &impl IsA<gtk::Widget>) {
+        let gesture = gtk::GestureClick::new();
+        gesture.set_button(gdk::BUTTON_SECONDARY);
+        gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+        let context = self.clone();
+        gesture.connect_pressed(move |gesture, _n_press, x, y| {
+            let Some(popover_parent) = context.popover_parent.upgrade() else {
+                return;
+            };
+            let Some(widget) = gesture.widget() else {
+                return;
+            };
+            let Some(hit) = context.cell_at(&widget, x, y) else {
+                return;
+            };
+
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            let position = hit.list_item.position();
+            if position == gtk::INVALID_LIST_POSITION {
+                return;
+            }
+            if !context.selection.is_selected(position) {
+                context.selection.select_item(position, true);
+            }
+
+            let track_ids = collect_selected_track_ids(&context.selection);
+            if track_ids.is_empty() {
+                return;
+            }
+            context
+                .menu
+                .popup_at_parent(track_ids, &widget, &popover_parent, x, y);
+        });
+        widget.add_controller(gesture);
+    }
+
+    fn register_cell(&self, list_item: &gtk::ListItem, cell: &gtk::Box) {
+        self.cells.borrow_mut().push(TrackTableContextCell {
+            widget: cell.clone().upcast(),
+            list_item: list_item.clone(),
+        });
+    }
+
+    fn cell_at(&self, event_widget: &gtk::Widget, x: f64, y: f64) -> Option<TrackTableContextCell> {
+        let mut current = event_widget.pick(x, y, gtk::PickFlags::DEFAULT);
+        while let Some(widget) = current {
+            if let Some(hit) = self
+                .cells
+                .borrow()
+                .iter()
+                .find(|cell| cell.widget == widget)
+                .cloned()
+            {
+                return Some(hit);
+            }
+            current = widget.parent();
+        }
+        None
+    }
+}
+
+#[derive(Clone)]
+struct TrackTableContextCell {
+    widget: gtk::Widget,
+    list_item: gtk::ListItem,
 }
 
 struct StatusBinding {
@@ -360,7 +429,7 @@ fn install_cell_chrome(
 ) {
     install_cell_selection_sync(list_item, cell);
     if let Some(menu) = context_menu {
-        install_cell_context_menu(list_item, cell, menu);
+        menu.register_cell(list_item, cell);
         install_cell_drag_source(list_item, cell, &menu.selection);
     }
 }
@@ -372,6 +441,7 @@ fn install_cell_drag_source(
 ) {
     let drag_source = gtk::DragSource::new();
     drag_source.set_actions(gdk::DragAction::COPY);
+    drag_source.set_button(gdk::BUTTON_PRIMARY);
 
     let list_item = list_item.clone();
     let selection = selection.clone();
@@ -545,38 +615,6 @@ fn compose_stacked_row_paintable(rows: &[gtk::Widget]) -> Option<gdk::Paintable>
     }
 
     snapshot.to_paintable(Some(&graphene::Size::new(total_width, total_height)))
-}
-
-fn install_cell_context_menu(
-    list_item: &gtk::ListItem,
-    cell: &gtk::Box,
-    context: &TrackTableContextMenu,
-) {
-    let gesture = gtk::GestureClick::new();
-    gesture.set_button(gdk::BUTTON_SECONDARY);
-    gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
-
-    let context = context.clone();
-    let list_item = list_item.clone();
-    let cell_for_gesture = cell.clone();
-    gesture.connect_pressed(move |_gesture, _n_press, x, y| {
-        let position = list_item.position();
-        if position == gtk::INVALID_LIST_POSITION {
-            return;
-        }
-        if !context.selection.is_selected(position) {
-            context.selection.select_item(position, true);
-        }
-
-        let track_ids = collect_selected_track_ids(&context.selection);
-        if track_ids.is_empty() {
-            return;
-        }
-        context
-            .menu
-            .popup_at_parent(track_ids, &cell_for_gesture, &context.popover_parent, x, y);
-    });
-    cell.add_controller(gesture);
 }
 
 fn collect_selected_track_ids(selection: &gtk::MultiSelection) -> Vec<TrackId> {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use std::path::Path;
+use std::{path::Path, time::SystemTime};
 
 use sustain_app_runtime::{Track, TrackId};
 
@@ -52,28 +52,21 @@ pub(crate) struct TrackTableRow {
     pub(crate) album: String,
     pub(crate) genre: String,
     pub(crate) year: Option<i32>,
-    pub(crate) bpm: Option<u16>,
+    pub(crate) bpm: Option<u32>,
     pub(crate) bitrate_kbps: Option<u32>,
     pub(super) file_type: AudioFileType,
     pub(crate) duration_seconds: u64,
     pub(crate) rating: u8,
     pub(crate) plays: u64,
-    pub(crate) last_played: Option<String>,
-    pub(crate) date_added: String,
+    pub(crate) last_played: Option<SystemTime>,
+    pub(crate) date_added: Option<SystemTime>,
     pub(crate) track_number: Option<u32>,
     pub(crate) file_size_bytes: u64,
     pub(crate) is_missing: bool,
 }
 
 impl TrackTableRow {
-    pub(crate) fn from_track(track: &Track, library_root: Option<&Path>) -> Self {
-        let absolute_path =
-            library_root.map(|library_root| track.location.absolute_path(library_root));
-        let file_metadata = absolute_path
-            .as_ref()
-            .and_then(|path| std::fs::metadata(path).ok());
-        let is_missing = track.location.is_missing() || file_metadata.is_none();
-
+    pub(crate) fn from_track(track: &Track) -> Self {
         Self {
             track_id: Some(track.id),
             track_name: non_empty_text(&track.metadata.title)
@@ -83,7 +76,7 @@ impl TrackTableRow {
             album: non_empty_text(&track.metadata.album).unwrap_or_default(),
             genre: non_empty_text(&track.metadata.genre).unwrap_or_default(),
             year: track.metadata.year,
-            bpm: None,
+            bpm: track.metadata.bpm,
             bitrate_kbps: track.metadata.bitrate_kbps,
             file_type: AudioFileType::from_path(track.location.path()),
             duration_seconds: track
@@ -93,13 +86,11 @@ impl TrackTableRow {
                 .unwrap_or_default(),
             rating: track.rating.stars(),
             plays: track.statistics.play_count,
-            last_played: None,
-            date_added: String::new(),
+            last_played: track.statistics.last_played_at,
+            date_added: track.statistics.date_added_at,
             track_number: track.metadata.track_number,
-            file_size_bytes: file_metadata
-                .map(|metadata| metadata.len())
-                .unwrap_or_default(),
-            is_missing,
+            file_size_bytes: track.file_size_bytes.unwrap_or(0),
+            is_missing: track.location.is_missing(),
         }
     }
 }

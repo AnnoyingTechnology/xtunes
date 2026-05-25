@@ -1547,6 +1547,7 @@ dependencies = [
 name = "sustain-app-runtime"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "sustain-domain",
  "sustain-library-store",
  "sustain-metadata",

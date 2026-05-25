@@ -382,6 +382,7 @@ impl LibraryImportContext {
                 content_hash,
                 metadata,
                 rating,
+                file_size_bytes: source_size,
             });
         }
 
@@ -418,6 +419,7 @@ impl LibraryImportContext {
                     date_added_at: Some(SystemTime::now()),
                     ..PlayStatistics::default()
                 },
+                file_size_bytes: Some(import.file_size_bytes),
             });
         }
 
@@ -478,6 +480,9 @@ impl LibraryImportContext {
                 .read_rating(&source_path)
                 .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?
                 .unwrap_or_else(Rating::unrated);
+            let file_size_bytes = fs::metadata(&source_path)
+                .map(|metadata| metadata.len())
+                .ok();
 
             let Some(track_id) = sustain_domain::TrackId::new(next_track_id) else {
                 return Err(ApplicationRuntimeError::LibraryStoreFailed);
@@ -493,6 +498,7 @@ impl LibraryImportContext {
                     date_added_at: Some(SystemTime::now()),
                     ..PlayStatistics::default()
                 },
+                file_size_bytes,
             });
         }
 
@@ -800,6 +806,7 @@ struct PlannedManagedImport {
     content_hash: TrackContentHash,
     metadata: sustain_domain::TrackMetadata,
     rating: Rating,
+    file_size_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

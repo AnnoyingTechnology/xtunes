@@ -6,10 +6,12 @@ use std::path::PathBuf;
 
 use sustain_app_runtime::{Track, TrackId, TrackMetadata};
 
-/// Stable identity for an album, derived from the normalized
-/// (artist, title) pair used to bucket tracks. Equality matches the
-/// bucketing logic, so two `AlbumViewModel`s produced from different
-/// `group_albums` calls share a key iff they cover the same tracks.
+/// Stable identity for an album, derived from the normalized grouping
+/// artist and title used to bucket tracks. For normal albums the grouping
+/// artist is the album artist or track artist; for compilations without an
+/// explicit album artist it is the shared compilation bucket. Equality
+/// matches the bucketing logic, so two `AlbumViewModel`s produced from
+/// different `group_albums` calls share a key iff they cover the same tracks.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub(super) struct AlbumKey {
     artist: String,
@@ -48,30 +50,43 @@ struct AlbumBucket {
     key: AlbumKey,
     title: String,
     artist: String,
+    has_explicit_album_artist: bool,
+    is_compilation: bool,
+    track_artists: Vec<String>,
     year: Option<i32>,
     tracks: Vec<AlbumTrackViewModel>,
 }
 
 const UNKNOWN_ALBUM: &str = "Unknown Album";
 const UNKNOWN_ARTIST: &str = "Unknown Artist";
+const COMPILATION_ALBUM_ARTIST: &str = "Various Artists";
 
 pub(super) fn group_albums(tracks: &[Track]) -> Vec<AlbumViewModel> {
     let mut albums = BTreeMap::<AlbumKey, AlbumBucket>::new();
 
     for track in tracks {
         let title = album_title(&track.metadata);
-        let artist = album_artist(&track.metadata);
+        let grouping = album_grouping(&track.metadata);
         let key = AlbumKey {
-            artist: normalize_album_key(&artist),
+            artist: normalize_album_key(&grouping.key_artist),
             title: normalize_album_key(&title),
         };
         let bucket = albums.entry(key.clone()).or_insert_with(|| AlbumBucket {
             key,
             title,
-            artist,
+            artist: grouping.display_artist.clone(),
+            has_explicit_album_artist: grouping.has_explicit_album_artist,
+            is_compilation: grouping.is_compilation,
+            track_artists: Vec::new(),
             year: track.metadata.year,
             tracks: Vec::new(),
         });
+        if grouping.has_explicit_album_artist && !bucket.has_explicit_album_artist {
+            bucket.artist = grouping.display_artist.clone();
+            bucket.has_explicit_album_artist = true;
+        }
+        bucket.is_compilation |= grouping.is_compilation;
+        push_unique_artist(&mut bucket.track_artists, grouping.track_artist);
         if bucket.year.is_none() {
             bucket.year = track.metadata.year;
         }
@@ -88,10 +103,11 @@ pub(super) fn group_albums(tracks: &[Track]) -> Vec<AlbumViewModel> {
                 .find(|track| !track.is_missing)
                 .or_else(|| bucket.tracks.first())
                 .map(|track| track.file_path.clone());
+            let artist = album_display_artist(&bucket);
             AlbumViewModel {
                 key: bucket.key,
                 title: bucket.title,
-                artist: bucket.artist,
+                artist,
                 year: bucket.year,
                 tracks: bucket.tracks,
                 representative_track_path,
@@ -163,10 +179,73 @@ fn album_title(metadata: &TrackMetadata) -> String {
     non_empty_text(&metadata.album).unwrap_or_else(|| UNKNOWN_ALBUM.to_owned())
 }
 
-fn album_artist(metadata: &TrackMetadata) -> String {
-    non_empty_text(&metadata.album_artist)
-        .or_else(|| non_empty_text(&metadata.artist))
-        .unwrap_or_else(|| UNKNOWN_ARTIST.to_owned())
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AlbumGrouping {
+    key_artist: String,
+    display_artist: String,
+    track_artist: String,
+    has_explicit_album_artist: bool,
+    is_compilation: bool,
+}
+
+fn album_grouping(metadata: &TrackMetadata) -> AlbumGrouping {
+    let track_artist = track_artist(metadata);
+    if let Some(album_artist) = non_empty_text(&metadata.album_artist) {
+        return AlbumGrouping {
+            key_artist: album_artist.clone(),
+            display_artist: album_artist,
+            track_artist,
+            has_explicit_album_artist: true,
+            is_compilation: metadata.compilation.unwrap_or(false),
+        };
+    }
+
+    if metadata.compilation.unwrap_or(false) {
+        return AlbumGrouping {
+            key_artist: COMPILATION_ALBUM_ARTIST.to_owned(),
+            display_artist: COMPILATION_ALBUM_ARTIST.to_owned(),
+            track_artist,
+            has_explicit_album_artist: false,
+            is_compilation: true,
+        };
+    }
+
+    AlbumGrouping {
+        key_artist: track_artist.clone(),
+        display_artist: track_artist.clone(),
+        track_artist,
+        has_explicit_album_artist: false,
+        is_compilation: false,
+    }
+}
+
+fn album_display_artist(bucket: &AlbumBucket) -> String {
+    if bucket.is_compilation
+        && !bucket.has_explicit_album_artist
+        && !bucket.track_artists.is_empty()
+    {
+        return artist_summary(&bucket.track_artists);
+    }
+    bucket.artist.clone()
+}
+
+fn artist_summary(artists: &[String]) -> String {
+    artists.join(", ")
+}
+
+fn push_unique_artist(artists: &mut Vec<String>, artist: String) {
+    let normalized = normalize_album_key(&artist);
+    if artists
+        .iter()
+        .any(|existing| normalize_album_key(existing) == normalized)
+    {
+        return;
+    }
+    artists.push(artist);
+}
+
+fn track_artist(metadata: &TrackMetadata) -> String {
+    non_empty_text(&metadata.artist).unwrap_or_else(|| UNKNOWN_ARTIST.to_owned())
 }
 
 fn track_title(track: &Track) -> String {
@@ -232,6 +311,93 @@ mod tests {
     }
 
     #[test]
+    fn non_compilation_tracks_with_same_album_and_different_artists_stay_separate() {
+        let tracks = vec![
+            track(1, "a.flac", "Shared", "Artist A", Some(1), None),
+            track(2, "b.flac", "Shared", "Artist B", Some(2), None),
+        ];
+
+        let albums = group_albums(&tracks);
+
+        assert_eq!(albums.len(), 2);
+        assert_eq!(
+            albums
+                .iter()
+                .map(|album| album.artist.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Artist A", "Artist B"]
+        );
+    }
+
+    #[test]
+    fn compilation_tracks_group_by_album_when_track_artists_differ() {
+        let tracks = vec![
+            compilation_track(1, "a.flac", "Compilation", "Artist A", Some(1)),
+            compilation_track(2, "b.flac", "Compilation", "Artist B", Some(2)),
+        ];
+
+        let albums = group_albums(&tracks);
+
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].title, "Compilation");
+        assert_eq!(albums[0].artist, "Artist A, Artist B");
+        assert_eq!(
+            albums[0]
+                .tracks
+                .iter()
+                .map(|track| track.id.get())
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn explicit_album_artist_overrides_compilation_artist_summary() {
+        let tracks = vec![
+            compilation_track_with_album_artist(
+                1,
+                "a.flac",
+                "Compilation",
+                "Artist A",
+                "Album Artist",
+                Some(1),
+            ),
+            compilation_track_with_album_artist(
+                2,
+                "b.flac",
+                "Compilation",
+                "Artist B",
+                "Album Artist",
+                Some(2),
+            ),
+        ];
+
+        let albums = group_albums(&tracks);
+
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].artist, "Album Artist");
+    }
+
+    #[test]
+    fn compilation_artist_summary_preserves_all_unique_artists() {
+        let tracks = vec![
+            compilation_track(1, "a.flac", "Compilation", "Artist A", Some(1)),
+            compilation_track(2, "b.flac", "Compilation", "Artist B", Some(2)),
+            compilation_track(3, "c.flac", "Compilation", "Artist C", Some(3)),
+            compilation_track(4, "d.flac", "Compilation", "Artist D", Some(4)),
+            compilation_track(5, "e.flac", "Compilation", "Artist E", Some(5)),
+            compilation_track(6, "f.flac", "Compilation", "artist a", Some(6)),
+        ];
+
+        let albums = group_albums(&tracks);
+
+        assert_eq!(
+            albums[0].artist,
+            "Artist A, Artist B, Artist C, Artist D, Artist E"
+        );
+    }
+
+    #[test]
     fn representative_track_prefers_first_non_missing() {
         let tracks = vec![
             missing_track(1, "missing.flac", "Album", "Artist"),
@@ -272,6 +438,7 @@ mod tests {
             metadata: TrackMetadata::default(),
             rating: Rating::unrated(),
             statistics: PlayStatistics::default(),
+            file_size_bytes: None,
         }]);
 
         assert_eq!(albums[0].title, "Unknown Album");
@@ -316,12 +483,38 @@ mod tests {
             },
             rating: Rating::unrated(),
             statistics: PlayStatistics::default(),
+            file_size_bytes: None,
         }
     }
 
     fn missing_track(id: i64, path: &str, album: &str, artist: &str) -> Track {
         let mut track = track(id, path, album, artist, None, None);
         track.location = TrackLocation::missing(relative_path(path));
+        track
+    }
+
+    fn compilation_track(
+        id: i64,
+        path: &str,
+        album: &str,
+        artist: &str,
+        track_number: Option<u32>,
+    ) -> Track {
+        let mut track = track(id, path, album, artist, track_number, None);
+        track.metadata.compilation = Some(true);
+        track
+    }
+
+    fn compilation_track_with_album_artist(
+        id: i64,
+        path: &str,
+        album: &str,
+        artist: &str,
+        album_artist: &str,
+        track_number: Option<u32>,
+    ) -> Track {
+        let mut track = compilation_track(id, path, album, artist, track_number);
+        track.metadata.album_artist = Some(album_artist.to_owned());
         track
     }
 

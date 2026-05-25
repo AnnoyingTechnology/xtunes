@@ -315,6 +315,7 @@ mod tests {
                 last_skipped_at: None,
                 date_added_at: Some(unix(1_000)),
             },
+            file_size_bytes: None,
         }
     }
 

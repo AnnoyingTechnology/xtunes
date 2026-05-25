@@ -3,9 +3,13 @@
 
 use sustain_domain::{LibraryManagementMode, MetadataChange, Rating, TrackId};
 
+use crate::MetadataWriteKind;
 use crate::{
     ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult,
     managed_library::{metadata_change_affects_managed_path, save_managed_metadata_update},
+    metadata_writer::{
+        MetadataWriteJob, MetadataWriteOutcome, MetadataWriteRequest, MetadataWriteResult,
+    },
     playback::{playback_shuffle_seed, playback_track_id},
 };
 
@@ -20,10 +24,6 @@ impl ApplicationRuntime {
             .library_store
             .clone()
             .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
-        let metadata_service = self
-            .metadata_service
-            .clone()
-            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
         let track_index = self
             .library_tracks
             .iter()
@@ -33,16 +33,22 @@ impl ApplicationRuntime {
             .absolute_track_path(&self.library_tracks[track_index])
             .ok_or(ApplicationRuntimeError::TrackUnavailable)?;
 
-        metadata_service
-            .write_rating(&path, rating)
-            .map_err(|_| ApplicationRuntimeError::MetadataWriteFailed)?;
-
+        // Optimistic update: apply in-memory + SQLite synchronously so
+        // the UI sees the new rating immediately. The tag write to the
+        // audio file goes through the async writer below — the GTK main
+        // thread is never blocked on disk I/O for a star click.
         let mut track = self.library_tracks[track_index].clone();
         track.rating = rating;
         library_store
             .save_track(track.clone())
             .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
         self.library_tracks[track_index] = track;
+
+        self.submit_metadata_write(
+            track_id,
+            MetadataWriteKind::Rating,
+            MetadataWriteJob::Rating { path, rating },
+        );
 
         Ok(())
     }
@@ -57,10 +63,6 @@ impl ApplicationRuntime {
             .library_store
             .clone()
             .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
-        let metadata_service = self
-            .metadata_service
-            .clone()
-            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
         let track_index = self
             .library_tracks
             .iter()
@@ -70,33 +72,58 @@ impl ApplicationRuntime {
             .absolute_track_path(&self.library_tracks[track_index])
             .ok_or(ApplicationRuntimeError::TrackUnavailable)?;
 
-        metadata_service
-            .write_metadata(&path, change.clone())
-            .map_err(|_| ApplicationRuntimeError::MetadataWriteFailed)?;
-
-        let mut track = self.library_tracks[track_index].clone();
-        track.metadata.apply_change(&change);
-        let track = if self.settings.library.management_mode
+        let managed_rename_needed = self.settings.library.management_mode
             == LibraryManagementMode::CopyAddedFilesIntoLibrary
-            && metadata_change_affects_managed_path(&change)
-        {
+            && metadata_change_affects_managed_path(&change);
+
+        if managed_rename_needed {
+            // The managed-rename branch is a transactional sequence —
+            // write the tag, move the file to its new computed path,
+            // persist with the new relative path, rollback on failure —
+            // so we keep it synchronous. Async-ifying it would require
+            // moving the journal/rollback dance into the worker, which
+            // is a separate, careful piece of work.
+            let metadata_service = self
+                .metadata_service
+                .clone()
+                .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
+            metadata_service
+                .write_metadata(&path, change.clone())
+                .map_err(|_| ApplicationRuntimeError::MetadataWriteFailed)?;
+            let mut track = self.library_tracks[track_index].clone();
+            track.metadata.apply_change(&change);
             let library_path = self
                 .settings
                 .library_path()
                 .ok_or(ApplicationRuntimeError::LibraryPathUnavailable)?;
-            save_managed_metadata_update(
+            let track = save_managed_metadata_update(
                 library_path,
                 library_store.as_ref(),
                 &self.library_tracks,
                 track,
-            )?
-        } else {
-            library_store
-                .save_track(track.clone())
-                .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
-            track
-        };
+            )?;
+            self.library_tracks[track_index] = track;
+            return Ok(());
+        }
+
+        // Optimistic path: apply in-memory + SQLite synchronously; ship
+        // the tag write off to the async writer so the UI returns
+        // immediately.
+        let mut track = self.library_tracks[track_index].clone();
+        track.metadata.apply_change(&change);
+        library_store
+            .save_track(track.clone())
+            .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
         self.library_tracks[track_index] = track;
+
+        self.submit_metadata_write(
+            track_id,
+            MetadataWriteKind::Metadata,
+            MetadataWriteJob::Metadata {
+                path,
+                change: Box::new(change),
+            },
+        );
 
         Ok(())
     }
@@ -107,10 +134,6 @@ impl ApplicationRuntime {
         artwork: Option<Vec<u8>>,
     ) -> ApplicationRuntimeResult<()> {
         self.ensure_no_background_library_task()?;
-        let metadata_service = self
-            .metadata_service
-            .clone()
-            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
         let track = self
             .library_tracks
             .iter()
@@ -120,9 +143,18 @@ impl ApplicationRuntime {
         let path = self
             .absolute_track_path(&track)
             .ok_or(ApplicationRuntimeError::TrackUnavailable)?;
-        metadata_service
-            .write_artwork(&path, artwork)
-            .map_err(|_| ApplicationRuntimeError::MetadataWriteFailed)?;
+
+        // Artwork is not cached in the Track model, so there is no
+        // in-memory or SQLite optimistic state to apply — only the disk
+        // tag write. Ship it to the async writer so the UI returns
+        // immediately even for the worst case (large embedded cover
+        // rewriting a ~100 MB FLAC).
+        self.submit_metadata_write(
+            track_id,
+            MetadataWriteKind::Artwork,
+            MetadataWriteJob::Artwork { path, artwork },
+        );
+
         Ok(())
     }
 
@@ -208,5 +240,64 @@ impl ApplicationRuntime {
         }
 
         Ok(())
+    }
+
+    /// Submits a tag write to the async writer, attaching a completion
+    /// callback that forwards the per-write outcome through the result
+    /// sink (typically consumed by the UI's main loop). If no writer is
+    /// installed — common in tests — falls back to running the write
+    /// synchronously on the calling thread so behaviour stays
+    /// deterministic.
+    fn submit_metadata_write(
+        &self,
+        track_id: TrackId,
+        kind: MetadataWriteKind,
+        job: MetadataWriteJob,
+    ) {
+        let sink = self.metadata_write_result_sink();
+        let completion: crate::metadata_writer::WriteCompletionCallback =
+            Box::new(move |outcome: MetadataWriteOutcome| {
+                if let Some(sink) = sink {
+                    // `try_send` only fails on a closed channel, which
+                    // means the UI has torn down its receiver. Dropping
+                    // the result silently is correct at shutdown.
+                    let _ = sink.try_send(MetadataWriteResult {
+                        track_id,
+                        kind,
+                        outcome,
+                    });
+                }
+            });
+
+        match self.metadata_writer() {
+            Some(writer) => writer.submit(MetadataWriteRequest { job, completion }),
+            None => {
+                // No async writer installed: run synchronously so tests
+                // and headless callers still see the disk-side effect.
+                let metadata_service = match self.metadata_service.clone() {
+                    Some(service) => service,
+                    None => {
+                        completion(MetadataWriteOutcome::Failed);
+                        return;
+                    }
+                };
+                let result = match job {
+                    MetadataWriteJob::Rating { path, rating } => {
+                        metadata_service.write_rating(&path, rating)
+                    }
+                    MetadataWriteJob::Metadata { path, change } => {
+                        metadata_service.write_metadata(&path, *change)
+                    }
+                    MetadataWriteJob::Artwork { path, artwork } => {
+                        metadata_service.write_artwork(&path, artwork)
+                    }
+                };
+                let outcome = match result {
+                    Ok(()) => MetadataWriteOutcome::Succeeded,
+                    Err(_) => MetadataWriteOutcome::Failed,
+                };
+                completion(outcome);
+            }
+        }
     }
 }

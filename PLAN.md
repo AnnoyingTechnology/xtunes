@@ -453,11 +453,67 @@ Non-goals:
   `about-to-finish` mechanism on a single `playbin` handles this without
   application-level orchestration
 
+## Up Next Queue
+
+Sustain should expose a visible Up Next queue as a first-class playback
+surface, separate from the underlying play order derived from
+shuffle/repeat over a playlist or the library. The model is the iTunes 11
+"Up Next": an explicit list of upcoming tracks the user has queued, drained
+as playback advances; distinct from "what would play next if nothing else
+were queued".
+
+In scope:
+
+- `Play Next` (inject at the head of the queue) and `Add to Queue` (append
+  to the tail) actions, both available from the Songs row context menu
+  and from selection-level actions
+- the queue takes precedence over the implicit play order; once empty,
+  playback falls back to the underlying ordering
+- queue state is owned and observed through the runtime, not stored in a
+  playlist
+
+Deferred — open questions to settle when this is scheduled:
+
+- where the queue is surfaced in the UI (popover from the now-playing area,
+  side panel, dedicated view, …)
+- whether queue entries are reorderable and individually removable, and
+  what those interactions look like (drag, context menu, …)
+- whether queue state persists across app restarts
+
+## Album-Centric Playback
+
+`Play` and `Shuffle Play` triggered from an album (cover button, context
+menu, double-click on the album tile) are scoped to that album only. The
+play queue is loaded with exactly the tracks of that album — in disc/track
+order for `Play`, in shuffled order for `Shuffle Play` — and nothing else.
+When the last track of the album finishes, playback stops and the current
+track is unloaded; the player does not fall back to the underlying library
+order, does not auto-advance into a neighboring album, and does not pull in
+any other tracks. Album playback is a self-contained session: it starts on
+the album, stays on the album, and ends with the album.
+
 ## Duplicate Consolidation
 
 Users must be able to merge multiple library entries that represent the same
 recording into a single canonical track. This is a manual, user-driven
 operation, not an automatic deduplicator.
+
+Discovery — finding consolidation candidates:
+
+In addition to ad-hoc multi-selection, Sustain should help the user *find*
+likely duplicates. The discovery surface is a way *into* the consolidation
+dialog described below, not a separate feature, and never merges anything
+on its own.
+
+- a `Show Duplicates` view groups tracks that share a loose normalized
+  artist + title (case-insensitive, diacritic-folded, whitespace-collapsed)
+- a stricter `Show Exact Duplicates` filter additionally requires matching
+  album and duration (within a small tolerance) so distinct recordings of
+  the same title don't get folded together
+- groups of one are not shown; multi-track groups display adjacent so the
+  user can select across the group and trigger consolidation
+- the discovery view is read-only; every merge still goes through the
+  consolidation dialog and explicit user confirmation
 
 Selection and entry point:
 
@@ -677,6 +733,64 @@ color as their background so the flip animation reads as one continuous
 surface. The lyrics provider and lyrics-storage path are a prerequisite for
 this feature and need their own design decision before this work can ship.
 
+When the playing track has no embedded artwork and no cached artwork, the
+now-playing tile renders an explicit "missing artwork" placeholder icon
+(not a passive gray box) that signals to the user "click here to fetch a
+cover for this track." This is a per-track, on-demand counterpart to the
+bulk `Fetch missing artwork` action in `## Metadata Backfill`: same
+underlying provider client, same non-destructive contract (never overwrite
+existing artwork), same write path (embedded tag plus any artwork cache
+update), but triggered inline on the track the user is hearing right now
+rather than as a library-wide background sweep.
+
+Interaction states for the small now-playing tile:
+
+- **Missing** — no embedded or cached artwork. The tile shows the
+  missing-artwork icon centered on the dominant-color background. The
+  tile is clickable; hovering surfaces a tooltip that names the action
+  (e.g. "Fetch artwork").
+- **Fetching** — a click switches the tile to an indeterminate spinner
+  on the same background. The spinner replaces the icon in place so the
+  tile geometry does not jitter. The click is idempotent: further
+  clicks while a fetch is in flight do nothing.
+- **Resolved** — on successful retrieval, the artwork is written to the
+  file's embedded tag through the standard tag-writing path, the
+  artwork cache row for the track is updated, and the tile transitions
+  to the normal artwork display (with dominant-color gutters as above).
+  All other surfaces that show the same track's artwork — the zoomed
+  overlay, the Albums grid tile, any track table cover column — pick up
+  the update from the same cache invalidation, with no per-surface
+  refetch logic.
+- **Failed / no match** — the tile returns to the missing-artwork state
+  and is clickable again for a manual retry. A brief, non-modal status
+  bar message names the outcome ("No cover art found for this track").
+  Failures are not cached as "permanently missing" — the user may have
+  fixed connectivity, or a provider may have gained the cover since.
+
+Constraints (mirroring the bulk path so the two surfaces stay coherent):
+
+- the fetch runs on a background task; the GTK main thread is never
+  blocked on a network request, and playback is unaffected
+- the network request is gated behind the explicit click — Sustain
+  never silently fetches artwork while idling on a track
+- if the playing track changes mid-fetch, the in-flight request is
+  allowed to complete and its result is written to the originating
+  track's file/cache; the now-playing tile only swaps to the new
+  artwork if the originating track is still the playing track at
+  completion time
+- the same on-demand entry point should be reused on the zoomed-overlay
+  artwork face and on the Albums grid tile when the album's
+  representative track has no artwork, so the user can trigger a fetch
+  from whichever surface they happen to be looking at; those secondary
+  surfaces are nice-to-haves and can land after the now-playing tile
+
+Open question: whether the missing-artwork icon also belongs on Albums
+grid tiles by default (always visible for art-less albums), or only on
+the now-playing surface where the user is most likely focused. Settling
+this depends on how cluttered the Albums grid feels with many missing
+covers — a question that won't have a real answer until Albums view has
+a sizable real library to look at.
+
 The now-playing area includes a thin horizontal progress bar showing playback
 position within the current track. The bar is intentionally thin and must
 stay that way visually; it should not be made taller to feel clickable.
@@ -704,6 +818,28 @@ changing its appearance:
 Smart playlists are in scope after regular playlist and table behavior is
 stable. They should be rule-based saved queries over the local library, not a
 cloud/recommendation feature.
+
+On first run, Sustain ships a small set of default smart playlists so a
+fresh library is immediately useful, in the iTunes tradition. These are
+ordinary user-editable smart playlists — the user can rename, modify, or
+delete them like any other. The default set deliberately excludes the
+iTunes entries that don't fit Sustain's pure-local-music scope (no
+Music Videos, no Purchased, no podcast/audiobook buckets unless those
+media kinds are introduced later).
+
+Defaults to ship:
+
+- **Recently Added** — added in the last 2 weeks, newest first
+- **Recently Played** — played in the last 2 weeks, sorted by last-played
+  descending
+- **Top 25 Most Played** — highest play count, limited to 25
+- **Top Rated** — rating ≥ 4 stars
+- **Unplayed** — play count is 0
+- **Loved** — rating = 5 stars (the "favourites" bucket)
+
+Exact rule shapes are open to refinement as the smart-playlist rule set
+grows; the principle is that a freshly populated library is never empty
+of useful default organisation.
 
 Playback controls should be wired through the real command path:
 
@@ -1180,6 +1316,31 @@ MP3 320 kbps). The source files **are deleted** as part of the operation;
 this is a replace, not a duplicate. Concrete shape (selection UI, target
 format picker, batching, metadata preservation across the re-encode) is to
 be decided at implementation time.
+
+### Sort tags
+
+Audio tag formats carry a parallel set of sort fields alongside the
+display fields (ID3v2 `TSOP` / `TSOA` / `TSOT` / `TSO2` / `TSOC`; Vorbis
+`ARTISTSORT` / `ALBUMSORT` / `TITLESORT` / `ALBUMARTISTSORT` /
+`COMPOSERSORT`; the MP4 equivalents). They exist so that, for example,
+"The Beatles" displays as written but sorts under **B**, "Björk" sorts as
+"Bjork", and classical composers can be sorted "Last, First" while
+displaying "First Last". Well-tagged libraries (MusicBrainz Picard, beets,
+iTunes-sourced files) typically already carry them.
+
+Sustain should read these fields on scan, store them alongside the
+display fields, and prefer them in `ORDER BY` when present (falling back
+to the display field otherwise).
+
+Behaviour is controlled by a single preferences tickbox:
+
+- **enabled** (default for well-tagged libraries): sort fields drive
+  table ordering; display fields are shown as-is
+- **disabled**: ordering uses the display fields only, useful for users
+  who tag inconsistently or who want strict alphabetic-as-shown sorting
+
+Eventual editing of sort fields belongs in the File Info editor and is
+deferred to whenever that editor lands.
 
 ## Developer Isolation (CLI Data Paths)
 

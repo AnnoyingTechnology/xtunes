@@ -18,8 +18,9 @@ use sustain_app_runtime::{
 
 use super::{
     ALBUMS_VIEW, APP_ID, ApplicationCommand, ApplicationRuntime, LibraryChangedCallback,
-    LibraryChangedHolder, MprisCommandReceiver, PLAYLISTS_VIEW, PlaybackChangedCallback,
-    SONGS_VIEW, SharedMprisService, SharedRuntime, ShowAlbumAction, ShowAlbumHolder,
+    LibraryChangedHolder, MetadataWriteResultReceiver, MprisCommandReceiver, PLAYLISTS_VIEW,
+    PlaybackChangedCallback, SONGS_VIEW, SharedMprisService, SharedRuntime, ShowAlbumAction,
+    ShowAlbumHolder, TrackRowChangedCallback, TrackRowChangedHolder,
     accent::install_accent_css,
     albums::AlbumsView,
     app_css::install_app_css,
@@ -65,6 +66,7 @@ pub(crate) fn build_main_window(
     runtime: SharedRuntime,
     mpris_service: Option<SharedMprisService>,
     mpris_command_rx: Option<MprisCommandReceiver>,
+    metadata_write_result_rx: Option<MetadataWriteResultReceiver>,
 ) -> gtk::ApplicationWindow {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
@@ -136,6 +138,7 @@ pub(crate) fn build_main_window(
 
     let track_activated = track_activated_callback(&command_controller, playback_changed.clone());
     let library_changed_holder: LibraryChangedHolder = Rc::new(RefCell::new(None));
+    let track_row_changed_holder: TrackRowChangedHolder = Rc::new(RefCell::new(None));
     let parent_window = window.clone().upcast::<gtk::Window>();
     let show_album_holder: ShowAlbumHolder = Rc::new(RefCell::new(None));
     let context_actions = track_context_actions(
@@ -166,7 +169,7 @@ pub(crate) fn build_main_window(
     let playlist_context_menu = TrackRowContextMenu::new(playlist_context_actions, parent_window)
         .with_add_to_playlist(add_to_playlist_provider, add_to_playlist_callback);
     let rating_changed =
-        rating_changed_callback(&command_controller, library_changed_holder.clone());
+        rating_changed_callback(&command_controller, track_row_changed_holder.clone());
     let songs_table = build_track_table(
         library_tracks.clone(),
         Some(track_activated.clone()),
@@ -223,6 +226,20 @@ pub(crate) fn build_main_window(
         &sidebar,
         visible_summary_refresh.clone(),
         &current_search_text,
+    );
+    let track_row_changed = track_row_changed_callback(
+        &runtime,
+        &songs_table,
+        &playlists_table,
+        &sidebar,
+        visible_summary_refresh.clone(),
+        &current_search_text,
+    );
+    track_row_changed_holder.replace(Some(track_row_changed));
+    install_metadata_write_result_consumer(
+        metadata_write_result_rx,
+        status_bar.clone(),
+        track_row_changed_holder.clone(),
     );
     sidebar.set_selection_changed(sidebar_selection_changed_callback(
         &runtime,
@@ -900,12 +917,11 @@ fn runtime_library_table_rows(
     runtime: &ApplicationRuntime,
     search_text: &str,
 ) -> Vec<TrackTableRow> {
-    let library_root = runtime.settings().library_path();
     runtime
         .library_tracks()
         .iter()
         .filter(|track| search_text.is_empty() || track_matches_search_text(track, search_text))
-        .map(|track| TrackTableRow::from_track(track, library_root))
+        .map(TrackTableRow::from_track)
         .collect()
 }
 
@@ -914,7 +930,6 @@ fn playlist_table_rows_for(
     selection: Option<SidebarSelection>,
     search_text: &str,
 ) -> Vec<TrackTableRow> {
-    let library_root = runtime.settings().library_path();
     let candidate_tracks: Vec<Track> = match selection {
         Some(SidebarSelection::Library) => runtime.library_tracks().to_vec(),
         Some(SidebarSelection::Item(PlaylistItem::Playlist(playlist_id))) => {
@@ -947,10 +962,7 @@ fn playlist_table_rows_for(
     } else {
         filter_tracks_by_search_text(&candidate_tracks, search_text)
     };
-    filtered
-        .iter()
-        .map(|track| TrackTableRow::from_track(track, library_root))
-        .collect()
+    filtered.iter().map(TrackTableRow::from_track).collect()
 }
 
 fn sidebar_tracks_drop_callback(
@@ -1130,7 +1142,61 @@ fn install_mpris_command_consumer(
     };
     glib::MainContext::default().spawn_local(async move {
         while let Ok(command) = receiver.recv().await {
-            handle_mpris_command(command, &command_controller, &playback_changed, &app, &window);
+            handle_mpris_command(
+                command,
+                &command_controller,
+                &playback_changed,
+                &app,
+                &window,
+            );
+        }
+    });
+}
+
+/// Drains [`MetadataWriteResult`]s posted by the async metadata writer
+/// and surfaces failures to the user.
+///
+/// The runtime applies the optimistic in-memory + SQLite update
+/// synchronously and returns immediately; the disk-side tag write
+/// completes later on the worker thread. When it fails (read-only file,
+/// permission denied, file gone), we post a status-bar message and
+/// re-refresh the affected row so any state derived from disk (e.g. the
+/// missing icon, if a follow-up stage starts marking missing on touch
+/// failure) becomes visible. We do not roll back the in-memory state in
+/// this stage — that is a separate, careful piece of work; the next
+/// library scan reconciles the SQLite cache against what is actually on
+/// disk.
+fn install_metadata_write_result_consumer(
+    receiver: Option<MetadataWriteResultReceiver>,
+    status_bar: StatusBar,
+    track_row_changed_holder: TrackRowChangedHolder,
+) {
+    let Some(receiver) = receiver else {
+        return;
+    };
+    glib::MainContext::default().spawn_local(async move {
+        while let Ok(result) = receiver.recv().await {
+            if matches!(
+                result.outcome,
+                sustain_app_runtime::MetadataWriteOutcome::Succeeded
+            ) {
+                continue;
+            }
+            let message = match result.kind {
+                sustain_app_runtime::MetadataWriteKind::Rating => {
+                    "Could not save the rating to the audio file."
+                }
+                sustain_app_runtime::MetadataWriteKind::Metadata => {
+                    "Could not save the metadata change to the audio file."
+                }
+                sustain_app_runtime::MetadataWriteKind::Artwork => {
+                    "Could not save the artwork change to the audio file."
+                }
+            };
+            status_bar.show_command_message(message);
+            if let Some(callback) = track_row_changed_holder.borrow().as_ref() {
+                callback(result.track_id);
+            }
         }
     });
 }
@@ -1212,7 +1278,7 @@ fn install_track_ended_callback(
 
 fn rating_changed_callback(
     command_controller: &SharedCommandController,
-    library_changed_holder: LibraryChangedHolder,
+    track_row_changed_holder: TrackRowChangedHolder,
 ) -> RatingChangedCallback {
     let command_controller = command_controller.clone();
 
@@ -1222,10 +1288,67 @@ fn rating_changed_callback(
         {
             return false;
         }
-        if let Some(callback) = library_changed_holder.borrow().as_ref() {
-            callback();
+        if let Some(callback) = track_row_changed_holder.borrow().as_ref() {
+            callback(track_id);
         }
         true
+    })
+}
+
+/// Targeted refresh path for single-track mutations (rating, play count).
+/// Updates only the affected row in the visible tables and refreshes the
+/// status-bar summary. Skips the AlbumsView grid (rating/play-count don't
+/// affect album grouping) and the sidebar tree (row-field mutations do not
+/// alter playlist/folder structure).
+///
+/// When a smart playlist is selected, the Playlists table falls back to a
+/// full reflow because the mutation may add/remove the track from the
+/// playlist's filtered set — an in-place row update would lie.
+fn track_row_changed_callback(
+    runtime: &SharedRuntime,
+    songs_table: &TrackTable,
+    playlists_table: &TrackTable,
+    sidebar: &PlaylistSidebar,
+    visible_summary_refresh: ViewModeChangedCallback,
+    current_search_text: &Rc<RefCell<String>>,
+) -> TrackRowChangedCallback {
+    let runtime = runtime.clone();
+    let songs_table = songs_table.clone();
+    let playlists_table = playlists_table.clone();
+    let sidebar = sidebar.clone();
+    let current_search_text = current_search_text.clone();
+
+    Rc::new(move |track_id: TrackId| {
+        let row = {
+            let runtime_borrow = runtime.borrow();
+            runtime_borrow
+                .library_tracks()
+                .iter()
+                .find(|track| track.id == track_id)
+                .map(TrackTableRow::from_track)
+        };
+        let Some(row) = row else {
+            return;
+        };
+
+        songs_table.update_row(track_id, row.clone());
+
+        match sidebar.current_selection() {
+            Some(SidebarSelection::Item(PlaylistItem::SmartPlaylist(_))) => {
+                let search_text = current_search_text.borrow().clone();
+                let playlist_rows = playlist_table_rows_for(
+                    &runtime.borrow(),
+                    sidebar.current_selection(),
+                    &search_text,
+                );
+                playlists_table.replace_rows(playlist_rows);
+            }
+            _ => {
+                playlists_table.update_row(track_id, row);
+            }
+        }
+
+        visible_summary_refresh();
     })
 }
 

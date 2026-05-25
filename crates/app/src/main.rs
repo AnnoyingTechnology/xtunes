@@ -35,12 +35,19 @@ fn main() {
         }
     };
 
-    if let Ok(library_store) = sustain_library_store::SqliteLibraryStore::open_default() {
-        if let Err(error) = runtime.set_library_services(
-            Arc::new(library_store),
-            Arc::new(sustain_metadata::LoftyMetadataService),
-        ) {
-            eprintln!("Failed to initialize Sustain library services: {error:?}");
+    match sustain_library_store::SqliteLibraryStore::open_default() {
+        Ok(library_store) => {
+            if let Err(error) = runtime.set_library_services(
+                Arc::new(library_store),
+                Arc::new(sustain_metadata::LoftyMetadataService),
+            ) {
+                eprintln!("Sustain: library services failed to initialize ({error:?}).");
+                process::exit(1);
+            }
+        }
+        Err(error) => {
+            eprintln!("Sustain: library database is unavailable ({error:?}).");
+            process::exit(1);
         }
     }
 

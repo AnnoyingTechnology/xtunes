@@ -58,6 +58,7 @@ pub(crate) fn track_from_row(row: &Row<'_>) -> StoreResult<Track> {
             last_skipped_at: optional_i64(row, 17)?.map(unix_to_system_time),
             date_added_at: optional_i64(row, 18)?.map(unix_to_system_time),
         },
+        file_size_bytes: optional_i64(row, 31)?.map(|value| value as u64),
     })
 }
 

@@ -7,3 +7,7 @@
 .codex/
 *.swp
 *~
+
+# Maintainer-local working files (rhythmbox/iTunes import scratch space)
+/SELF_MIGRATION.md
+/iTunes Music Library.xml

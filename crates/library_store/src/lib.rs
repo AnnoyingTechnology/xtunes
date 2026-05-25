@@ -198,7 +198,8 @@ impl SqliteLibraryStore {
                     sample_rate_hz INTEGER,
                     channels INTEGER,
                     lyrics TEXT,
-                    content_hash TEXT
+                    content_hash TEXT,
+                    file_size_bytes INTEGER
                 );
 
                 CREATE INDEX IF NOT EXISTS tracks_content_hash_idx
@@ -345,12 +346,13 @@ fn save_track_with_connection(connection: &Connection, track: &Track) -> StoreRe
                 sample_rate_hz,
                 channels,
                 lyrics,
-                content_hash
+                content_hash,
+                file_size_bytes
             )
             VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                 ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-                ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31
+                ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32
             )
             ON CONFLICT(id) DO UPDATE SET
                 relative_path = excluded.relative_path,
@@ -382,7 +384,8 @@ fn save_track_with_connection(connection: &Connection, track: &Track) -> StoreRe
                 sample_rate_hz = excluded.sample_rate_hz,
                 channels = excluded.channels,
                 lyrics = excluded.lyrics,
-                content_hash = excluded.content_hash
+                content_hash = excluded.content_hash,
+                file_size_bytes = excluded.file_size_bytes
             "#,
             params![
                 track.id.get(),
@@ -416,6 +419,7 @@ fn save_track_with_connection(connection: &Connection, track: &Track) -> StoreRe
                 metadata.channels.map(i64::from),
                 metadata.lyrics.as_deref(),
                 track.content_hash.as_ref().map(|hash| hash.as_str()),
+                track.file_size_bytes.map(|size| size as i64),
             ],
         )
         .map(|_| ())
@@ -480,7 +484,8 @@ impl LibraryStore for SqliteLibraryStore {
                     sample_rate_hz,
                     channels,
                     lyrics,
-                    content_hash
+                    content_hash,
+                    file_size_bytes
                 FROM tracks
                 WHERE id = ?1
                 "#,
@@ -535,7 +540,8 @@ impl LibraryStore for SqliteLibraryStore {
                     sample_rate_hz,
                     channels,
                     lyrics,
-                    content_hash
+                    content_hash,
+                    file_size_bytes
                 FROM tracks
                 WHERE content_hash = ?1
                 ORDER BY id
@@ -589,7 +595,8 @@ impl LibraryStore for SqliteLibraryStore {
                     sample_rate_hz,
                     channels,
                     lyrics,
-                    content_hash
+                    content_hash,
+                    file_size_bytes
                 FROM tracks
                 ORDER BY id
                 "#,
@@ -1682,6 +1689,7 @@ mod tests {
             metadata: TrackMetadata::default(),
             rating: Rating::unrated(),
             statistics: PlayStatistics::default(),
+            file_size_bytes: None,
         }
     }
 

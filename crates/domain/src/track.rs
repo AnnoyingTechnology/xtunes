@@ -13,6 +13,10 @@ pub struct Track {
     pub metadata: TrackMetadata,
     pub rating: Rating,
     pub statistics: PlayStatistics,
+    /// On-disk size of the audio file in bytes, captured at scan time.
+    /// `None` when the file was never successfully stat'd (e.g. a record
+    /// imported from iTunes XML before its file was located).
+    pub file_size_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -58,7 +58,10 @@ fn compare_tracks(left: &Track, right: &Track, column: TrackSortColumn) -> Order
             .last_played_at
             .cmp(&right.statistics.last_played_at),
         TrackSortColumn::Duration => left.metadata.duration.cmp(&right.metadata.duration),
-        TrackSortColumn::DateAdded => left.id.cmp(&right.id),
+        TrackSortColumn::DateAdded => left
+            .statistics
+            .date_added_at
+            .cmp(&right.statistics.date_added_at),
     }
 }
 

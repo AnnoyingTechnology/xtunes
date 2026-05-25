@@ -3,6 +3,7 @@
 
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
+use std::{cell::RefCell, rc::Rc};
 use sustain_app_runtime::{ApplicationCommand, PlaybackCommand, TrackId};
 
 use super::model::{AlbumTrackViewModel, duration_text, track_number_text};
@@ -42,7 +43,12 @@ impl AlbumTrackListView {
         // right-click context menus still work without a selection model.
         let selection = gtk::NoSelection::new(Some(store));
 
-        let factory = build_row_factory(palette_provider.cloned(), context_menu, playing_track_id);
+        let context_menu = AlbumTrackContextMenu::new(context_menu);
+        let factory = build_row_factory(
+            palette_provider.cloned(),
+            context_menu.clone(),
+            playing_track_id,
+        );
 
         let list = gtk::ListView::new(Some(selection.clone()), Some(factory));
         list.add_css_class("album-track-table");
@@ -50,6 +56,7 @@ impl AlbumTrackListView {
         list.set_single_click_activate(false);
         list.set_hexpand(true);
         list.set_vexpand(false);
+        context_menu.install_controller(&list);
 
         let command_controller_for_activate = command_controller;
         let playback_changed_for_activate = playback_changed;
@@ -87,7 +94,7 @@ impl AlbumTrackListView {
 
 fn build_row_factory(
     palette_provider: Option<gtk::CssProvider>,
-    context_menu: TrackRowContextMenu,
+    context_menu: AlbumTrackContextMenu,
     playing_track_id: Option<TrackId>,
 ) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
@@ -154,7 +161,7 @@ fn build_row_factory(
         }
         row.append(&duration);
 
-        install_row_context_menu(list_item, &row, &context_for_setup);
+        context_for_setup.register_row(list_item, &row);
 
         list_item.set_child(Some(&row));
     });
@@ -218,31 +225,78 @@ fn sync_missing_class(title: &gtk::Label, is_missing: bool) {
     }
 }
 
-fn install_row_context_menu(
-    list_item: &gtk::ListItem,
-    row: &gtk::Box,
-    context_menu: &TrackRowContextMenu,
-) {
-    let gesture = gtk::GestureClick::new();
-    gesture.set_button(gdk::BUTTON_SECONDARY);
-    gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
-
-    let menu = context_menu.clone();
-    let list_item = list_item.clone();
-    let row_for_gesture = row.clone();
-    gesture.connect_pressed(move |_gesture, _n_press, x, y| {
-        let Some(track_id) = row_track_id(list_item.item()) else {
-            return;
-        };
-        menu.popup_at(vec![track_id], &row_for_gesture, x, y);
-    });
-    row.add_controller(gesture);
-}
-
 fn row_track_id(item: Option<glib::Object>) -> Option<TrackId> {
     let row_object = item?.downcast::<glib::BoxedAnyObject>().ok()?;
     let track = row_object.try_borrow::<AlbumTrackViewModel>().ok()?;
     Some(track.id)
+}
+
+#[derive(Clone)]
+struct AlbumTrackContextMenu {
+    menu: TrackRowContextMenu,
+    rows: Rc<RefCell<Vec<AlbumTrackContextRow>>>,
+}
+
+impl AlbumTrackContextMenu {
+    fn new(menu: TrackRowContextMenu) -> Self {
+        Self {
+            menu,
+            rows: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    fn install_controller(&self, widget: &impl IsA<gtk::Widget>) {
+        let gesture = gtk::GestureClick::new();
+        gesture.set_button(gdk::BUTTON_SECONDARY);
+        gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+        let context = self.clone();
+        gesture.connect_pressed(move |gesture, _n_press, x, y| {
+            let Some(widget) = gesture.widget() else {
+                return;
+            };
+            let Some(hit) = context.row_at(&widget, x, y) else {
+                return;
+            };
+            let Some(track_id) = row_track_id(hit.list_item.item()) else {
+                return;
+            };
+
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            context.menu.popup_at(vec![track_id], &widget, x, y);
+        });
+        widget.add_controller(gesture);
+    }
+
+    fn register_row(&self, list_item: &gtk::ListItem, row: &gtk::Box) {
+        self.rows.borrow_mut().push(AlbumTrackContextRow {
+            widget: row.clone().upcast(),
+            list_item: list_item.clone(),
+        });
+    }
+
+    fn row_at(&self, event_widget: &gtk::Widget, x: f64, y: f64) -> Option<AlbumTrackContextRow> {
+        let mut current = event_widget.pick(x, y, gtk::PickFlags::DEFAULT);
+        while let Some(widget) = current {
+            if let Some(hit) = self
+                .rows
+                .borrow()
+                .iter()
+                .find(|row| row.widget == widget)
+                .cloned()
+            {
+                return Some(hit);
+            }
+            current = widget.parent();
+        }
+        None
+    }
+}
+
+#[derive(Clone)]
+struct AlbumTrackContextRow {
+    widget: gtk::Widget,
+    list_item: gtk::ListItem,
 }
 
 fn refresh_status_icon(

@@ -36,6 +36,7 @@ mod commands;
 mod library_mutation;
 mod library_scan;
 pub mod managed_library;
+pub(crate) mod metadata_writer;
 mod playback;
 mod playlist_folders;
 mod playlist_items;
@@ -44,6 +45,7 @@ mod smart_playlists;
 
 pub use library_scan::run_library_scan_task;
 pub use managed_library::{run_library_consolidation_task, run_library_import_task};
+pub use metadata_writer::{MetadataWriteKind, MetadataWriteOutcome, MetadataWriteResult};
 
 pub type ApplicationRuntimeResult<T> = Result<T, ApplicationRuntimeError>;
 
@@ -195,6 +197,8 @@ pub struct ApplicationRuntime {
     last_library_consolidation_summary: Option<LibraryConsolidationSummary>,
     background_task_status: BackgroundTaskStatus,
     library_consolidation_cancellation: Option<Arc<AtomicBool>>,
+    metadata_writer: Option<metadata_writer::MetadataWriter>,
+    metadata_write_result_sink: Option<async_channel::Sender<MetadataWriteResult>>,
 }
 
 impl ApplicationRuntime {
@@ -216,6 +220,8 @@ impl ApplicationRuntime {
             last_library_consolidation_summary: None,
             background_task_status: BackgroundTaskStatus::Idle,
             library_consolidation_cancellation: None,
+            metadata_writer: None,
+            metadata_write_result_sink: None,
         }
     }
 
@@ -243,6 +249,8 @@ impl ApplicationRuntime {
             last_library_consolidation_summary: None,
             background_task_status: BackgroundTaskStatus::Idle,
             library_consolidation_cancellation: None,
+            metadata_writer: None,
+            metadata_write_result_sink: None,
         })
     }
 
@@ -266,10 +274,7 @@ impl ApplicationRuntime {
                 library_store.as_ref(),
             )?;
         }
-        self.library_tracks = library_scan::load_library_tracks(
-            library_store.as_ref(),
-            self.settings.library_path(),
-        )?;
+        self.library_tracks = library_scan::load_library_tracks(library_store.as_ref())?;
         self.playlists = library_store
             .playlists()
             .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
@@ -287,6 +292,52 @@ impl ApplicationRuntime {
     pub fn with_playback_service(mut self, playback_service: Box<dyn PlaybackService>) -> Self {
         self.playback_service = Some(playback_service);
         self
+    }
+
+    /// Starts the async metadata writer, using the same `MetadataService`
+    /// the runtime already holds. The writer owns a dedicated worker
+    /// thread that drains tag writes off the GTK main loop.
+    ///
+    /// Pair with [`Self::set_metadata_write_result_sink`] so failures can
+    /// be reported to the user. Without a sink, the writer still
+    /// processes jobs but completions are silently consumed.
+    pub fn start_metadata_writer(&mut self) -> ApplicationRuntimeResult<()> {
+        let metadata_service = self
+            .metadata_service
+            .clone()
+            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
+        self.metadata_writer = Some(metadata_writer::MetadataWriter::start(metadata_service));
+        Ok(())
+    }
+
+    /// Registers the sink that receives per-write completions. Senders
+    /// of a closed channel are silently dropped — the worker keeps
+    /// processing jobs regardless. UI layer typically holds the
+    /// matching receiver and consumes from the GTK main loop.
+    pub fn set_metadata_write_result_sink(
+        &mut self,
+        sink: async_channel::Sender<MetadataWriteResult>,
+    ) {
+        self.metadata_write_result_sink = Some(sink);
+    }
+
+    /// Drains pending tag writes and joins the worker thread. Call from
+    /// the app's shutdown path so an in-flight rating click is not lost
+    /// when the window closes.
+    pub fn shutdown_metadata_writer(&mut self) {
+        if let Some(writer) = self.metadata_writer.take() {
+            writer.shutdown();
+        }
+    }
+
+    pub(crate) fn metadata_writer(&self) -> Option<&metadata_writer::MetadataWriter> {
+        self.metadata_writer.as_ref()
+    }
+
+    pub(crate) fn metadata_write_result_sink(
+        &self,
+    ) -> Option<async_channel::Sender<MetadataWriteResult>> {
+        self.metadata_write_result_sink.clone()
     }
 
     pub fn settings(&self) -> &UserSettings {
@@ -804,7 +855,10 @@ mod tests {
             .with_library_services(store, Arc::new(TestMetadataService))
             .expect("library services initialize");
 
-        assert!(runtime.library_tracks()[0].location.is_missing());
+        // Startup no longer re-polls every track's on-disk existence (iTunes-
+        // like lazy availability), so the loaded track keeps the persisted
+        // Available flag here. The scan below is what reconciles availability
+        // against the new library root.
         assert_eq!(
             runtime.handle_command(ApplicationCommand::UpdateSettings(
                 UserSettings::with_library_path(Some(new_root.clone()))
@@ -1303,6 +1357,7 @@ mod tests {
             metadata: TrackMetadata::default(),
             rating: Rating::unrated(),
             statistics: PlayStatistics::default(),
+            file_size_bytes: None,
         };
         assert_eq!(store.save_track(track), Ok(()));
 
@@ -1525,7 +1580,12 @@ mod tests {
     }
 
     #[test]
-    fn runtime_set_rating_does_not_update_store_cache_when_metadata_write_fails() {
+    fn runtime_set_rating_applies_optimistic_update_and_reports_tag_write_failure() {
+        // The new contract: the in-memory + SQLite update is applied
+        // immediately and SetRating returns Ok(()) synchronously, so the
+        // UI never blocks on the tag write. Tag-write failure surfaces
+        // through the result sink rather than as a command error — the
+        // next library scan reconciles the SQLite cache against disk.
         let root = unique_test_directory();
         std::fs::create_dir_all(&root).expect("create test library");
         let track_path = root.join("track.flac");
@@ -1541,25 +1601,37 @@ mod tests {
         .expect("load settings")
         .with_library_services(store.clone(), metadata_service.clone())
         .expect("library services initialize");
+        let (result_tx, result_rx) = async_channel::unbounded::<crate::MetadataWriteResult>();
+        runtime.set_metadata_write_result_sink(result_tx);
         let rating = Rating::new(4).expect("valid test rating");
 
         assert_eq!(
             runtime.handle_command(ApplicationCommand::SetRating { track_id, rating }),
-            Err(ApplicationRuntimeError::MetadataWriteFailed)
+            Ok(())
         );
 
         assert_eq!(
             metadata_service.rating_writes(),
             vec![(track_path.clone(), rating)]
         );
-        assert_eq!(runtime.library_tracks()[0].rating, Rating::unrated());
+        // Optimistic state: in-memory + SQLite both reflect the new rating,
+        // even though the disk tag write failed.
+        assert_eq!(runtime.library_tracks()[0].rating, rating);
         assert_eq!(
             store
                 .track(track_id)
-                .expect("load unchanged track")
+                .expect("load updated track")
                 .map(|track| track.rating),
-            Some(Rating::unrated())
+            Some(rating)
         );
+        // Failure is reported to the sink (UI surfaces a status-bar
+        // message and refreshes the affected row).
+        let posted = result_rx
+            .try_recv()
+            .expect("metadata writer posts the failure");
+        assert_eq!(posted.track_id, track_id);
+        assert_eq!(posted.kind, crate::MetadataWriteKind::Rating);
+        assert_eq!(posted.outcome, crate::MetadataWriteOutcome::Failed);
 
         std::fs::remove_dir_all(root).expect("remove test library");
     }
@@ -1736,7 +1808,11 @@ mod tests {
     }
 
     #[test]
-    fn runtime_update_metadata_does_not_update_store_cache_when_tag_write_fails() {
+    fn runtime_update_metadata_applies_optimistic_update_and_reports_tag_write_failure() {
+        // Same contract as set_rating in the non-managed-rename branch:
+        // in-memory + SQLite update is applied synchronously, tag write
+        // is dispatched to the async writer, failure surfaces on the
+        // result sink.
         let root = unique_test_directory();
         std::fs::create_dir_all(&root).expect("create test library");
         let track_path = root.join("track.flac");
@@ -1754,6 +1830,8 @@ mod tests {
         .expect("load settings")
         .with_library_services(store.clone(), metadata_service.clone())
         .expect("library services initialize");
+        let (result_tx, result_rx) = async_channel::unbounded::<crate::MetadataWriteResult>();
+        runtime.set_metadata_write_result_sink(result_tx);
         let change = MetadataChange {
             title: FieldChange::Set("New".to_owned()),
             ..MetadataChange::default()
@@ -1764,24 +1842,31 @@ mod tests {
                 track_id,
                 change: Box::new(change.clone()),
             }),
-            Err(ApplicationRuntimeError::MetadataWriteFailed)
+            Ok(())
         );
 
         assert_eq!(
             metadata_service.metadata_writes(),
             vec![(track_path.clone(), change)]
         );
+        // Optimistic state holds even though the disk tag write failed.
         assert_eq!(
             runtime.library_tracks()[0].metadata.title.as_deref(),
-            Some("Old")
+            Some("New")
         );
         assert_eq!(
             store
                 .track(track_id)
-                .expect("load unchanged track")
+                .expect("load updated track")
                 .and_then(|track| track.metadata.title),
-            Some("Old".to_owned())
+            Some("New".to_owned())
         );
+        let posted = result_rx
+            .try_recv()
+            .expect("metadata writer posts the failure");
+        assert_eq!(posted.track_id, track_id);
+        assert_eq!(posted.kind, crate::MetadataWriteKind::Metadata);
+        assert_eq!(posted.outcome, crate::MetadataWriteOutcome::Failed);
 
         std::fs::remove_dir_all(root).expect("remove test library");
     }
@@ -2598,6 +2683,7 @@ mod tests {
             metadata: TrackMetadata::default(),
             rating: Rating::unrated(),
             statistics: PlayStatistics::default(),
+            file_size_bytes: None,
         }
     }
 

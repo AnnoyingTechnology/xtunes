@@ -71,6 +71,58 @@ impl TrackTable {
         }
     }
 
+    /// Updates the cached [`TrackTableRow`] for `track_id` in place,
+    /// without emitting a `gio::ListModel::items-changed` signal.
+    ///
+    /// Used by single-track mutations whose cell widgets already update
+    /// themselves on click (the rating stars are the canonical case —
+    /// see `sync_rating_buttons` in the cells module). The visual
+    /// update has already happened on the rendered widget; this call
+    /// just keeps the row data the cell factory will re-bind to (when
+    /// the user scrolls away and back, or when GTK re-binds for any
+    /// other reason) in sync with the new state.
+    ///
+    /// Crucially, this does **not** splice or otherwise restructure the
+    /// store. A splice would trigger `items-changed`, which the
+    /// `ColumnView` treats as a structural event — focus is dropped
+    /// and the scroll position resets to the top of the list. For a
+    /// one-field change initiated by a click in the row itself, that
+    /// is unacceptable UX.
+    ///
+    /// Trade-off: if the current sort is by the field that changed
+    /// (e.g. Rating column sorted, then user re-rates the row), the
+    /// row stays in its now-incorrect sorted position until the next
+    /// full reflow. We accept that — losing the user's scroll/focus
+    /// would be worse.
+    ///
+    /// Returns `true` when a matching row was found and updated.
+    pub(crate) fn update_row(&self, track_id: TrackId, new_row: TrackTableRow) -> bool {
+        let n_items = self.store.n_items();
+        for position in 0..n_items {
+            let Some(row_object) = self
+                .store
+                .item(position)
+                .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+            else {
+                continue;
+            };
+            let matches = row_object
+                .try_borrow::<TrackTableRow>()
+                .map(|row| row.track_id == Some(track_id))
+                .unwrap_or(false);
+            if !matches {
+                continue;
+            }
+            // `BoxedAnyObject::borrow_mut` takes `&self`; the local
+            // `row_object` is shadowed-immutable, but the inner
+            // `RefCell` borrow is what we actually need.
+            let mut row = row_object.borrow_mut::<TrackTableRow>();
+            *row = new_row;
+            return true;
+        }
+        false
+    }
+
     pub(crate) fn set_playing_track_id(&self, playing_track_id: Option<TrackId>) {
         if self.playing_track_id.get() == playing_track_id {
             return;
@@ -254,6 +306,9 @@ pub(crate) fn build_track_table(
 
     let context_menu = context_menu
         .map(|menu| TrackTableContextMenu::new(menu, selection.clone(), scroller.clone()));
+    if let Some(context_menu) = &context_menu {
+        context_menu.install_controller(&scroller);
+    }
 
     table.append_column(&build_status_column(
         playing_track_id.clone(),

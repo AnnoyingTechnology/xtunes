@@ -7,13 +7,6 @@ use std::cmp::Ordering;
 
 pub use sustain_domain::{LibraryQuery, SortDirection, Track, TrackSort, TrackSortColumn};
 
-pub type SearchResult<T> = Result<T, SearchError>;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SearchError {
-    UnsupportedSortColumn(TrackSortColumn),
-}
-
 pub fn filter_tracks_by_search_text(tracks: &[Track], search_text: &str) -> Vec<Track> {
     let normalized_search = normalize(search_text);
     if normalized_search.is_empty() {
@@ -61,18 +54,13 @@ pub fn album_matches_search_text(
         .any(|field| normalize(field).contains(&normalized_search))
 }
 
-pub fn sort_tracks(mut tracks: Vec<Track>, sort: TrackSort) -> SearchResult<Vec<Track>> {
+pub fn sort_tracks(mut tracks: Vec<Track>, sort: TrackSort) -> Vec<Track> {
     if sort.column == TrackSortColumn::PlaylistPosition {
-        return Ok(tracks);
-    }
-    if sort.column == TrackSortColumn::DateAdded {
-        return Err(SearchError::UnsupportedSortColumn(
-            TrackSortColumn::DateAdded,
-        ));
+        return tracks;
     }
 
     tracks.sort_by(|left, right| compare_tracks(left, right, sort));
-    Ok(tracks)
+    tracks
 }
 
 fn compare_tracks(left: &Track, right: &Track, sort: TrackSort) -> Ordering {
@@ -97,7 +85,10 @@ fn compare_tracks(left: &Track, right: &Track, sort: TrackSort) -> Ordering {
             .last_played_at
             .cmp(&right.statistics.last_played_at),
         TrackSortColumn::Duration => left.metadata.duration.cmp(&right.metadata.duration),
-        TrackSortColumn::DateAdded => Ordering::Equal,
+        TrackSortColumn::DateAdded => left
+            .statistics
+            .date_added_at
+            .cmp(&right.statistics.date_added_at),
     };
 
     let ordering = match sort.direction {
@@ -147,7 +138,7 @@ mod tests {
     };
 
     use super::{
-        SearchError, album_matches_search_text, filter_tracks_by_search_text, sort_tracks,
+        album_matches_search_text, filter_tracks_by_search_text, sort_tracks,
         track_matches_search_text,
     };
     use crate::Track;
@@ -272,11 +263,11 @@ mod tests {
                     direction: SortDirection::Ascending
                 }
             ),
-            Ok(vec![
+            vec![
                 track(2, "Alpha", "Artist"),
                 track(3, "middle", "Artist"),
                 track(1, "zebra", "Artist")
-            ])
+            ]
         );
     }
 
@@ -295,23 +286,28 @@ mod tests {
                     direction: SortDirection::Descending
                 }
             ),
-            Ok(vec![high, low])
+            vec![high, low]
         );
     }
 
     #[test]
-    fn sort_rejects_date_added_until_track_model_supports_it() {
+    fn sort_orders_tracks_by_date_added_chronologically() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let mut older = track(1, "Older", "Artist");
+        older.statistics.date_added_at = Some(UNIX_EPOCH + Duration::from_secs(1_000));
+        let mut newer = track(2, "Newer", "Artist");
+        newer.statistics.date_added_at = Some(UNIX_EPOCH + Duration::from_secs(2_000));
+
         assert_eq!(
             sort_tracks(
-                Vec::new(),
+                vec![newer.clone(), older.clone()],
                 TrackSort {
                     column: TrackSortColumn::DateAdded,
                     direction: SortDirection::Ascending
                 }
             ),
-            Err(SearchError::UnsupportedSortColumn(
-                TrackSortColumn::DateAdded
-            ))
+            vec![older, newer]
         );
     }
 
@@ -327,6 +323,7 @@ mod tests {
             },
             rating: Rating::unrated(),
             statistics: PlayStatistics::default(),
+            file_size_bytes: None,
         }
     }
 

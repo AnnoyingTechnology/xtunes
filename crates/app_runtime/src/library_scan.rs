@@ -183,6 +183,7 @@ fn track_from_scanned_track(
         metadata: scanned_track.metadata,
         rating: scanned_track.rating,
         statistics,
+        file_size_bytes: scanned_track.file_size_bytes,
     })
 }
 
@@ -194,6 +195,7 @@ pub(super) fn track_with_current_availability(library_path: &Path, track: Track)
         metadata,
         rating,
         statistics,
+        file_size_bytes,
     } = track;
     let availability = if location.absolute_path(library_path).exists() {
         TrackAvailability::Available
@@ -208,24 +210,20 @@ pub(super) fn track_with_current_availability(library_path: &Path, track: Track)
         metadata,
         rating,
         statistics,
+        file_size_bytes,
     }
 }
 
 pub(super) fn load_library_tracks(
     library_store: &dyn LibraryStore,
-    library_path: Option<&Path>,
 ) -> ApplicationRuntimeResult<Vec<Track>> {
-    let tracks = library_store
+    // Trust the persisted availability flag. Per the iTunes-like model,
+    // post-scan disappearance is detected lazily — when a mutation or
+    // playback start touches the file and fails — rather than by polling
+    // every track at startup.
+    library_store
         .tracks()
-        .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
-
-    Ok(match library_path {
-        Some(library_path) => tracks
-            .into_iter()
-            .map(|track| track_with_current_availability(library_path, track))
-            .collect(),
-        None => tracks,
-    })
+        .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)
 }
 
 pub(super) fn next_track_id(existing_tracks: &[Track]) -> ApplicationRuntimeResult<i64> {

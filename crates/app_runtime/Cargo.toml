@@ -10,6 +10,7 @@ name = "sustain_app_runtime"
 path = "src/lib.rs"
 
 [dependencies]
+async-channel = "2"
 trash = "5"
 sustain-settings = { path = "../settings" }
 sustain-domain = { path = "../domain" }

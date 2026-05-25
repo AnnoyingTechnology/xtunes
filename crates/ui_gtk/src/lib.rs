@@ -73,14 +73,32 @@ const PLAYLISTS_VIEW: &str = "playlists";
 pub(crate) type SharedRuntime = Rc<RefCell<ApplicationRuntime>>;
 pub(crate) type LibraryChangedCallback = Rc<dyn Fn()>;
 pub(crate) type LibraryChangedHolder = Rc<RefCell<Option<LibraryChangedCallback>>>;
+pub(crate) type TrackRowChangedCallback = Rc<dyn Fn(sustain_app_runtime::TrackId)>;
+pub(crate) type TrackRowChangedHolder = Rc<RefCell<Option<TrackRowChangedCallback>>>;
 pub(crate) type PlaybackChangedCallback = Rc<dyn Fn()>;
 pub(crate) type ShowAlbumAction = Rc<dyn Fn(sustain_app_runtime::TrackId)>;
 pub(crate) type ShowAlbumHolder = Rc<RefCell<Option<ShowAlbumAction>>>;
 pub(crate) type SharedMprisService = Rc<sustain_desktop::MprisService>;
 pub(crate) type MprisCommandReceiver = async_channel::Receiver<sustain_desktop::MprisCommand>;
+pub(crate) type MetadataWriteResultReceiver =
+    async_channel::Receiver<sustain_app_runtime::MetadataWriteResult>;
 
-pub fn run(runtime: ApplicationRuntime) {
+pub fn run(mut runtime: ApplicationRuntime) {
     let app = gtk::Application::builder().application_id(APP_ID).build();
+
+    // Start the async metadata writer before wrapping the runtime in a
+    // shared cell, so its worker thread is up before any UI mutation
+    // can submit a job. Pair it with a result sink consumed by the main
+    // loop below, so per-write failures can surface in the status bar.
+    if let Err(error) = runtime.start_metadata_writer() {
+        eprintln!(
+            "Sustain: async metadata writer could not start ({error:?}); tag writes will run on the main thread."
+        );
+    }
+    let (write_result_tx, write_result_rx) =
+        async_channel::unbounded::<sustain_app_runtime::MetadataWriteResult>();
+    runtime.set_metadata_write_result_sink(write_result_tx);
+
     let runtime = Rc::new(RefCell::new(runtime));
 
     // Start the MPRIS server before any window is built so the bus name
@@ -103,19 +121,32 @@ pub fn run(runtime: ApplicationRuntime) {
     // first activation; later activations skip the setup.
     let mpris_command_rx_holder: Rc<RefCell<Option<MprisCommandReceiver>>> =
         Rc::new(RefCell::new(Some(mpris_command_rx)));
+    let write_result_rx_holder: Rc<RefCell<Option<MetadataWriteResultReceiver>>> =
+        Rc::new(RefCell::new(Some(write_result_rx)));
 
-    app.connect_activate(move |app| {
-        let mpris_command_rx = mpris_command_rx_holder.borrow_mut().take();
-        let window = build_main_window(
-            app,
-            runtime.clone(),
-            mpris_service.clone(),
-            mpris_command_rx,
-        );
-        window.present();
+    app.connect_activate({
+        let runtime = runtime.clone();
+        move |app| {
+            let mpris_command_rx = mpris_command_rx_holder.borrow_mut().take();
+            let write_result_rx = write_result_rx_holder.borrow_mut().take();
+            let window = build_main_window(
+                app,
+                runtime.clone(),
+                mpris_service.clone(),
+                mpris_command_rx,
+                write_result_rx,
+            );
+            window.present();
+        }
     });
 
     app.run();
+
+    // Drain pending tag writes synchronously before exiting so a rating
+    // clicked moments before close is not lost. `shutdown_metadata_writer`
+    // joins the worker thread; the channel sender is dropped first so the
+    // worker's `recv` returns once the queue is empty.
+    runtime.borrow_mut().shutdown_metadata_writer();
 }
 
 fn start_mpris(
