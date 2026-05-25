@@ -157,6 +157,19 @@ The first schema should cover:
 - settings
 - schema migrations
 
+## Schema Versioning and Migrations (Post-Release)
+
+The first public release must ship with a versioned schema and a migration
+runner. A `schema_version` row (or `PRAGMA user_version`) records the
+applied version; on startup, the app applies any pending migrations in
+order before opening the library.
+
+Until the first release, this is **not** built: the schema is edited in
+place and the maintainer wipes the local database. The versioning
+infrastructure lands as part of the release-prep work, with version 1
+defined as whatever schema ships in the first release. Every post-release
+schema change adds a new numbered migration and bumps the version.
+
 ## Library Management Roadmap
 
 Start with a non-destructive library model.
@@ -636,6 +649,12 @@ Album view can remain rough during this phase. Advanced browsing views,
 visualizers, streaming, device sync, cloud sync, folder sync, and multi-machine
 sync are out of scope.
 
+Longer-term, the Albums grid must be virtualized. The immediate performance
+fix should remove eager startup work and move artwork extraction off the GTK
+main thread, but it should preserve a clean album model/artwork-loader boundary
+so the current eager box/grid can later be replaced by a GTK `GridView` /
+factory-backed model without rewriting artwork loading or album grouping.
+
 When album view becomes real, artwork should influence the track dropdown
 surface. For each album, detect the two dominant artwork colors. Use the main
 dominant color for the expanded track container and choose text/accent colors
@@ -918,6 +937,45 @@ This feature is out of scope for the first vertical slice. It should not be
 attempted before the local metadata scan, tag-writing path, and background-task
 status surface are solid.
 
+## Audio Analysis and Consolidation Grouping (Open Question)
+
+Two further per-track derived values are likely candidates for the library:
+
+- **BPM detection** — analyze the audio to estimate beats per minute, write
+  the result to the track's native tag and SQLite cache when no BPM is
+  already present.
+- **Musical key detection** — analyze the audio to estimate the key (e.g.
+  Camelot or standard notation), persisted the same way.
+
+These two share the non-destructive contract of `Metadata Backfill` (never
+overwrite an existing tag value) but differ in shape: they are local CPU
+work, not network lookups, and they always produce a value (no
+"no-match-found" outcome). Library and crate choice (`aubio`, `essentia`,
+pure-Rust alternatives) is unresolved.
+
+The open product question is how the four derived/fetched-data features
+should be grouped together so they stay consistent and discoverable:
+
+- `Fetch missing artwork` (network)
+- `Fetch missing tags` (network)
+- `Detect BPM` (local CPU)
+- `Detect key` (local CPU)
+
+All four are opt-in, run as background tasks against the existing library,
+respect the same non-destructive contract, and produce per-track outcomes.
+A natural shape is a single `Consolidation` tab in the Settings window
+containing all four, with shared scope controls (whole library vs current
+selection vs missing-values-only) and a unified progress surface in the
+status bar.
+
+Stated here so the decision is not forgotten when the first of these
+features is implemented. Settling it once — naming, location, scope
+controls, background-task model — before any of the four ship will avoid
+ending up with four mismatched entry points scattered across the UI.
+
+This section is intentionally a placeholder. Concrete decisions belong in
+the dedicated sections for each feature once they are ready to ship.
+
 ## Smart Shuffle (Tentative)
 
 In addition to a pure-random shuffle mode, Sustain should offer a `Smart Shuffle`
@@ -1175,6 +1233,67 @@ way to run Sustain against anything other than the installed user's real
 library. The recommendation should be prominent enough that a new
 contributor cannot miss it.
 
+## Single-Instance Enforcement (Library Integrity)
+
+Two Sustain instances pointed at the same on-disk library must not be allowed
+to run concurrently. The threat is library-integrity corruption:
+
+- SQLite writes from two processes interleave at the statement level, but
+  Sustain's invariants (play counts, ratings, playlist membership, scan
+  bookkeeping) span multiple statements and assume a single writer's
+  view. A second instance can land a write between the read and write of
+  the first instance's transaction and silently clobber state.
+- Rating persistence writes to audio file metadata tags in addition to
+  SQLite (per `CLAUDE.md`). Two instances rating the same track race on
+  the file tag write and one update is lost — but the SQLite cache may
+  reflect either, depending on commit order, so the file tag and the
+  cached rating can diverge with no easy way to detect the drift.
+- The filesystem watcher and the import pipeline both add tracks based
+  on what they observe on disk. Two instances scanning the same root
+  produce duplicate insertion attempts and conflicting de-duplication
+  decisions.
+- MPRIS/D-Bus registers a single bus name per instance. A second instance
+  either steals the name or fails to claim it; in either case media keys
+  and external clients (GNOME Shell, playerctl) target the wrong process
+  unpredictably.
+
+The check must be keyed to the **resolved data paths** (database file +
+config file), not to the application id. A developer running the installed
+package against the real library and a dev build against an isolated
+`--local-scope` sandbox is legitimate and must keep working. Two processes
+that resolve to the same database path is the case to refuse.
+
+Mechanism (to be designed):
+
+- on startup, acquire an exclusive advisory lock on the resolved SQLite
+  database file (e.g. `flock(LOCK_EX | LOCK_NB)` on the file itself or a
+  sidecar `.lock` file in the same directory). The lock is held for the
+  process lifetime and released automatically on exit or crash.
+- if the lock is already held, do not start a second main loop. Instead,
+  signal the existing instance to raise/focus its window (the standard
+  GTK pattern is `gtk::Application` with `G_APPLICATION_HANDLES_OPEN`
+  and a unique application id; the second invocation forwards its
+  command-line arguments to the running instance and exits).
+- the unique application id used for the GTK side must be derived from
+  (or include a hash of) the resolved database path, so the dev/prod
+  coexistence case above resolves to two distinct GTK applications and
+  neither single-instance check fires across them.
+- if locking fails for a reason other than "already held" (permissions,
+  read-only filesystem), surface a clear error and exit non-zero rather
+  than continuing without a lock.
+
+Non-goals for the first pass:
+
+- no cross-machine locking (NFS/SMB-mounted libraries are out of scope;
+  advisory file locks over network filesystems are unreliable and the
+  product target is local libraries on local disks)
+- no detection of an externally-modified database (a different SQLite
+  client editing the file behind Sustain's back is the user's problem)
+- no UI for forcibly stealing the lock from a stale instance; if a crash
+  leaves a stale lock, document that the file lock is OS-released on
+  process exit and that a stale sidecar `.lock` file (if that approach
+  is chosen) can be deleted manually
+
 ## Distribution
 
 Target Debian as the primary distribution platform. The project should produce a
@@ -1211,6 +1330,56 @@ custom install scripts when standard `dh_install` suffices.
 Ubuntu compatibility should follow naturally from targeting Debian, but do not
 add Ubuntu-specific patches or PPA infrastructure in the first pass. A clean
 Debian source package that builds on both is the goal.
+
+## Pre-Release Performance Pass
+
+Once the feature set is frozen for the first public release, do a dedicated
+performance optimization pass before shipping. Treat this as its own phase,
+not as opportunistic cleanup folded into feature work — interleaving
+optimization with feature development tends to produce premature
+micro-optimizations in the wrong hot paths and leaves the real bottlenecks
+(typically discovered only once the system is whole) unaddressed.
+
+Scope:
+
+- profile under a realistic large-library workload (tens of thousands of
+  tracks, deep playlist hierarchies, full artwork cache) on the
+  Debian-first target hardware, not on a synthetic empty database
+- measure cold-start time, library scan throughput, search latency at
+  each keystroke, table scroll smoothness with all columns visible,
+  Albums-view tile rebuild on selection, and SQLite query time on the
+  hot read paths
+- treat the existing "Known Issue" sections (Library Scan Performance,
+  Table Interaction Performance, Gapless Track-to-Track Playback) as the
+  starting checklist, not the full surface — those captured what was
+  visible at the time, not necessarily what will dominate once the rest
+  of the product is in place
+- only after measurement, optimize: SQL index review, query
+  consolidation, model rebuild diffing, render avoidance, allocation
+  reduction in cell factories, artwork cache shape, async/background
+  task scheduling
+- audit what can be parallelized across cores. Modern desktop CPUs ship
+  with 8–16+ cores and Sustain currently leaves nearly all of them idle.
+  Library scans, metadata reads, artwork decoding, palette extraction,
+  and search index rebuilds are all embarrassingly parallel over
+  independent tracks/files and should be candidates for a worker pool
+  (e.g. `rayon` for CPU-bound passes, dedicated background threads for
+  I/O-bound ones). The GTK main thread stays single-threaded by design,
+  but everything feeding it does not have to. Measure first, then
+  parallelize the passes whose serial time actually dominates.
+
+Non-goals for this pass:
+
+- no new features, no UX changes that are not directly required by a
+  measured performance improvement
+- no speculative optimization without a profile showing the cost first
+- no rewrites of subsystems that profile well even if their code reads
+  awkwardly — defer those to a separate refactor pass
+
+The pass ends with a documented before/after for each metric and a
+short note explaining any deliberately-deferred bottleneck (with the
+reason it was left alone). Performance regressions found after this
+pass should be treated as bugs against the established baselines.
 
 ## Pre-Release Security Audit
 

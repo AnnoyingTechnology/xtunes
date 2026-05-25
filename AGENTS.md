@@ -81,6 +81,18 @@ Rating persistence:
 - support MP3/ID3, Ogg, MP4/M4A, and FLAC rating metadata
 - SQLite may cache ratings for fast UI/search, but file tags are the durable source
 
+## Performance
+
+Performance is a first-class feature, not a polish step. Target pristine
+responsiveness and fluidity on a 10,000-track library: instant search,
+smooth scrolling, snappy view switches, fast cold start. Code that ships
+visibly sluggish behavior at that scale is incomplete, regardless of
+correctness.
+
+The maintainer develops on a Ryzen AI Max 395 — the top of the current
+desktop performance range. Anything that feels (or measures) slow on
+this machine will be worse on real-world hardware.
+
 ## Development Phase
 
 Sustain is in pre-release development. It has never been published and has no
