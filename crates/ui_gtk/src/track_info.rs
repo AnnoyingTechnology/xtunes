@@ -76,6 +76,7 @@ pub(crate) fn open_track_info_dialog(
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     stack.set_transition_duration(120);
     stack.set_hexpand(true);
+    stack.set_vhomogeneous(false);
     stack.set_margin_top(12);
 
     let details = DetailsPage::new(&initial_metadata, initial_rating, initial_play_count);
