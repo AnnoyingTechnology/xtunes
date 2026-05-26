@@ -702,6 +702,16 @@ fn decode_artwork(bytes: Option<Vec<u8>>) -> DecodedArtworkRecord {
     }
 }
 
+/// Scale the source so the shorter side equals `max_side` (or the source's
+/// own shorter side, whichever is smaller), then center-crop to a square.
+///
+/// The resulting pixbuf is always square. That matters because `GtkPicture`
+/// with `ContentFit::Contain` does HEIGHT_FOR_WIDTH measurement: a 132×131
+/// texture in a 132-wide cover would request natural height ≠ 132, which
+/// propagates through the cover Box's measure and shifts the labels' Y
+/// position downstream. Forcing the texture square pins natural height to
+/// width across every album, regardless of source aspect ratio, and matches
+/// the iTunes-style square-thumbnail look.
 fn scaled_pixbuf(pixbuf: &gdk_pixbuf::Pixbuf, max_side: i32) -> Option<gdk_pixbuf::Pixbuf> {
     let width = pixbuf.width();
     let height = pixbuf.height();
@@ -709,21 +719,37 @@ fn scaled_pixbuf(pixbuf: &gdk_pixbuf::Pixbuf, max_side: i32) -> Option<gdk_pixbu
         return None;
     }
 
-    let largest_side = width.max(height);
-    let scale = (f64::from(max_side) / f64::from(largest_side)).min(1.0);
-    let target_width = (f64::from(width) * scale).round().max(1.0) as i32;
-    let target_height = (f64::from(height) * scale).round().max(1.0) as i32;
+    let shorter_side = width.min(height);
+    let scale = (f64::from(max_side) / f64::from(shorter_side)).min(1.0);
+    let scaled_width = (f64::from(width) * scale).round().max(1.0) as i32;
+    let scaled_height = (f64::from(height) * scale).round().max(1.0) as i32;
 
-    let scaled = if target_width == width && target_height == height {
+    let scaled = if scaled_width == width && scaled_height == height {
         pixbuf.clone()
     } else {
         pixbuf.scale_simple(
-            target_width,
-            target_height,
+            scaled_width,
+            scaled_height,
             gdk_pixbuf::InterpType::Bilinear,
         )?
     };
-    Some(scaled)
+
+    let side = scaled.width().min(scaled.height());
+    if scaled.width() == side && scaled.height() == side {
+        return Some(scaled);
+    }
+
+    let x_offset = (scaled.width() - side) / 2;
+    let y_offset = (scaled.height() - side) / 2;
+    let cropped = gdk_pixbuf::Pixbuf::new(
+        scaled.colorspace(),
+        scaled.has_alpha(),
+        scaled.bits_per_sample(),
+        side,
+        side,
+    )?;
+    scaled.copy_area(x_offset, y_offset, side, side, &cropped, 0, 0);
+    Some(cropped)
 }
 
 fn pixbuf_png_bytes(pixbuf: &gdk_pixbuf::Pixbuf) -> Option<Vec<u8>> {

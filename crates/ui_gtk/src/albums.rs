@@ -89,7 +89,11 @@ const ALBUM_TILE_WIDTH: i32 = 150;
 const ALBUM_TILE_HORIZONTAL_PADDING: i32 = 16;
 const ALBUM_TILE_MIN_WIDTH: i32 = ALBUM_TILE_WIDTH + ALBUM_TILE_HORIZONTAL_PADDING;
 const ALBUM_TILE_COVER_SIZE: i32 = 132;
-const ALBUM_TILE_TEXT_CHARS: i32 = 18;
+// Sized so the title sits at the same vertical position whether the tile is
+// selected or not. Non-selected: 8 px button padding + 132 cover = 140. The
+// selected tile drops button padding to 0, so the cover size must equal 140
+// to land at the same Y.
+const ALBUM_TILE_COVER_SIZE_EXPANDED: i32 = 140;
 const ALBUM_GRID_MARGIN: i32 = 14;
 const ALBUM_GRID_ROW_SPACING: i32 = 12;
 const ALBUM_GRID_COLUMN_SPACING: i32 = 16;
@@ -514,8 +518,14 @@ impl AlbumsView {
     }
 
     fn album_tile(&self, album: &AlbumViewModel, is_selected: bool) -> gtk::Button {
+        let cover_size = if is_selected {
+            ALBUM_TILE_COVER_SIZE_EXPANDED
+        } else {
+            ALBUM_TILE_COVER_SIZE
+        };
+
         let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        content.set_width_request(ALBUM_TILE_WIDTH);
+        content.set_width_request(cover_size);
         content.set_halign(gtk::Align::Center);
         content.set_overflow(gtk::Overflow::Hidden);
 
@@ -525,7 +535,8 @@ impl AlbumsView {
         // image. If the album's representative track can't be resolved
         // (no library root yet, or every track missing), the placeholder
         // stays — which is what the synchronous path used to show too.
-        let cover = build_cover_widget(ALBUM_TILE_COVER_SIZE, "album-cover");
+        let cover = build_cover_widget(cover_size, "album-cover");
+        cover.set_halign(gtk::Align::Start);
         content.append(&cover);
         if let Some(source) = self.album_artwork_source(album) {
             let cover_for_callback = cover.clone();
@@ -537,37 +548,25 @@ impl AlbumsView {
                     if generation_cell.get() != generation_snapshot {
                         return;
                     }
-                    apply_cover_texture(
-                        &cover_for_callback,
-                        decoded.tile_texture,
-                        ALBUM_TILE_COVER_SIZE,
-                    );
+                    apply_cover_texture(&cover_for_callback, decoded.tile_texture, cover_size);
                 }),
             );
         }
 
         let title = gtk::Label::new(Some(&album.title));
         title.add_css_class("album-tile-title");
-        title.set_wrap(true);
-        title.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        title.set_lines(2);
-        title.set_width_chars(1);
-        title.set_max_width_chars(ALBUM_TILE_TEXT_CHARS);
+        title.set_size_request(cover_size, -1);
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
         title.set_xalign(0.0);
-        title.set_halign(gtk::Align::Fill);
+        title.set_halign(gtk::Align::Start);
         content.append(&title);
 
         let artist = gtk::Label::new(Some(&album.artist));
         artist.add_css_class("album-tile-artist");
-        artist.set_wrap(true);
-        artist.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        artist.set_lines(1);
-        artist.set_width_chars(1);
-        artist.set_max_width_chars(ALBUM_TILE_TEXT_CHARS);
+        artist.set_size_request(cover_size, -1);
         artist.set_ellipsize(gtk::pango::EllipsizeMode::End);
         artist.set_xalign(0.0);
-        artist.set_halign(gtk::Align::Fill);
+        artist.set_halign(gtk::Align::Start);
         content.append(&artist);
 
         let button = gtk::Button::new();
@@ -879,7 +878,7 @@ fn build_cover_widget(size: i32, css_class: &str) -> gtk::Box {
     cover.add_css_class(css_class);
     cover.set_size_request(size, size);
     cover.set_halign(gtk::Align::Center);
-    cover.set_valign(gtk::Align::Center);
+    cover.set_valign(gtk::Align::Start);
     cover.set_hexpand(false);
     cover.set_vexpand(false);
     cover.set_overflow(gtk::Overflow::Hidden);
@@ -898,6 +897,7 @@ fn apply_cover_texture(cover: &gtk::Box, texture: Option<gdk::Texture>, size: i3
 
     match texture {
         Some(texture) => {
+            cover.add_css_class("has-artwork");
             let picture = gtk::Picture::for_paintable(&texture);
             picture.set_content_fit(gtk::ContentFit::Contain);
             picture.set_can_shrink(true);
@@ -909,6 +909,7 @@ fn apply_cover_texture(cover: &gtk::Box, texture: Option<gdk::Texture>, size: i3
             cover.append(&picture);
         }
         None => {
+            cover.remove_css_class("has-artwork");
             if let Some(icon) = album_cover_placeholder(size) {
                 cover.append(&icon);
             }
