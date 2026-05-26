@@ -16,14 +16,16 @@ use super::{
     artwork_color::ArtworkPalette,
     artwork_loader::{ArtworkLoader, ArtworkSource, DecodedArtwork},
     command_controller::SharedCommandController,
-    status_bar::StatusBar,
 };
 use model::{
     artist_album_text, playback_position, progress_fraction, remaining_time_text, time_text,
     track_title,
 };
 use progress_hit_area::ProgressHitArea;
-use sustain_app_runtime::{ApplicationCommand, NowPlaying, PlaybackCommand, Track, TrackId};
+use sustain_app_runtime::{
+    ApplicationCommand, NotificationCategory, NotificationId, NotificationSeverity, NowPlaying,
+    PlaybackCommand, Track, TrackId,
+};
 
 mod model;
 mod progress_hit_area;
@@ -94,6 +96,11 @@ pub(crate) struct NowPlayingView {
     /// switches mid-fetch) and to make additional clicks during the
     /// fetch idempotent.
     pending_fetch_track_id: Rc<Cell<Option<TrackId>>>,
+    /// Id of the persistent notification that mirrors the in-flight
+    /// fetch in the status bar's notification lane. Stored here so
+    /// `notify_artwork_fetch_complete` can dismiss the exact entry it
+    /// owns once the result arrives.
+    pending_fetch_notification_id: Rc<Cell<Option<NotificationId>>>,
     duration: Rc<Cell<Duration>>,
 }
 
@@ -136,7 +143,6 @@ impl NowPlayingView {
         runtime: SharedRuntime,
         command_controller: SharedCommandController,
         artwork_loader: ArtworkLoader,
-        status_bar: StatusBar,
     ) -> Self {
         let area = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         area.add_css_class("now-playing-area");
@@ -180,6 +186,8 @@ impl NowPlayingView {
         let artwork_path: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
         let artwork_color_provider = install_artwork_color_provider();
         let pending_fetch_track_id: Rc<Cell<Option<TrackId>>> = Rc::new(Cell::new(None));
+        let pending_fetch_notification_id: Rc<Cell<Option<NotificationId>>> =
+            Rc::new(Cell::new(None));
 
         let details = gtk::Box::new(gtk::Orientation::Vertical, 0);
         details.set_hexpand(true);
@@ -251,10 +259,11 @@ impl NowPlayingView {
             artwork_generation: Rc::new(Cell::new(0)),
             artwork_color_provider,
             pending_fetch_track_id,
+            pending_fetch_notification_id,
             duration,
         };
         install_playback_option_controls(&view, command_controller.clone());
-        install_artwork_click_handler(&view, command_controller, status_bar);
+        install_artwork_click_handler(&view, command_controller);
         view.refresh(&runtime.borrow().now_playing());
         install_refresh_timer(&view, runtime);
         view
@@ -271,6 +280,9 @@ impl NowPlayingView {
     pub(crate) fn notify_artwork_fetch_complete(&self, track_id: TrackId) {
         if self.pending_fetch_track_id.get() == Some(track_id) {
             self.pending_fetch_track_id.set(None);
+        }
+        if let Some(id) = self.pending_fetch_notification_id.take() {
+            self.runtime.borrow_mut().dismiss_notification(id);
         }
         if self.runtime.borrow().playback_queue_current_track_id() == Some(track_id) {
             *self.artwork_path.borrow_mut() = None;
@@ -398,11 +410,7 @@ impl NowPlayingView {
     /// state); false if the click was ignored (no current track, no
     /// fetch path, or another fetch already in flight for this
     /// track).
-    fn handle_artwork_click(
-        &self,
-        command_controller: &SharedCommandController,
-        status_bar: &StatusBar,
-    ) -> bool {
+    fn handle_artwork_click(&self, command_controller: &SharedCommandController) -> bool {
         // We only act when the missing-state icon is visible. Any
         // other state means there is artwork to display or a fetch
         // is already running — clicks become no-ops in both cases.
@@ -423,20 +431,25 @@ impl NowPlayingView {
             return false;
         }
         if !command_controller.dispatch_succeeded(ApplicationCommand::FetchArtwork { track_id }) {
-            // Dispatch already surfaced an error in the status bar
-            // (e.g. ArtworkFetchingUnavailable). Leave the tile in
-            // the missing state so the user can retry once whatever
-            // blocked the call is resolved.
+            // Dispatch already surfaced the error through the
+            // notification lane (e.g. ArtworkFetchingUnavailable).
+            // Leave the tile in the missing state so the user can
+            // retry once whatever blocked the call is resolved.
             return false;
         }
         self.pending_fetch_track_id.set(Some(track_id));
         self.set_artwork_inner_page(ARTWORK_INNER_STACK_FETCHING);
-        // Mirror the tile-local spinner with a bottom-right status
-        // message so an in-flight fetch is noticeable even when the
-        // user isn't looking at the artwork tile. The result consumer
-        // in `main_window` later replaces this with the outcome
-        // message.
-        status_bar.show_task_message("Fetching artwork…", true);
+        // Mirror the tile-local spinner with a persistent notification
+        // so an in-flight fetch is noticeable even when the user
+        // isn't looking at the artwork tile. The fetch worker is
+        // short-lived but uncancellable from here.
+        let notification_id = self.runtime.borrow_mut().push_persistent_notification(
+            NotificationCategory::ArtworkFetch,
+            NotificationSeverity::Info,
+            "Fetching artwork…".to_owned(),
+            false,
+        );
+        self.pending_fetch_notification_id.set(Some(notification_id));
         true
     }
 
@@ -591,7 +604,6 @@ fn install_playback_option_controls(
 fn install_artwork_click_handler(
     view: &NowPlayingView,
     command_controller: SharedCommandController,
-    status_bar: StatusBar,
 ) {
     let click = gtk::GestureClick::new();
     click.set_button(gtk::gdk::BUTTON_PRIMARY);
@@ -602,7 +614,7 @@ fn install_artwork_click_handler(
         // clicking the artwork could also start a window drag in
         // some compositors.
         gesture.set_state(gtk::EventSequenceState::Claimed);
-        let _ = view_for_click.handle_artwork_click(&command_controller, &status_bar);
+        let _ = view_for_click.handle_artwork_click(&command_controller);
     });
     view.artwork_box.add_controller(click);
 }

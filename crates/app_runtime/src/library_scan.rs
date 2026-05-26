@@ -16,7 +16,7 @@ use sustain_metadata::{LibraryScan, LibraryScanner, ScannedTrack};
 
 use crate::{
     ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult, LibraryScanResult,
-    LibraryScanSummary, LibraryScanTask,
+    LibraryScanSummary, LibraryScanTask, NotificationCategory, NotificationSeverity, notifications,
 };
 
 impl ApplicationRuntime {
@@ -58,6 +58,13 @@ impl ApplicationRuntime {
         let cancellation_requested = Arc::new(AtomicBool::new(false));
         self.library_scan_cancellation = Some(cancellation_requested.clone());
         self.background_task_status = crate::BackgroundTaskStatus::LibraryScanRunning;
+        let notification_id = self.push_persistent_notification(
+            NotificationCategory::LibraryScan,
+            NotificationSeverity::Info,
+            notifications::library_scan_running_text(),
+            true,
+        );
+        self.library_scan_notification_id = Some(notification_id);
 
         Ok(LibraryScanTask {
             library_path,
@@ -74,12 +81,28 @@ impl ApplicationRuntime {
         self.library_tracks = result.tracks;
         self.refresh_playback_queue_track_ids();
         self.library_scan_cancellation = None;
-        self.background_task_status = crate::BackgroundTaskStatus::LibraryScanCompleted(summary);
+        self.background_task_status = crate::BackgroundTaskStatus::Idle;
+        if let Some(id) = self.library_scan_notification_id.take() {
+            self.dismiss_notification(id);
+        }
+        self.push_ephemeral_notification(
+            NotificationCategory::LibraryScan,
+            NotificationSeverity::Info,
+            notifications::library_scan_outcome_text(&summary),
+        );
     }
 
     pub fn fail_library_scan(&mut self, error: ApplicationRuntimeError) {
         self.library_scan_cancellation = None;
-        self.background_task_status = crate::BackgroundTaskStatus::LibraryScanFailed(error);
+        self.background_task_status = crate::BackgroundTaskStatus::Idle;
+        if let Some(id) = self.library_scan_notification_id.take() {
+            self.dismiss_notification(id);
+        }
+        self.push_ephemeral_notification(
+            NotificationCategory::LibraryScan,
+            NotificationSeverity::Error,
+            notifications::runtime_error_text(&error).to_owned(),
+        );
     }
 }
 

@@ -43,6 +43,7 @@ mod library_mutation;
 mod library_scan;
 pub mod managed_library;
 pub(crate) mod metadata_writer;
+pub mod notifications;
 mod playback;
 mod playlist_folders;
 mod playlist_items;
@@ -53,6 +54,13 @@ pub use artwork_fetcher::{ArtworkFetchOutcome, ArtworkFetchResult};
 pub use library_scan::run_library_scan_task;
 pub use managed_library::{run_library_consolidation_task, run_library_import_task};
 pub use metadata_writer::{MetadataWriteKind, MetadataWriteOutcome, MetadataWriteResult};
+pub use notifications::{
+    EPHEMERAL_NOTIFICATION_DURATION, NOTIFICATION_QUEUE_HARD_CAP, NOTIFICATION_TRANSITION,
+    Notification, NotificationCategory, NotificationCenter, NotificationId, NotificationKind,
+    NotificationSeverity, library_consolidation_outcome_text, library_consolidation_running_text,
+    library_import_outcome_text, library_import_running_text, library_scan_outcome_text,
+    library_scan_running_text, runtime_error_text,
+};
 
 pub type ApplicationRuntimeResult<T> = Result<T, ApplicationRuntimeError>;
 
@@ -99,29 +107,22 @@ pub struct LibraryScanSummary {
     pub cancelled: bool,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+/// Live truth about which (if any) mutually-exclusive background task
+/// owns the runtime right now. Outcome and failure messaging is no
+/// longer routed through this enum — completed and failed states are
+/// reported as notifications via [`NotificationCenter`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BackgroundTaskStatus {
     #[default]
     Idle,
     LibraryScanRunning,
-    LibraryScanCompleted(LibraryScanSummary),
-    LibraryScanFailed(ApplicationRuntimeError),
     LibraryImportRunning,
-    LibraryImportCompleted(LibraryImportSummary),
-    LibraryImportFailed(ApplicationRuntimeError),
     LibraryConsolidationRunning,
-    LibraryConsolidationCompleted(LibraryConsolidationSummary),
-    LibraryConsolidationFailed(ApplicationRuntimeError),
 }
 
 impl BackgroundTaskStatus {
     pub fn is_running(&self) -> bool {
-        matches!(
-            self,
-            Self::LibraryScanRunning
-                | Self::LibraryImportRunning
-                | Self::LibraryConsolidationRunning
-        )
+        !matches!(self, Self::Idle)
     }
 
     pub fn is_library_consolidation_running(&self) -> bool {
@@ -221,13 +222,30 @@ pub struct ApplicationRuntime {
     library_scan_cancellation: Option<Arc<AtomicBool>>,
     library_import_cancellation: Option<Arc<AtomicBool>>,
     library_consolidation_cancellation: Option<Arc<AtomicBool>>,
+    // Id of the persistent notification published while a given task
+    // is running, so apply/fail can dismiss the exact entry they own.
+    library_scan_notification_id: Option<NotificationId>,
+    library_import_notification_id: Option<NotificationId>,
+    library_consolidation_notification_id: Option<NotificationId>,
     metadata_writer: Option<metadata_writer::MetadataWriter>,
     metadata_write_result_sink: Option<async_channel::Sender<MetadataWriteResult>>,
     remote_metadata_service: Option<Arc<dyn RemoteMetadataService>>,
     artwork_fetcher: Option<artwork_fetcher::ArtworkFetcher>,
     artwork_fetch_result_sink: Option<async_channel::Sender<ArtworkFetchResult>>,
     clock: Arc<dyn Clock>,
+    notifications: NotificationCenter,
+    // Fires after every push/dismiss/expire on `notifications`. Set by
+    // the UI shell once during startup; the callback is responsible for
+    // deferring its re-render (the runtime is mid-borrow when this
+    // fires, so calling back into the runtime synchronously would
+    // panic).
+    notification_observer: Option<NotificationObserver>,
 }
+
+/// Callback fired after every mutation of [`NotificationCenter`]. Held
+/// as a trait object so feature crates can plug GTK-specific dispatch
+/// without coupling `app_runtime` to GTK.
+pub type NotificationObserver = Box<dyn Fn()>;
 
 impl ApplicationRuntime {
     pub fn new() -> Self {
@@ -251,12 +269,17 @@ impl ApplicationRuntime {
             library_scan_cancellation: None,
             library_import_cancellation: None,
             library_consolidation_cancellation: None,
+            library_scan_notification_id: None,
+            library_import_notification_id: None,
+            library_consolidation_notification_id: None,
             metadata_writer: None,
             metadata_write_result_sink: None,
             remote_metadata_service: None,
             artwork_fetcher: None,
             artwork_fetch_result_sink: None,
             clock: Arc::new(SystemClock),
+            notifications: NotificationCenter::new(),
+            notification_observer: None,
         }
     }
 
@@ -287,12 +310,17 @@ impl ApplicationRuntime {
             library_scan_cancellation: None,
             library_import_cancellation: None,
             library_consolidation_cancellation: None,
+            library_scan_notification_id: None,
+            library_import_notification_id: None,
+            library_consolidation_notification_id: None,
             metadata_writer: None,
             metadata_write_result_sink: None,
             remote_metadata_service: None,
             artwork_fetcher: None,
             artwork_fetch_result_sink: None,
             clock: Arc::new(SystemClock),
+            notifications: NotificationCenter::new(),
+            notification_observer: None,
         })
     }
 
@@ -489,24 +517,6 @@ impl ApplicationRuntime {
         &self.background_task_status
     }
 
-    /// Resets the background-task status back to `Idle`, but only if
-    /// the task is currently sitting in a *Completed variant. Used by
-    /// the UI to dismiss a finished-but-uninteresting result (a
-    /// consolidation auto-resume that found nothing to do) without
-    /// having to display it. Running and Failed states are left
-    /// untouched — silencing an in-flight task or a failure would
-    /// hide information the user genuinely needs.
-    pub fn dismiss_completed_background_task_status(&mut self) {
-        if matches!(
-            self.background_task_status,
-            BackgroundTaskStatus::LibraryScanCompleted(_)
-                | BackgroundTaskStatus::LibraryImportCompleted(_)
-                | BackgroundTaskStatus::LibraryConsolidationCompleted(_)
-        ) {
-            self.background_task_status = BackgroundTaskStatus::Idle;
-        }
-    }
-
     pub fn request_library_consolidation_cancellation(&self) {
         if let Some(cancellation_requested) = &self.library_consolidation_cancellation {
             cancellation_requested.store(true, Ordering::SeqCst);
@@ -530,11 +540,14 @@ impl ApplicationRuntime {
     // `BackgroundTaskStatus::is_running`), so at most one of these
     // tokens is live at any moment. Idempotent: calling this with no
     // task running is a no-op, as is calling it twice while one is
-    // winding down.
+    // winding down. Also pokes the notification observer so the lane
+    // can repaint the running notification's label as "Cancelling..."
+    // without waiting for the next worker poll tick.
     pub fn request_background_task_cancellation(&self) {
         self.request_library_scan_cancellation();
         self.request_library_import_cancellation();
         self.request_library_consolidation_cancellation();
+        self.notify_notification_observer();
     }
 
     // True while a cancellation request has been issued but the
@@ -550,6 +563,69 @@ impl ApplicationRuntime {
         flag_set(self.library_scan_cancellation.as_ref())
             || flag_set(self.library_import_cancellation.as_ref())
             || flag_set(self.library_consolidation_cancellation.as_ref())
+    }
+
+    /// Read-only view onto the notification surface for renderers.
+    pub fn notifications(&self) -> &NotificationCenter {
+        &self.notifications
+    }
+
+    /// Install the observer that the runtime fires after every
+    /// notification mutation. The observer must not synchronously
+    /// reach back into the runtime — it runs while a mutable borrow
+    /// is held — so implementations should defer their work onto the
+    /// main loop (e.g. `glib::idle_add_local_once`).
+    pub fn set_notification_observer(&mut self, observer: NotificationObserver) {
+        self.notification_observer = Some(observer);
+    }
+
+    pub fn push_persistent_notification(
+        &mut self,
+        category: NotificationCategory,
+        severity: NotificationSeverity,
+        body: String,
+        cancellable: bool,
+    ) -> NotificationId {
+        let id = self
+            .notifications
+            .push_persistent(category, severity, body, cancellable);
+        self.notify_notification_observer();
+        id
+    }
+
+    pub fn push_ephemeral_notification(
+        &mut self,
+        category: NotificationCategory,
+        severity: NotificationSeverity,
+        body: String,
+    ) -> NotificationId {
+        let id = self
+            .notifications
+            .push_ephemeral(category, severity, body);
+        self.notify_notification_observer();
+        id
+    }
+
+    pub fn dismiss_notification(&mut self, id: NotificationId) {
+        self.notifications.dismiss(id);
+        self.notify_notification_observer();
+    }
+
+    /// Pop the currently-displayed ephemeral. Called by the widget
+    /// when its display timer has elapsed; the widget then renders the
+    /// next head (or falls back to the persistent stack).
+    pub fn expire_current_ephemeral_notification(&mut self) -> Option<Notification> {
+        let expired = self.notifications.expire_current_ephemeral();
+        if expired.is_some() {
+            self.notify_notification_observer();
+        }
+        expired
+    }
+
+    fn notify_notification_observer(&self) {
+        if let Some(observer) = &self.notification_observer {
+            observer();
+        }
     }
 
     pub fn playback_state(&self) -> PlaybackState {

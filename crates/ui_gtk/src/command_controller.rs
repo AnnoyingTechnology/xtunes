@@ -3,13 +3,13 @@
 
 use std::rc::Rc;
 
+use sustain_app_runtime::{NotificationCategory, NotificationSeverity, runtime_error_text};
+
 use super::{ApplicationCommand, ApplicationRuntimeError, SharedRuntime};
-use crate::status_bar::StatusBar;
 
 #[derive(Clone)]
 pub(crate) struct UiCommandController {
     runtime: SharedRuntime,
-    status_bar: StatusBar,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,11 +20,8 @@ pub(crate) struct CommandBatchResult {
 }
 
 impl UiCommandController {
-    pub(crate) fn new(runtime: SharedRuntime, status_bar: StatusBar) -> Self {
-        Self {
-            runtime,
-            status_bar,
-        }
+    pub(crate) fn new(runtime: SharedRuntime) -> Self {
+        Self { runtime }
     }
 
     pub(crate) fn runtime(&self) -> SharedRuntime {
@@ -36,9 +33,8 @@ impl UiCommandController {
         command: ApplicationCommand,
     ) -> Result<(), ApplicationRuntimeError> {
         let result = self.runtime.borrow_mut().handle_command(command);
-        match &result {
-            Ok(()) => self.status_bar.clear_command_message(),
-            Err(error) => self.status_bar.show_command_error(error),
+        if let Err(error) = &result {
+            self.report_command_error(error);
         }
         result
     }
@@ -72,15 +68,31 @@ impl UiCommandController {
         }
 
         match (result.succeeded, result.failed, result.first_error.as_ref()) {
-            (_, 0, _) => self.status_bar.clear_command_message(),
-            (0, _, Some(error)) => self.status_bar.show_command_error(error),
-            (_, _, Some(_error)) => self
-                .status_bar
-                .show_command_message("Some selected tracks could not be updated."),
-            (_, _, None) => self.status_bar.clear_command_message(),
+            (_, 0, _) => {}
+            (0, _, Some(error)) => self.report_command_error(error),
+            (_, _, Some(_error)) => self.report_command_message(
+                NotificationSeverity::Warning,
+                "Some selected tracks could not be updated.".to_owned(),
+            ),
+            (_, _, None) => {}
         }
 
         result
+    }
+
+    fn report_command_error(&self, error: &ApplicationRuntimeError) {
+        self.report_command_message(
+            NotificationSeverity::Error,
+            runtime_error_text(error).to_owned(),
+        );
+    }
+
+    fn report_command_message(&self, severity: NotificationSeverity, body: String) {
+        self.runtime.borrow_mut().push_ephemeral_notification(
+            NotificationCategory::Command,
+            severity,
+            body,
+        );
     }
 }
 

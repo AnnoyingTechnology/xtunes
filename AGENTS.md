@@ -176,6 +176,28 @@ Keep the durable application model separate from the UI shell:
 
 GTK4 is the first frontend, not the permanent owner of the domain model.
 
+## User-Facing Notifications
+
+Every status message the user sees — background-task progress, command
+outcomes, async tag-write failures, artwork fetch results, anything in
+the status bar's notification lane — flows through
+`sustain_app_runtime::NotificationCenter`. Producers call the runtime's
+`push_persistent_notification` / `push_ephemeral_notification` /
+`dismiss_notification` helpers; the widget renders the head of the
+queue.
+
+Hard rule: feature code never pokes a status-bar widget directly, and
+never invents an ad-hoc surface for transient text. If a new piece of
+the application needs to tell the user something, the answer is a
+notification pushed through the runtime, not a new label, popup, or
+dialog. New `NotificationCategory` variants are fine; new pathways are
+not.
+
+The lane owns its own auto-dismiss and animation. Producers do not
+schedule their own timers, do not mutate widgets, do not assume how
+long their message will be visible. They push, and where applicable
+keep the id so they can dismiss it again.
+
 # Git
 
 NEVER CO-AUTHOR YOUR COMMITS. 

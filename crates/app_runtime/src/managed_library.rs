@@ -27,7 +27,8 @@ use sustain_metadata::{audio_format_from_path, hash_file_content};
 use crate::{
     ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult,
     LibraryConsolidationResult, LibraryConsolidationSummary, LibraryConsolidationTask,
-    LibraryImportResult, LibraryImportSummary, LibraryImportTask, library_scan,
+    LibraryImportResult, LibraryImportSummary, LibraryImportTask, NotificationCategory,
+    NotificationSeverity, library_scan, notifications,
 };
 
 const CONSOLIDATION_JOURNAL_FILE_NAME: &str = ".sustain-consolidation-journal";
@@ -134,6 +135,13 @@ impl ApplicationRuntime {
         let cancellation_requested = Arc::new(AtomicBool::new(false));
         self.library_import_cancellation = Some(cancellation_requested.clone());
         self.background_task_status = crate::BackgroundTaskStatus::LibraryImportRunning;
+        let notification_id = self.push_persistent_notification(
+            NotificationCategory::LibraryImport,
+            NotificationSeverity::Info,
+            notifications::library_import_running_text(),
+            true,
+        );
+        self.library_import_notification_id = Some(notification_id);
 
         Ok(LibraryImportTask {
             paths,
@@ -152,12 +160,28 @@ impl ApplicationRuntime {
         self.library_tracks.sort_by_key(|track| track.id);
         self.refresh_playback_queue_track_ids();
         self.library_import_cancellation = None;
-        self.background_task_status = crate::BackgroundTaskStatus::LibraryImportCompleted(summary);
+        self.background_task_status = crate::BackgroundTaskStatus::Idle;
+        if let Some(id) = self.library_import_notification_id.take() {
+            self.dismiss_notification(id);
+        }
+        self.push_ephemeral_notification(
+            NotificationCategory::LibraryImport,
+            NotificationSeverity::Info,
+            notifications::library_import_outcome_text(&summary),
+        );
     }
 
     pub fn fail_library_import(&mut self, error: ApplicationRuntimeError) {
         self.library_import_cancellation = None;
-        self.background_task_status = crate::BackgroundTaskStatus::LibraryImportFailed(error);
+        self.background_task_status = crate::BackgroundTaskStatus::Idle;
+        if let Some(id) = self.library_import_notification_id.take() {
+            self.dismiss_notification(id);
+        }
+        self.push_ephemeral_notification(
+            NotificationCategory::LibraryImport,
+            NotificationSeverity::Error,
+            notifications::runtime_error_text(&error).to_owned(),
+        );
     }
 
     pub fn prepare_library_consolidation(
@@ -178,6 +202,13 @@ impl ApplicationRuntime {
         let cancellation_requested = Arc::new(AtomicBool::new(false));
         self.library_consolidation_cancellation = Some(cancellation_requested.clone());
         self.background_task_status = crate::BackgroundTaskStatus::LibraryConsolidationRunning;
+        let notification_id = self.push_persistent_notification(
+            NotificationCategory::LibraryConsolidation,
+            NotificationSeverity::Info,
+            notifications::library_consolidation_running_text(),
+            true,
+        );
+        self.library_consolidation_notification_id = Some(notification_id);
 
         Ok(LibraryConsolidationTask {
             settings: self.settings.clone(),
@@ -193,14 +224,31 @@ impl ApplicationRuntime {
         replace_library_tracks_by_id(&mut self.library_tracks, result.tracks);
         self.refresh_playback_queue_track_ids();
         self.library_consolidation_cancellation = None;
-        self.background_task_status =
-            crate::BackgroundTaskStatus::LibraryConsolidationCompleted(summary);
+        self.background_task_status = crate::BackgroundTaskStatus::Idle;
+        if let Some(id) = self.library_consolidation_notification_id.take() {
+            self.dismiss_notification(id);
+        }
+        // An auto-resume that found nothing to move and nothing
+        // missing is silenced by the auto-dismiss timer just like any
+        // ephemeral — no special "boring success" branch needed.
+        self.push_ephemeral_notification(
+            NotificationCategory::LibraryConsolidation,
+            NotificationSeverity::Info,
+            notifications::library_consolidation_outcome_text(&summary),
+        );
     }
 
     pub fn fail_library_consolidation(&mut self, error: ApplicationRuntimeError) {
         self.library_consolidation_cancellation = None;
-        self.background_task_status =
-            crate::BackgroundTaskStatus::LibraryConsolidationFailed(error);
+        self.background_task_status = crate::BackgroundTaskStatus::Idle;
+        if let Some(id) = self.library_consolidation_notification_id.take() {
+            self.dismiss_notification(id);
+        }
+        self.push_ephemeral_notification(
+            NotificationCategory::LibraryConsolidation,
+            NotificationSeverity::Error,
+            notifications::runtime_error_text(&error).to_owned(),
+        );
     }
 }
 

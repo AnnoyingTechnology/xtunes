@@ -126,10 +126,12 @@ pub(crate) fn build_main_window(
             }),
         )
     };
-    let command_controller: SharedCommandController = Rc::new(UiCommandController::new(
-        runtime.clone(),
-        status_bar.clone(),
-    ));
+    let command_controller: SharedCommandController =
+        Rc::new(UiCommandController::new(runtime.clone()));
+    // Wire the lane to observe runtime notifications before any
+    // callback can push a notification — otherwise an early ephemeral
+    // would land in the queue without a renderer attached.
+    status_bar.attach_to_runtime(&runtime);
 
     let songs_table_holder: Rc<RefCell<Option<TrackTable>>> = Rc::new(RefCell::new(None));
     let albums_view_holder: Rc<RefCell<Option<AlbumsView>>> = Rc::new(RefCell::new(None));
@@ -151,7 +153,6 @@ pub(crate) fn build_main_window(
         runtime.clone(),
         command_controller.clone(),
         artwork_loader.clone(),
-        status_bar.clone(),
     );
     let initial_volume = runtime.borrow().settings().playback.volume;
     let titlebar = build_titlebar(now_playing.widget(), initial_volume);
@@ -327,7 +328,7 @@ pub(crate) fn build_main_window(
     track_row_changed_holder.replace(Some(track_row_changed));
     install_metadata_write_result_consumer(
         metadata_write_result_rx,
-        status_bar.clone(),
+        runtime.clone(),
         track_row_changed_holder.clone(),
     );
     install_artwork_fetch_result_consumer(ArtworkFetchResultConsumerContext {
@@ -337,7 +338,6 @@ pub(crate) fn build_main_window(
         artwork_loader: artwork_loader.clone(),
         now_playing: now_playing.clone(),
         playback_changed: playback_changed.clone(),
-        status_bar: status_bar.clone(),
         track_row_changed_holder: track_row_changed_holder.clone(),
     });
     sidebar.set_selection_changed(sidebar_selection_changed_callback(
@@ -390,11 +390,9 @@ pub(crate) fn build_main_window(
         &sidebar,
     ));
     library_changed_holder.replace(Some(library_changed.clone()));
-    let scan_requested =
-        library_scan_requested_callback(&runtime, library_changed.clone(), &status_bar);
-    let consolidation_requested = library_consolidation_requested_callback(&runtime, &status_bar);
-    let import_requested =
-        library_import_requested_callback(&runtime, library_changed.clone(), &status_bar);
+    let scan_requested = library_scan_requested_callback(&runtime, library_changed.clone());
+    let consolidation_requested = library_consolidation_requested_callback(&runtime);
+    let import_requested = library_import_requested_callback(&runtime, library_changed.clone());
     install_file_drop_target(&songs_drop_overlay, &songs_drop_indicator, import_requested);
     install_preferences_action(
         app,
@@ -1353,7 +1351,7 @@ fn install_mpris_command_consumer(
 /// disk.
 fn install_metadata_write_result_consumer(
     receiver: Option<MetadataWriteResultReceiver>,
-    status_bar: StatusBar,
+    runtime: SharedRuntime,
     track_row_changed_holder: TrackRowChangedHolder,
 ) {
     let Some(receiver) = receiver else {
@@ -1378,7 +1376,11 @@ fn install_metadata_write_result_consumer(
                     "Could not save the artwork change to the audio file."
                 }
             };
-            status_bar.show_command_message(message);
+            runtime.borrow_mut().push_ephemeral_notification(
+                sustain_app_runtime::NotificationCategory::MetadataWrite,
+                sustain_app_runtime::NotificationSeverity::Error,
+                message.to_owned(),
+            );
             if let Some(callback) = track_row_changed_holder.borrow().as_ref() {
                 callback(result.track_id);
             }
@@ -1406,7 +1408,6 @@ struct ArtworkFetchResultConsumerContext {
     artwork_loader: ArtworkLoader,
     now_playing: crate::now_playing::NowPlayingView,
     playback_changed: PlaybackChangedCallback,
-    status_bar: StatusBar,
     track_row_changed_holder: TrackRowChangedHolder,
 }
 
@@ -1418,7 +1419,6 @@ fn install_artwork_fetch_result_consumer(context: ArtworkFetchResultConsumerCont
         artwork_loader,
         now_playing,
         playback_changed,
-        status_bar,
         track_row_changed_holder,
     } = context;
     let Some(receiver) = receiver else {
@@ -1427,7 +1427,7 @@ fn install_artwork_fetch_result_consumer(context: ArtworkFetchResultConsumerCont
     glib::MainContext::default().spawn_local(async move {
         while let Ok(result) = receiver.recv().await {
             use sustain_app_runtime::ArtworkFetchOutcome;
-            match result.outcome {
+            let (severity, body) = match &result.outcome {
                 ArtworkFetchOutcome::Fetched(bytes) => {
                     if let Some(source) = artwork_source_for_track(&runtime, result.track_id) {
                         // Drop the existing in-memory + disk-cache
@@ -1443,19 +1443,33 @@ fn install_artwork_fetch_result_consumer(context: ArtworkFetchResultConsumerCont
                     let _ = command_controller.dispatch(
                         sustain_app_runtime::ApplicationCommand::SetArtwork {
                             track_id: result.track_id,
-                            artwork: Some(bytes),
+                            artwork: Some(bytes.clone()),
                         },
                     );
-                    status_bar.show_task_message("Artwork updated.", false);
+                    (
+                        sustain_app_runtime::NotificationSeverity::Info,
+                        "Artwork updated.".to_owned(),
+                    )
                 }
-                ArtworkFetchOutcome::NoMatch => {
-                    status_bar.show_task_message("No cover art found for this track.", false);
-                }
-                ArtworkFetchOutcome::Failed => {
-                    status_bar.show_task_message("Could not fetch cover art.", false);
-                }
-            }
+                ArtworkFetchOutcome::NoMatch => (
+                    sustain_app_runtime::NotificationSeverity::Info,
+                    "No cover art found for this track.".to_owned(),
+                ),
+                ArtworkFetchOutcome::Failed => (
+                    sustain_app_runtime::NotificationSeverity::Error,
+                    "Could not fetch cover art.".to_owned(),
+                ),
+            };
+            // The corresponding "Fetching artwork…" persistent is
+            // dismissed by the now-playing tile (it owns the
+            // persistent id it pushed). Here we only publish the
+            // outcome ephemeral.
             now_playing.notify_artwork_fetch_complete(result.track_id);
+            runtime.borrow_mut().push_ephemeral_notification(
+                sustain_app_runtime::NotificationCategory::ArtworkFetch,
+                severity,
+                body,
+            );
             playback_changed();
             if let Some(callback) = track_row_changed_holder.borrow().as_ref() {
                 callback(result.track_id);
