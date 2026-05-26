@@ -1,8 +1,11 @@
-# Sustain
+<h1>
+  <img src=".github/assets/logo.png" alt="" height="64" align="left" hspace="12" />
+  Sustain
+</h1>
 
-![Sustain interface screenshot dark](screenshot-dark.png)
+![Sustain interface screenshot dark](.github/assets/screenshot-dark.png)
 
-![Sustain interface screenshot dark](screenshot-light.png)
+![Sustain interface screenshot light](.github/assets/screenshot-light.png)
 
 Sustain (`open-sustain/sustain`) is a Linux music player heavily inspired by old iTunes builds.
 
