@@ -45,8 +45,20 @@ No Electron, no web wrappers. It’s built to be fast, lightweight, and play nic
 
 ## Features
 
+See [docs/features.md](docs/features.md) for the full reference.
+
 Implemented:
-- Playlists, Smart playlists, playlists folders, Album views, Library management
+- Library management with two modes — "Don't touch my files" or "Keep my library organized" (*iso-iTunes*)
+- Songs / Albums / Playlists views with a dense, keyboard-friendly table (*iso-iTunes*)
+- Playlists, smart playlists, and playlist folders (*iso-iTunes*)
+- Get Info multi-tab metadata editor with tag mirroring to ID3/Vorbis/MP4 (*iso-iTunes*)
+- 5-star ratings, play count, skip count, last played, last skipped (*iso-iTunes*)
+- Up Next queue with `Play Next` and `Add to Queue` (*iso-iTunes*)
+- Real-time search, sortable and customizable columns (*iso-iTunes*)
+- Remote artwork and metadata fetching via MusicBrainz, Cover Art Archive, and AcoustID (*iTunes-adjacent*)
+- MPRIS / D-Bus / media-key integration (*Sustain-native*)
+- Native light / dark theme and system accent color (*Sustain-native*)
+- Single-instance enforcement per library database (*iso-iTunes*)
 
 ## Roadmap
 

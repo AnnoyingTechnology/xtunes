@@ -195,6 +195,17 @@ schedule their own timers, do not mutate widgets, do not assume how
 long their message will be visible. They push, and where applicable
 keep the id so they can dismiss it again.
 
+# Documenting features
+
+`docs/features.md` is the canonical reference for shipped, user-visible
+behavior. When a new feature lands and is ready to commit, add or update its
+entry there with the same parity tag vocabulary (*iso-iTunes*,
+*iTunes-adjacent*, *Sustain-native*) used by the surrounding entries. If the
+feature is significant enough to mention on the front page — a new top-level
+mode, a new playlist kind, a new system integration — also add a bullet to
+the Features list in `README.md`. Bug fixes, refactors, and pending/aspirational
+work do not belong in either file.
+
 # Git
 
 Before committing, run the same gate CI runs: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked --no-fail-fast && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --locked --no-deps --document-private-items`.
