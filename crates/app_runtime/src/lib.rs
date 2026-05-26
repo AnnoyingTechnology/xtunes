@@ -1520,10 +1520,7 @@ mod tests {
 
         let track_id = track_id(7);
         let store = Arc::new(InMemoryLibraryStore::new());
-        assert_eq!(
-            store.save_track(test_track(track_id, "track.flac")),
-            Ok(())
-        );
+        assert_eq!(store.save_track(test_track(track_id, "track.flac")), Ok(()));
 
         let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
             TestSettingsStore::new(UserSettings::with_library_path(Some(library_root.clone()))),

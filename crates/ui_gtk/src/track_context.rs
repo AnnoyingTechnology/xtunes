@@ -401,7 +401,7 @@ impl TrackRowContextMenu {
         }
 
         let available: Vec<&TrackContextAction> =
-            self.actions.available_actions(&track_ids).collect();
+            self.actions.available_actions(track_ids).collect();
         let (safe, destructive): (Vec<&TrackContextAction>, Vec<&TrackContextAction>) = available
             .into_iter()
             .partition(|action| action.section == TrackContextActionSection::Safe);

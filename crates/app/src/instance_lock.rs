@@ -132,6 +132,7 @@ fn fnv1a_64(data: &[u8]) -> u64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic, reason = "test failures use panic! to report context")]
 mod tests {
     use super::*;
 
