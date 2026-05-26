@@ -1486,6 +1486,51 @@ mod tests {
     }
 
     #[test]
+    fn update_settings_does_not_re_stat_existing_tracks() {
+        // The documented lazy-availability contract (see
+        // load_library_tracks) requires that settings changes never
+        // touch the filesystem on a per-track basis. Reconciliation
+        // belongs to the scan path (or lazy on-touch detection), not
+        // to UpdateSettings — otherwise toggling a setting on a
+        // large library would freeze the UI thread for the duration
+        // of N stat() calls.
+        let library_root = unique_test_directory();
+        std::fs::create_dir_all(&library_root).expect("create test library");
+        let track_path = library_root.join("track.flac");
+        std::fs::write(&track_path, b"audio bytes").expect("write track");
+
+        let track_id = track_id(7);
+        let store = Arc::new(InMemoryLibraryStore::new());
+        assert_eq!(
+            store.save_track(test_track(track_id, "track.flac")),
+            Ok(())
+        );
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(library_root.clone()))),
+        ))
+        .expect("load settings")
+        .with_library_services(store, Arc::new(TestMetadataService))
+        .expect("library services initialize");
+
+        assert!(!runtime.library_tracks()[0].location.is_missing());
+
+        // Remove the file behind the runtime's back, then dispatch
+        // UpdateSettings. The track must keep its persisted
+        // Available flag — UpdateSettings has no business
+        // discovering missing files.
+        std::fs::remove_file(&track_path).expect("remove track from disk");
+        let settings = runtime.settings().clone();
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::UpdateSettings(settings)),
+            Ok(())
+        );
+        assert!(!runtime.library_tracks()[0].location.is_missing());
+
+        std::fs::remove_dir_all(library_root).expect("remove test library");
+    }
+
+    #[test]
     fn runtime_scan_keeps_missing_tracks_visible() {
         let root = unique_test_directory();
         std::fs::create_dir_all(&root).expect("create test library");

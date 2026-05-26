@@ -10,6 +10,13 @@ use std::{process, sync::Arc};
 use crate::instance_lock::{AcquireOutcome, InstanceLock};
 
 fn main() {
+    let t0 = std::time::Instant::now();
+    macro_rules! tlog {
+        ($label:expr) => {
+            eprintln!("[TIMING] {:>8.1}ms {}", t0.elapsed().as_secs_f64() * 1000.0, $label);
+        };
+    }
+    tlog!("main() entered");
     // Resolve the on-disk library database location up front so the
     // single-instance lock and the GTK application id are both keyed off
     // the exact same path the library store will end up opening. See
@@ -48,6 +55,7 @@ fn main() {
         }
     };
 
+    tlog!("instance lock acquired");
     let settings_store = match sustain_settings::TomlSettingsStore::open_default() {
         Ok(store) => store,
         Err(error) => {
@@ -77,8 +85,10 @@ fn main() {
         }
     };
 
+    tlog!("settings store opened");
     match sustain_library_store::SqliteLibraryStore::open(&database_path) {
         Ok(library_store) => {
+            tlog!("sqlite library store opened");
             let was_freshly_created = library_store.was_freshly_created();
             if let Err(error) = runtime.set_library_services(
                 Arc::new(library_store),
@@ -99,9 +109,11 @@ fn main() {
         }
     }
 
+    tlog!("set_library_services done (tracks loaded from sqlite)");
     if let Ok(playback_service) = sustain_playback::GStreamerPlaybackService::new() {
         runtime = runtime.with_playback_service(Box::new(playback_service));
     }
+    tlog!("playback service initialized");
 
     // Install the networked metadata service. The User-Agent is
     // mandatory for MusicBrainz; the contact URL points back at the
@@ -123,6 +135,7 @@ fn main() {
         sustain_metadata_remote::acoustid_api_key(),
     );
     runtime.set_remote_metadata_service(Arc::new(remote_service));
+    tlog!("remote metadata service installed, handing off to ui_gtk::run");
 
     // Known GTK/GDK runtime warning on some Wayland/Vulkan setups:
     // `vkAcquireNextImageKHR(): ... VK_SUBOPTIMAL_KHR`.

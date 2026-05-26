@@ -224,13 +224,24 @@ fn open_preferences_window(
             return;
         }
 
-        if check_button.is_active()
-            && let Err(error) = save_library_path_from_entry(
-                &command_controller_for_organization,
-                &path_entry_for_organization,
-            )
-        {
-            scan_status_for_organization.set_text(scan_error_text(error));
+        // The toggle alters two settings at once: the library path (kept
+        // in sync with the entry contents) and the management mode. We
+        // build the full target settings and dispatch a single
+        // UpdateSettings — two dispatches would do every UpdateSettings-
+        // side-effect twice on the GTK main loop.
+        let path_text = path_entry_for_organization.text().trim().to_owned();
+        let library_path = if path_text.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(path_text))
+        };
+        let path_is_valid = library_path
+            .as_ref()
+            .is_some_and(|path| path.is_dir());
+
+        if check_button.is_active() && !path_is_valid {
+            scan_status_for_organization
+                .set_text(scan_error_text(ApplicationRuntimeError::LibraryPathUnavailable));
             suppress_organization_toggle_for_callback.set(true);
             check_button.set_active(false);
             suppress_organization_toggle_for_callback.set(false);
@@ -242,6 +253,7 @@ fn open_preferences_window(
             .borrow()
             .settings()
             .clone();
+        settings.library.path = library_path;
         settings.library.management_mode = if check_button.is_active() {
             LibraryManagementMode::CopyAddedFilesIntoLibrary
         } else {

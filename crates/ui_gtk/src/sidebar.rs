@@ -209,6 +209,15 @@ impl PlaylistSidebar {
     pub(crate) fn refresh(&self) {
         let previous = self.current_selection();
         let tree_model = build_tree_model(&self.runtime.borrow());
+        // Suppress the selection callback while we swap the model and
+        // restore the previous selection. `set_model` and `select_item`
+        // each emit `selected_notify` synchronously, and the connected
+        // notify handler would otherwise fire the callback up to twice
+        // — each call rebuilds the playlists table, which dominates
+        // refresh cost on a large library. Suspend, do the surgery,
+        // restore, and fire the callback exactly once with the final
+        // selection.
+        let suspended = self.on_selection_changed.borrow_mut().take();
         self.selection.set_model(Some(&tree_model));
         match previous {
             Some(SidebarSelection::Item(item)) => {
@@ -221,6 +230,7 @@ impl PlaylistSidebar {
                 self.selection.set_selected(gtk::INVALID_LIST_POSITION);
             }
         }
+        *self.on_selection_changed.borrow_mut() = suspended;
         if let Some(callback) = self.on_selection_changed.borrow().as_ref() {
             callback(self.current_selection());
         }

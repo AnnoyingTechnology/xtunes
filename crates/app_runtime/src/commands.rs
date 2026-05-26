@@ -3,7 +3,7 @@
 
 use sustain_domain::{ApplicationCommand, LibraryManagementMode};
 
-use crate::{ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult, library_scan};
+use crate::{ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult};
 
 impl ApplicationRuntime {
     pub fn handle_command(&mut self, command: ApplicationCommand) -> ApplicationRuntimeResult<()> {
@@ -36,16 +36,10 @@ impl ApplicationRuntime {
                         .map_err(|_| ApplicationRuntimeError::SettingsSaveFailed)?;
                 }
                 self.settings = settings;
-                if let Some(library_path) = self.settings.library_path() {
-                    self.library_tracks = self
-                        .library_tracks
-                        .drain(..)
-                        .map(|track| {
-                            library_scan::track_with_current_availability(library_path, track)
-                        })
-                        .collect();
-                    self.refresh_playback_queue_track_ids();
-                }
+                // Per the documented lazy-availability contract on
+                // load_library_tracks, settings changes do not stat
+                // tracks. Reconciliation is the scan's job (or lazy
+                // detection on touch).
             }
             ApplicationCommand::ScanLibrary { library_path } => {
                 self.scan_library(library_path)?;

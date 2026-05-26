@@ -100,14 +100,23 @@ pub(crate) type ArtworkFetchResultReceiver =
     async_channel::Receiver<sustain_app_runtime::ArtworkFetchResult>;
 
 pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
+    let trun = std::time::Instant::now();
+    macro_rules! tlog {
+        ($label:expr) => {
+            eprintln!("[TIMING] {:>8.1}ms run: {}", trun.elapsed().as_secs_f64() * 1000.0, $label);
+        };
+    }
+    tlog!("entered");
     let app = gtk::Application::builder()
         .application_id(application_id)
         .build();
+    tlog!("gtk Application built");
 
     // Start the async metadata writer before wrapping the runtime in a
     // shared cell, so its worker thread is up before any UI mutation
     // can submit a job. Pair it with a result sink consumed by the main
     // loop below, so per-write failures can surface in the status bar.
+    tlog!("about to start metadata writer");
     if let Err(error) = runtime.start_metadata_writer() {
         eprintln!(
             "Sustain: async metadata writer could not start ({error:?}); tag writes will run on the main thread."
@@ -116,6 +125,7 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     let (write_result_tx, write_result_rx) =
         async_channel::unbounded::<sustain_app_runtime::MetadataWriteResult>();
     runtime.set_metadata_write_result_sink(write_result_tx);
+    tlog!("metadata writer running");
 
     // Start the artwork fetcher and install its result sink. The
     // fetcher only runs when a remote metadata service was installed
@@ -127,6 +137,7 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     let (fetch_result_tx, fetch_result_rx) =
         async_channel::unbounded::<sustain_app_runtime::ArtworkFetchResult>();
     runtime.set_artwork_fetch_result_sink(fetch_result_tx);
+    tlog!("about to start artwork fetcher");
     if let Err(error) = runtime.start_artwork_fetcher() {
         // The only legitimate failure here is "no remote metadata
         // service installed", which is a normal state for builds
@@ -137,6 +148,7 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
         );
     }
 
+    tlog!("artwork fetcher started");
     let runtime = Rc::new(RefCell::new(runtime));
 
     // Start the MPRIS server before any window is built so the bus name
@@ -145,6 +157,7 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     // GTK main thread, where they can safely touch the runtime.
     let (mpris_command_tx, mpris_command_rx) =
         async_channel::unbounded::<sustain_desktop::MprisCommand>();
+    tlog!("about to start mpris");
     let mpris_service = match start_mpris(mpris_command_tx) {
         Ok(service) => Some(Rc::new(service)),
         Err(error) => {
@@ -164,9 +177,12 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     let fetch_result_rx_holder: Rc<RefCell<Option<ArtworkFetchResultReceiver>>> =
         Rc::new(RefCell::new(Some(fetch_result_rx)));
 
+    tlog!("mpris done; about to connect_activate");
     app.connect_activate({
         let runtime = runtime.clone();
         move |app| {
+            let tact = std::time::Instant::now();
+            eprintln!("[TIMING]   activate: entered (run+0={:.1}ms)", trun.elapsed().as_secs_f64() * 1000.0);
             let mpris_command_rx = mpris_command_rx_holder.borrow_mut().take();
             let write_result_rx = write_result_rx_holder.borrow_mut().take();
             let fetch_result_rx = fetch_result_rx_holder.borrow_mut().take();
@@ -178,10 +194,19 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
                 write_result_rx,
                 fetch_result_rx,
             );
+            eprintln!("[TIMING]   activate: build_main_window returned at {:.1}ms", tact.elapsed().as_secs_f64() * 1000.0);
             window.present();
+            eprintln!("[TIMING]   activate: window.present() returned at {:.1}ms", tact.elapsed().as_secs_f64() * 1000.0);
+            // Fires after the main loop has finished its current dispatch
+            // batch — i.e. roughly when the window has had a chance to map.
+            let tact_for_idle = tact;
+            gtk::glib::idle_add_local_once(move || {
+                eprintln!("[TIMING]   activate: first idle reached at {:.1}ms", tact_for_idle.elapsed().as_secs_f64() * 1000.0);
+            });
         }
     });
 
+    tlog!("about to enter app.run() (gtk main loop)");
     app.run();
 
     // Drain pending tag writes synchronously before exiting so a rating

@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+};
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
@@ -23,7 +27,9 @@ use super::{
     artwork_loader::ArtworkLoader,
     command_controller::{SharedCommandController, UiCommandController},
     content_stack::build_content_stack,
-    library_consolidation::library_consolidation_requested_callback,
+    library_consolidation::{
+        library_consolidation_requested_callback, maybe_auto_resume_library_consolidation,
+    },
     library_import::{
         LIBRARY_DROP_INDICATOR_CLASS, install_file_drop_target, library_import_requested_callback,
     },
@@ -70,6 +76,19 @@ pub(crate) fn build_main_window(
     metadata_write_result_rx: Option<MetadataWriteResultReceiver>,
     artwork_fetch_result_rx: Option<ArtworkFetchResultReceiver>,
 ) -> gtk::ApplicationWindow {
+    let tbw = std::time::Instant::now();
+    macro_rules! tlog {
+        ($label:expr) => {
+            eprintln!("[TIMING]     build_main_window+{:>7.1}ms {}", tbw.elapsed().as_secs_f64() * 1000.0, $label);
+        };
+    }
+    tlog!("entered");
+    // Coarse timing landmarks live in this function (and in `main` /
+    // `ui_gtk::run`) so a launch regression shows up the first time
+    // anyone runs the app from a terminal. Keep them sparse: only
+    // phases that can plausibly grow with library size or new
+    // features warrant a print. Per-callback timings inside hot
+    // paths are intentionally absent.
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .decorated(false)
@@ -91,6 +110,7 @@ pub(crate) fn build_main_window(
     let current_search_text: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
 
     let library_tracks = runtime_library_table_rows(&runtime.borrow(), "");
+    tlog!("library rows materialised");
     let status_bar = {
         let runtime_for_cancel = runtime.clone();
         StatusBar::new(
@@ -207,6 +227,7 @@ pub(crate) fn build_main_window(
         Some(rating_changed.clone()),
         None,
     );
+    tlog!("songs table populated");
     songs_table_holder.replace(Some(songs_table.clone()));
     let albums_view = AlbumsView::new(
         runtime.clone(),
@@ -240,6 +261,7 @@ pub(crate) fn build_main_window(
     playlists_table_holder.replace(Some(playlists_table.clone()));
     install_track_column_layout_persistence(&runtime, &songs_table, &playlists_table, &sidebar);
     playback_changed();
+    tlog!("tables + playback wired");
     let songs_drop_indicator = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     songs_drop_indicator.add_css_class(LIBRARY_DROP_INDICATOR_CLASS);
     songs_drop_indicator.set_can_target(false);
@@ -258,6 +280,21 @@ pub(crate) fn build_main_window(
         &playlists_table.widget(),
     );
     install_albums_view_activator(&content_stack, &albums_view);
+    // The playlists table is built empty. It only needs to be populated
+    // when the user actually opens the Playlists view; rebuilding it on
+    // every library_changed / selection change while Songs is visible
+    // is wasted work and dominates startup time on large libraries
+    // (measured: ~672ms for 8890 rows in `replace_rows`).
+    let playlists_dirty: Rc<Cell<bool>> = Rc::new(Cell::new(true));
+    install_playlists_view_activator(
+        &content_stack,
+        &runtime,
+        &playlists_table,
+        &sidebar,
+        &current_search_text,
+        &playlists_dirty,
+    );
+    tlog!("content stack + activators installed");
     let visible_summary_refresh = visible_summary_refresh_callback(
         &runtime,
         &content_stack,
@@ -269,19 +306,20 @@ pub(crate) fn build_main_window(
         &runtime,
         &songs_table,
         &albums_view,
-        &playlists_table,
         &sidebar,
         visible_summary_refresh.clone(),
         &current_search_text,
     );
-    let track_row_changed = track_row_changed_callback(
-        &runtime,
-        &songs_table,
-        &playlists_table,
-        &sidebar,
-        visible_summary_refresh.clone(),
-        &current_search_text,
-    );
+    let track_row_changed = track_row_changed_callback(TrackRowChangedContext {
+        runtime: &runtime,
+        songs_table: &songs_table,
+        playlists_table: &playlists_table,
+        sidebar: &sidebar,
+        content_stack: &content_stack,
+        playlists_dirty: &playlists_dirty,
+        visible_summary_refresh: visible_summary_refresh.clone(),
+        current_search_text: &current_search_text,
+    });
     track_row_changed_holder.replace(Some(track_row_changed));
     install_metadata_write_result_consumer(
         metadata_write_result_rx,
@@ -301,6 +339,8 @@ pub(crate) fn build_main_window(
     sidebar.set_selection_changed(sidebar_selection_changed_callback(
         &runtime,
         &playlists_table,
+        &content_stack,
+        &playlists_dirty,
         visible_summary_refresh.clone(),
         &current_search_text,
     ));
@@ -313,6 +353,8 @@ pub(crate) fn build_main_window(
             albums_view: albums_view.clone(),
             playlists_table: playlists_table.clone(),
             sidebar: sidebar.clone(),
+            content_stack: content_stack.clone(),
+            playlists_dirty: playlists_dirty.clone(),
             visible_summary_refresh: visible_summary_refresh.clone(),
         },
     );
@@ -347,7 +389,7 @@ pub(crate) fn build_main_window(
     let scan_requested =
         library_scan_requested_callback(&runtime, library_changed.clone(), &status_bar);
     let consolidation_requested =
-        library_consolidation_requested_callback(&runtime, library_changed.clone(), &status_bar);
+        library_consolidation_requested_callback(&runtime, &status_bar);
     let import_requested =
         library_import_requested_callback(&runtime, library_changed.clone(), &status_bar);
     install_file_drop_target(&songs_drop_overlay, &songs_drop_indicator, import_requested);
@@ -370,7 +412,7 @@ pub(crate) fn build_main_window(
         &content_stack,
         command_controller,
         scan_requested,
-        consolidation_requested,
+        consolidation_requested.clone(),
         visible_summary_refresh,
     );
     let albums_view_for_reveal = albums_view.clone();
@@ -439,6 +481,14 @@ pub(crate) fn build_main_window(
         glib::Propagation::Proceed
     });
 
+    tlog!("widgets assembled");
+    // If "Keep my library organized" is on, schedule consolidation
+    // immediately. Idempotent (empty plan when already organized) and
+    // the natural resume point for a previous run interrupted by a
+    // kill or crash.
+    maybe_auto_resume_library_consolidation(&runtime, &consolidation_requested);
+    tlog!("auto-resume kicked off");
+
     window
 }
 
@@ -461,11 +511,71 @@ fn install_albums_view_activator(content_stack: &gtk::Stack, albums_view: &Album
     });
 }
 
+/// Mirror of `install_albums_view_activator` for the Playlists view.
+/// The table is built empty and stays empty as long as Songs is the
+/// visible view; library_changed / selection-changed / search rebuilds
+/// flip a `dirty` flag instead of running `replace_rows`. When the user
+/// switches to Playlists, the activator pays the rebuild cost once with
+/// the current state and clears the flag. Songs is the default mode, so
+/// in the common case the playlists table is never populated for a
+/// session that does not visit it.
+fn install_playlists_view_activator(
+    content_stack: &gtk::Stack,
+    runtime: &SharedRuntime,
+    playlists_table: &TrackTable,
+    sidebar: &PlaylistSidebar,
+    current_search_text: &Rc<RefCell<String>>,
+    playlists_dirty: &Rc<Cell<bool>>,
+) {
+    let runtime = runtime.clone();
+    let playlists_table = playlists_table.clone();
+    let sidebar = sidebar.clone();
+    let current_search_text = current_search_text.clone();
+    let playlists_dirty = playlists_dirty.clone();
+    content_stack.connect_visible_child_name_notify(move |stack| {
+        if stack.visible_child_name().as_deref() != Some(PLAYLISTS_VIEW) {
+            return;
+        }
+        if !playlists_dirty.get() {
+            return;
+        }
+        let search_text = current_search_text.borrow().clone();
+        let rows = playlist_table_rows_for(
+            &runtime.borrow(),
+            sidebar.current_selection(),
+            &search_text,
+        );
+        playlists_table.replace_rows(rows);
+        playlists_dirty.set(false);
+    });
+}
+
+/// Rebuild the playlists table only when the user is actually looking
+/// at it. Triggers that fire while another view is visible (library
+/// scan completion, search keystrokes, sidebar selection change) just
+/// flip the dirty flag; `install_playlists_view_activator` runs the
+/// rebuild on the next visit. See its doc-comment for the rationale.
+fn refresh_playlists_table_if_visible(
+    runtime: &ApplicationRuntime,
+    content_stack: &gtk::Stack,
+    playlists_table: &TrackTable,
+    sidebar_selection: Option<SidebarSelection>,
+    search_text: &str,
+    playlists_dirty: &Cell<bool>,
+) {
+    if content_stack.visible_child_name().as_deref() == Some(PLAYLISTS_VIEW) {
+        let rows = playlist_table_rows_for(runtime, sidebar_selection, search_text);
+        playlists_table.replace_rows(rows);
+        playlists_dirty.set(false);
+    } else {
+        playlists_dirty.set(true);
+    }
+}
+
 fn library_changed_callback(
     runtime: &SharedRuntime,
     songs_table: &TrackTable,
     albums_view: &AlbumsView,
-    playlists_table: &TrackTable,
     sidebar: &PlaylistSidebar,
     visible_summary_refresh: ViewModeChangedCallback,
     current_search_text: &Rc<RefCell<String>>,
@@ -473,7 +583,6 @@ fn library_changed_callback(
     let runtime = runtime.clone();
     let songs_table = songs_table.clone();
     let albums_view = albums_view.clone();
-    let playlists_table = playlists_table.clone();
     let sidebar = sidebar.clone();
     let current_search_text = current_search_text.clone();
 
@@ -485,10 +594,12 @@ fn library_changed_callback(
         // set from the new track list using the search text it already
         // holds, so we don't need to call set_search_text here.
         albums_view.replace_tracks(runtime.borrow().library_tracks().to_vec());
+        // sidebar.refresh() rebuilds the sidebar tree-model and fires the
+        // selection callback exactly once. That callback owns the
+        // playlists table — it runs `refresh_playlists_table_if_visible`,
+        // so library_changed never needs to touch the playlists table
+        // directly.
         sidebar.refresh();
-        let playlist_rows =
-            playlist_table_rows_for(&runtime.borrow(), sidebar.current_selection(), &search_text);
-        playlists_table.replace_rows(playlist_rows);
         visible_summary_refresh();
     })
 }
@@ -758,24 +869,24 @@ fn resolve_move_target(
 fn sidebar_selection_changed_callback(
     runtime: &SharedRuntime,
     playlists_table: &TrackTable,
+    content_stack: &gtk::Stack,
+    playlists_dirty: &Rc<Cell<bool>>,
     visible_summary_refresh: ViewModeChangedCallback,
     current_search_text: &Rc<RefCell<String>>,
 ) -> super::sidebar::SidebarSelectionChangedCallback {
     let runtime = runtime.clone();
     let playlists_table = playlists_table.clone();
+    let content_stack = content_stack.clone();
+    let playlists_dirty = playlists_dirty.clone();
     let current_search_text = current_search_text.clone();
 
     Rc::new(move |selection| {
+        // Layout + default sort are cheap and harmless even when the
+        // playlists view is not visible — they only set widget state
+        // that any future visit will rely on.
         if let Some(layout) = layout_for_selection(&runtime.borrow(), selection) {
             playlists_table.apply_layout(&layout);
         }
-        // A regular playlist always lays out in PlaylistEntry::position
-        // order on first display — clicking any other column header sorts
-        // by that field for the duration of the selection, and clicking
-        // the status column header restores play-order. Smart playlists
-        // are derived (no authoritative entry order) and Library shows
-        // the full library, so neither gets a programmatic default sort
-        // here — they inherit whatever sort the user last set.
         if matches!(
             selection,
             Some(SidebarSelection::Item(PlaylistItem::Playlist(_)))
@@ -783,8 +894,14 @@ fn sidebar_selection_changed_callback(
             playlists_table.apply_playlist_default_sort();
         }
         let search_text = current_search_text.borrow().clone();
-        let rows = playlist_table_rows_for(&runtime.borrow(), selection, &search_text);
-        playlists_table.replace_rows(rows);
+        refresh_playlists_table_if_visible(
+            &runtime.borrow(),
+            &content_stack,
+            &playlists_table,
+            selection,
+            &search_text,
+            &playlists_dirty,
+        );
         visible_summary_refresh();
     })
 }
@@ -821,6 +938,8 @@ struct SearchWiringContext {
     albums_view: AlbumsView,
     playlists_table: TrackTable,
     sidebar: PlaylistSidebar,
+    content_stack: gtk::Stack,
+    playlists_dirty: Rc<Cell<bool>>,
     visible_summary_refresh: ViewModeChangedCallback,
 }
 
@@ -832,6 +951,8 @@ fn install_search_wiring(titlebar: &Titlebar, context: SearchWiringContext) {
         albums_view,
         playlists_table,
         sidebar,
+        content_stack,
+        playlists_dirty,
         visible_summary_refresh,
     } = context;
     let pending_rebuild: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
@@ -855,6 +976,8 @@ fn install_search_wiring(titlebar: &Titlebar, context: SearchWiringContext) {
             let albums_view = albums_view.clone();
             let playlists_table = playlists_table.clone();
             let sidebar = sidebar.clone();
+            let content_stack = content_stack.clone();
+            let playlists_dirty = playlists_dirty.clone();
             let visible_summary_refresh = visible_summary_refresh.clone();
             let pending_rebuild_clear = pending_rebuild.clone();
             let source_id = glib::timeout_add_local_once(SEARCH_REBUILD_DEBOUNCE, move || {
@@ -865,12 +988,14 @@ fn install_search_wiring(titlebar: &Titlebar, context: SearchWiringContext) {
 
                 albums_view.set_search_text(new_text.clone());
 
-                let playlist_rows = playlist_table_rows_for(
+                refresh_playlists_table_if_visible(
                     &runtime.borrow(),
+                    &content_stack,
+                    &playlists_table,
                     sidebar.current_selection(),
                     &new_text,
+                    &playlists_dirty,
                 );
-                playlists_table.replace_rows(playlist_rows);
 
                 visible_summary_refresh();
             });
@@ -1579,19 +1704,26 @@ fn rating_changed_callback(
 /// When a smart playlist is selected, the Playlists table falls back to a
 /// full reflow because the mutation may add/remove the track from the
 /// playlist's filtered set — an in-place row update would lie.
-fn track_row_changed_callback(
-    runtime: &SharedRuntime,
-    songs_table: &TrackTable,
-    playlists_table: &TrackTable,
-    sidebar: &PlaylistSidebar,
+struct TrackRowChangedContext<'a> {
+    runtime: &'a SharedRuntime,
+    songs_table: &'a TrackTable,
+    playlists_table: &'a TrackTable,
+    sidebar: &'a PlaylistSidebar,
+    content_stack: &'a gtk::Stack,
+    playlists_dirty: &'a Rc<Cell<bool>>,
     visible_summary_refresh: ViewModeChangedCallback,
-    current_search_text: &Rc<RefCell<String>>,
-) -> TrackRowChangedCallback {
-    let runtime = runtime.clone();
-    let songs_table = songs_table.clone();
-    let playlists_table = playlists_table.clone();
-    let sidebar = sidebar.clone();
-    let current_search_text = current_search_text.clone();
+    current_search_text: &'a Rc<RefCell<String>>,
+}
+
+fn track_row_changed_callback(ctx: TrackRowChangedContext<'_>) -> TrackRowChangedCallback {
+    let runtime = ctx.runtime.clone();
+    let songs_table = ctx.songs_table.clone();
+    let playlists_table = ctx.playlists_table.clone();
+    let sidebar = ctx.sidebar.clone();
+    let content_stack = ctx.content_stack.clone();
+    let playlists_dirty = ctx.playlists_dirty.clone();
+    let current_search_text = ctx.current_search_text.clone();
+    let visible_summary_refresh = ctx.visible_summary_refresh;
 
     Rc::new(move |track_id: TrackId| {
         let row = {
@@ -1610,15 +1742,22 @@ fn track_row_changed_callback(
 
         match sidebar.current_selection() {
             Some(SidebarSelection::Item(PlaylistItem::SmartPlaylist(_))) => {
+                // Smart-playlist membership may change with the edit; the
+                // table needs a full rebuild — but only if the user can
+                // actually see it.
                 let search_text = current_search_text.borrow().clone();
-                let playlist_rows = playlist_table_rows_for(
+                refresh_playlists_table_if_visible(
                     &runtime.borrow(),
+                    &content_stack,
+                    &playlists_table,
                     sidebar.current_selection(),
                     &search_text,
+                    &playlists_dirty,
                 );
-                playlists_table.replace_rows(playlist_rows);
             }
             _ => {
+                // In-place row update is cheap (one row) and idempotent
+                // for a hidden table; no visibility gating needed.
                 playlists_table.update_row(track_id, row);
             }
         }
