@@ -55,6 +55,7 @@ Prioritize:
 - mode switcher belongs to the main content column, not to the full window root
 - predictable iTunes-like library and playlist behavior
 - first-class native GTK light and dark appearance; do not add an Sustain theme picker
+- every CSS color decision must work in both light and dark themes and respect the system accent color (prefer `alpha(@theme_fg_color, X)` and `@theme_selected_bg_color` over hard-coded colors)
 - fast search/filtering over a large local music library
 - settings/preferences
 - durable SQLite schema with explicit migrations

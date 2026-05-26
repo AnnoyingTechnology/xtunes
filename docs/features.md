@@ -163,6 +163,15 @@ A dedicated editor dialog mirrors the iTunes 11 layout: match mode at
 the top, one row per rule with field/operator/value widgets, a limit
 section, and OK/Cancel.
 
+### Playlist header — *iTunes-adjacent*
+The Playlists view draws a header strip above the track table, the
+same height as the integrated top bar. The strip shows the selected
+playlist's name in bold next to Play and Shuffle buttons that match the
+album-detail header's behaviour, with a muted second line summarising
+the visible set as `N songs, X hours/minutes/days`. Search filtering
+updates the summary so the count always matches what's drawn below.
+The header hides for folder selections and for empty states.
+
 ---
 
 ## Playback
@@ -349,11 +358,12 @@ focus rings. Changing the system accent updates Sustain immediately.
 
 ## Track context menu — *iso-iTunes*
 
-Right-clicking a track (or selection) in Songs or Playlists exposes:
+Right-clicking a track (or selection) in Songs or Playlists exposes the
+following actions, separated into visually distinct groups:
 
+- **Add to Playlist** — submenu showing all playlists, nested by folder
 - **Play Next** — insert at head of the Up Next queue
 - **Add to Queue** — append to the tail of the Up Next queue
-- **Add to Playlist** — submenu showing all playlists, nested by folder
 - **Get Info** — open the multi-tab editor (`Ctrl+I`)
 - **Show Album** — switch to Albums view, reveal the album
 - **Copy** — copy the audio file itself

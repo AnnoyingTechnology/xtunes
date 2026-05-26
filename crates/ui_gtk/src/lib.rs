@@ -31,6 +31,7 @@ mod library_scan;
 mod main_window;
 mod mode_bar;
 mod now_playing;
+mod playlists_header;
 mod preferences;
 mod shortcuts;
 mod sidebar;

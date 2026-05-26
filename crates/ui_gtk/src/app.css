@@ -286,29 +286,38 @@ listview.albums-list {
     background-color: transparent;
 }
 
-button.album-tile {
-    background: transparent;
-    border: none;
-    border-radius: 6px;
-    box-shadow: none;
-    margin: 0;
-    min-height: 198px;
-    padding: 8px;
-}
-
+button.album-tile,
 button.album-tile:hover,
 button.album-tile:active,
 button.album-tile:focus,
 button.album-tile.selected {
-    background-color: alpha(@theme_fg_color, 0.05);
+    background: transparent;
+    background-color: transparent;
+    background-image: none;
     border: none;
+    border-radius: 0;
     box-shadow: none;
+    margin: 0;
+}
+
+button.album-tile {
+    padding: 8px;
+    min-height: 198px;
+}
+
+button.album-tile.selected {
+    padding: 0;
+    min-height: 214px;
 }
 
 .album-cover,
 .album-detail-cover {
     background-color: alpha(@theme_fg_color, 0.10);
     border-radius: 4px;
+}
+
+.album-cover.has-artwork {
+    background-color: transparent;
 }
 
 .album-cover-placeholder-icon {
@@ -366,6 +375,43 @@ button.album-detail-icon-button {
 button.album-detail-icon-button:hover,
 button.album-detail-icon-button:active,
 button.album-detail-icon-button:focus {
+    background-color: alpha(@theme_fg_color, 0.06);
+    border: none;
+    box-shadow: none;
+}
+
+/* Playlist-view header strip: name + play/shuffle on top, dim song-count /
+   duration summary below. Sits flush against the track table; the
+   bottom border continues the same hairline used by the mode bar so the
+   strip reads as part of the chrome, not as a floating card. */
+.playlists-header {
+    padding: 0 14px;
+    border-bottom: 1px solid alpha(@theme_fg_color, 0.08);
+}
+
+.playlists-header-title {
+    font-size: 1.5em;
+    font-weight: bold;
+}
+
+.playlists-header-subtitle {
+    font-size: 1.0em;
+    color: alpha(@theme_fg_color, 0.58);
+}
+
+button.playlists-header-icon-button {
+    background: transparent;
+    border: none;
+    border-radius: 999px;
+    box-shadow: none;
+    min-height: 24px;
+    min-width: 24px;
+    padding: 0;
+}
+
+button.playlists-header-icon-button:hover,
+button.playlists-header-icon-button:active,
+button.playlists-header-icon-button:focus {
     background-color: alpha(@theme_fg_color, 0.06);
     border: none;
     box-shadow: none;
@@ -526,10 +572,16 @@ button.sidebar-context-menu-item {
     padding-right: 8px;
 }
 
+/* Explicit, theme-adaptive separator color. The default GTK separator
+   tint plus an extra opacity reduction rendered nearly invisible against
+   dark popover backgrounds; switching to an alpha-foreground fill keeps
+   the line readable in both light and dark themes without depending on
+   the system separator color. */
 .track-context-menu-separator {
     margin-top: 4px;
     margin-bottom: 4px;
-    opacity: 0.5;
+    min-height: 1px;
+    background-color: alpha(@theme_fg_color, 0.18);
 }
 
 .track-table header {
@@ -561,6 +613,7 @@ button.sidebar-context-menu-item {
     margin: 0;
     min-height: 28px;
     padding: 0;
+    border-bottom: 1px solid alpha(@theme_fg_color, 0.05);
 }
 
 .track-table-row-even {
@@ -609,6 +662,7 @@ columnview.track-table listview row:not(:selected):focus .track-table-row-odd {
 .track-table listview row:selected .track-table-cell,
 .track-table-cell.track-table-row-selected {
     background-color: @theme_selected_bg_color;
+    border-bottom-color: transparent;
 }
 
 .track-table listview row:selected .track-table-cell > label,

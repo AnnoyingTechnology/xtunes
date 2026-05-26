@@ -36,6 +36,7 @@ use super::{
     library_scan::library_scan_requested_callback,
     mode_bar::{ShowSongsViewCallback, ViewModeChangedCallback, build_mode_bar},
     now_playing::NowPlayingView,
+    playlists_header::{PlaylistsHeader, PlaylistsHeaderState},
     preferences::install_preferences_action,
     shortcuts::{
         GlobalShortcutContext, create_new_playlist, install_global_shortcuts,
@@ -276,6 +277,20 @@ pub(crate) fn build_main_window(
     install_track_column_layout_persistence(&runtime, &songs_table, &playlists_table, &sidebar);
     playback_changed();
     tlog!("tables + playback wired");
+    let playlists_header = PlaylistsHeader::new();
+    let playlists_view = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    playlists_view.set_hexpand(true);
+    playlists_view.set_vexpand(true);
+    playlists_view.append(playlists_header.widget());
+    playlists_view.append(&playlists_table.widget());
+    install_playlists_header_playback(
+        &playlists_header,
+        &command_controller,
+        &runtime,
+        &sidebar,
+        &current_search_text,
+        &playback_changed,
+    );
     let songs_drop_indicator = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     songs_drop_indicator.add_css_class(LIBRARY_DROP_INDICATOR_CLASS);
     songs_drop_indicator.set_can_target(false);
@@ -288,11 +303,8 @@ pub(crate) fn build_main_window(
     songs_drop_overlay.set_child(Some(&songs_table.widget()));
     songs_drop_overlay.add_overlay(&songs_drop_indicator);
 
-    let content_stack = build_content_stack(
-        &songs_drop_overlay,
-        &albums_view.widget(),
-        &playlists_table.widget(),
-    );
+    let content_stack =
+        build_content_stack(&songs_drop_overlay, &albums_view.widget(), &playlists_view);
     install_albums_view_activator(&content_stack, &albums_view);
     // The playlists table is built empty. It only needs to be populated
     // when the user actually opens the Playlists view; rebuilding it on
@@ -304,6 +316,7 @@ pub(crate) fn build_main_window(
         &content_stack,
         &runtime,
         &playlists_table,
+        &playlists_header,
         &sidebar,
         &current_search_text,
         &playlists_dirty,
@@ -330,6 +343,7 @@ pub(crate) fn build_main_window(
         songs_table: &songs_table,
         albums_view: &albums_view,
         playlists_table: &playlists_table,
+        playlists_header: &playlists_header,
         sidebar: &sidebar,
         content_stack: &content_stack,
         playlists_dirty: &playlists_dirty,
@@ -354,6 +368,7 @@ pub(crate) fn build_main_window(
     sidebar.set_selection_changed(sidebar_selection_changed_callback(
         &runtime,
         &playlists_table,
+        &playlists_header,
         &content_stack,
         &playlists_dirty,
         visible_summary_refresh.clone(),
@@ -370,6 +385,7 @@ pub(crate) fn build_main_window(
             songs_table: songs_table.clone(),
             albums_view: albums_view.clone(),
             playlists_table: playlists_table.clone(),
+            playlists_header: playlists_header.clone(),
             sidebar: sidebar.clone(),
             content_stack: content_stack.clone(),
             playlists_dirty: playlists_dirty.clone(),
@@ -596,12 +612,14 @@ fn install_playlists_view_activator(
     content_stack: &gtk::Stack,
     runtime: &SharedRuntime,
     playlists_table: &TrackTable,
+    playlists_header: &PlaylistsHeader,
     sidebar: &PlaylistSidebar,
     current_search_text: &Rc<RefCell<String>>,
     playlists_dirty: &Rc<Cell<bool>>,
 ) {
     let runtime = runtime.clone();
     let playlists_table = playlists_table.clone();
+    let playlists_header = playlists_header.clone();
     let sidebar = sidebar.clone();
     let current_search_text = current_search_text.clone();
     let playlists_dirty = playlists_dirty.clone();
@@ -613,9 +631,13 @@ fn install_playlists_view_activator(
             return;
         }
         let search_text = current_search_text.borrow().clone();
-        let rows =
-            playlist_table_rows_for(&runtime.borrow(), sidebar.current_selection(), &search_text);
-        playlists_table.replace_rows(rows);
+        rebuild_playlists_view(
+            &runtime.borrow(),
+            &playlists_table,
+            &playlists_header,
+            sidebar.current_selection(),
+            &search_text,
+        );
         playlists_dirty.set(false);
     });
 }
@@ -648,21 +670,78 @@ fn view_mode_from_stack(content_stack: &gtk::Stack) -> UiViewMode {
 /// scan completion, search keystrokes, sidebar selection change) just
 /// flip the dirty flag; `install_playlists_view_activator` runs the
 /// rebuild on the next visit. See its doc-comment for the rationale.
-fn refresh_playlists_table_if_visible(
+fn refresh_playlists_view_if_visible(
     runtime: &ApplicationRuntime,
     content_stack: &gtk::Stack,
     playlists_table: &TrackTable,
+    playlists_header: &PlaylistsHeader,
     sidebar_selection: Option<SidebarSelection>,
     search_text: &str,
     playlists_dirty: &Cell<bool>,
 ) {
     if content_stack.visible_child_name().as_deref() == Some(PLAYLISTS_VIEW) {
-        let rows = playlist_table_rows_for(runtime, sidebar_selection, search_text);
-        playlists_table.replace_rows(rows);
+        rebuild_playlists_view(
+            runtime,
+            playlists_table,
+            playlists_header,
+            sidebar_selection,
+            search_text,
+        );
         playlists_dirty.set(false);
     } else {
         playlists_dirty.set(true);
     }
+}
+
+/// Unconditional rebuild of the playlists view (header + track table)
+/// from the current selection + search filter. Header summary is derived
+/// from the same row set fed to the table, so the visible "N songs, X
+/// duration" text always matches what's drawn below it.
+fn rebuild_playlists_view(
+    runtime: &ApplicationRuntime,
+    playlists_table: &TrackTable,
+    playlists_header: &PlaylistsHeader,
+    sidebar_selection: Option<SidebarSelection>,
+    search_text: &str,
+) {
+    let rows = playlist_table_rows_for(runtime, sidebar_selection, search_text);
+    playlists_header.set_state(playlists_header_state_for(
+        runtime,
+        sidebar_selection,
+        &rows,
+    ));
+    playlists_table.replace_rows(rows);
+}
+
+fn playlists_header_state_for(
+    runtime: &ApplicationRuntime,
+    selection: Option<SidebarSelection>,
+    rows: &[TrackTableRow],
+) -> Option<PlaylistsHeaderState> {
+    let title = match selection {
+        Some(SidebarSelection::Library) => "Music".to_string(),
+        Some(SidebarSelection::Item(PlaylistItem::Playlist(id))) => runtime
+            .playlists()
+            .iter()
+            .find(|playlist| playlist.id == id)?
+            .name
+            .clone(),
+        Some(SidebarSelection::Item(PlaylistItem::SmartPlaylist(id))) => runtime
+            .smart_playlists()
+            .iter()
+            .find(|playlist| playlist.id == id)?
+            .name
+            .clone(),
+        // Folders aggregate their children in the sidebar but are not
+        // themselves a playable track set, so the header has nothing
+        // meaningful to show.
+        Some(SidebarSelection::Item(PlaylistItem::Folder(_))) | None => return None,
+    };
+    Some(PlaylistsHeaderState {
+        title,
+        track_count: rows.len(),
+        duration_seconds: rows.iter().map(|row| row.duration_seconds).sum(),
+    })
 }
 
 fn library_changed_callback(
@@ -689,7 +768,7 @@ fn library_changed_callback(
         albums_view.replace_tracks(runtime.borrow().library_tracks().to_vec());
         // sidebar.refresh() rebuilds the sidebar tree-model and fires the
         // selection callback exactly once. That callback owns the
-        // playlists table — it runs `refresh_playlists_table_if_visible`,
+        // playlists view — it runs `refresh_playlists_view_if_visible`,
         // so library_changed never needs to touch the playlists table
         // directly.
         sidebar.refresh();
@@ -1000,6 +1079,7 @@ fn resolve_move_target(
 fn sidebar_selection_changed_callback(
     runtime: &SharedRuntime,
     playlists_table: &TrackTable,
+    playlists_header: &PlaylistsHeader,
     content_stack: &gtk::Stack,
     playlists_dirty: &Rc<Cell<bool>>,
     visible_summary_refresh: ViewModeChangedCallback,
@@ -1007,6 +1087,7 @@ fn sidebar_selection_changed_callback(
 ) -> super::sidebar::SidebarSelectionChangedCallback {
     let runtime = runtime.clone();
     let playlists_table = playlists_table.clone();
+    let playlists_header = playlists_header.clone();
     let content_stack = content_stack.clone();
     let playlists_dirty = playlists_dirty.clone();
     let current_search_text = current_search_text.clone();
@@ -1025,10 +1106,11 @@ fn sidebar_selection_changed_callback(
             playlists_table.apply_playlist_default_sort();
         }
         let search_text = current_search_text.borrow().clone();
-        refresh_playlists_table_if_visible(
+        refresh_playlists_view_if_visible(
             &runtime.borrow(),
             &content_stack,
             &playlists_table,
+            &playlists_header,
             selection,
             &search_text,
             &playlists_dirty,
@@ -1068,6 +1150,7 @@ struct SearchWiringContext {
     songs_table: TrackTable,
     albums_view: AlbumsView,
     playlists_table: TrackTable,
+    playlists_header: PlaylistsHeader,
     sidebar: PlaylistSidebar,
     content_stack: gtk::Stack,
     playlists_dirty: Rc<Cell<bool>>,
@@ -1081,6 +1164,7 @@ fn install_search_wiring(titlebar: &Titlebar, context: SearchWiringContext) {
         songs_table,
         albums_view,
         playlists_table,
+        playlists_header,
         sidebar,
         content_stack,
         playlists_dirty,
@@ -1106,6 +1190,7 @@ fn install_search_wiring(titlebar: &Titlebar, context: SearchWiringContext) {
             let songs_table = songs_table.clone();
             let albums_view = albums_view.clone();
             let playlists_table = playlists_table.clone();
+            let playlists_header = playlists_header.clone();
             let sidebar = sidebar.clone();
             let content_stack = content_stack.clone();
             let playlists_dirty = playlists_dirty.clone();
@@ -1119,10 +1204,11 @@ fn install_search_wiring(titlebar: &Titlebar, context: SearchWiringContext) {
 
                 albums_view.set_search_text(new_text.clone());
 
-                refresh_playlists_table_if_visible(
+                refresh_playlists_view_if_visible(
                     &runtime.borrow(),
                     &content_stack,
                     &playlists_table,
+                    &playlists_header,
                     sidebar.current_selection(),
                     &new_text,
                     &playlists_dirty,
@@ -1832,6 +1918,104 @@ fn queue_request_for_library(
     }
 }
 
+/// Wires the Playlists header's play and shuffle buttons to start
+/// playback from the sidebar's current selection, matching the album
+/// detail header's play/shuffle behaviour: the first non-missing track
+/// in the queue's display order is the one PlayTrack anchors on; the
+/// shuffle toggle decides what comes after.
+fn install_playlists_header_playback(
+    playlists_header: &PlaylistsHeader,
+    command_controller: &SharedCommandController,
+    runtime: &SharedRuntime,
+    sidebar: &PlaylistSidebar,
+    current_search_text: &Rc<RefCell<String>>,
+    playback_changed: &PlaybackChangedCallback,
+) {
+    playlists_header.connect_play(make_playlists_header_play_callback(
+        false,
+        command_controller,
+        runtime,
+        sidebar,
+        current_search_text,
+        playback_changed,
+    ));
+    playlists_header.connect_shuffle(make_playlists_header_play_callback(
+        true,
+        command_controller,
+        runtime,
+        sidebar,
+        current_search_text,
+        playback_changed,
+    ));
+}
+
+fn make_playlists_header_play_callback(
+    shuffle: bool,
+    command_controller: &SharedCommandController,
+    runtime: &SharedRuntime,
+    sidebar: &PlaylistSidebar,
+    current_search_text: &Rc<RefCell<String>>,
+    playback_changed: &PlaybackChangedCallback,
+) -> Rc<dyn Fn()> {
+    let command_controller = command_controller.clone();
+    let runtime = runtime.clone();
+    let sidebar = sidebar.clone();
+    let current_search_text = current_search_text.clone();
+    let playback_changed = playback_changed.clone();
+    Rc::new(move || {
+        // Set shuffle first so subsequent `PlayTrack` builds its queue
+        // with the right ordering. Both dispatches are independent —
+        // the runtime does not coalesce them.
+        let _ = command_controller.dispatch(ApplicationCommand::Playback(
+            PlaybackCommand::SetShuffleEnabled(shuffle),
+        ));
+        let (queue, first_track) = {
+            let runtime_borrow = runtime.borrow();
+            let search_text = current_search_text.borrow().clone();
+            let queue = queue_request_for_playlist_selection(
+                &runtime_borrow,
+                sidebar.current_selection(),
+                &search_text,
+            );
+            let first_track = first_playable_track_for_queue(&runtime_borrow, &queue);
+            (queue, first_track)
+        };
+        let Some(track_id) = first_track else {
+            return;
+        };
+        if command_controller.dispatch_succeeded(ApplicationCommand::Playback(
+            PlaybackCommand::PlayTrack { track_id, queue },
+        )) {
+            playback_changed();
+        }
+    })
+}
+
+fn first_playable_track_for_queue(
+    runtime: &ApplicationRuntime,
+    queue: &PlaybackQueueRequest,
+) -> Option<TrackId> {
+    let library = runtime.library_tracks();
+    match queue {
+        PlaybackQueueRequest::Library => library
+            .iter()
+            .find(|track| !track.location.is_missing())
+            .map(|track| track.id),
+        PlaybackQueueRequest::Explicit {
+            ordered_track_ids, ..
+        } => {
+            let missing: HashMap<TrackId, bool> = library
+                .iter()
+                .map(|track| (track.id, track.location.is_missing()))
+                .collect();
+            ordered_track_ids
+                .iter()
+                .copied()
+                .find(|id| matches!(missing.get(id), Some(false)))
+        }
+    }
+}
+
 fn install_track_ended_callback(
     runtime: &SharedRuntime,
     command_controller: &SharedCommandController,
@@ -1884,6 +2068,7 @@ struct TrackRowChangedContext<'a> {
     songs_table: &'a TrackTable,
     albums_view: &'a AlbumsView,
     playlists_table: &'a TrackTable,
+    playlists_header: &'a PlaylistsHeader,
     sidebar: &'a PlaylistSidebar,
     content_stack: &'a gtk::Stack,
     playlists_dirty: &'a Rc<Cell<bool>>,
@@ -1896,6 +2081,7 @@ fn track_row_changed_callback(ctx: TrackRowChangedContext<'_>) -> TrackRowChange
     let songs_table = ctx.songs_table.clone();
     let albums_view = ctx.albums_view.clone();
     let playlists_table = ctx.playlists_table.clone();
+    let playlists_header = ctx.playlists_header.clone();
     let sidebar = ctx.sidebar.clone();
     let content_stack = ctx.content_stack.clone();
     let playlists_dirty = ctx.playlists_dirty.clone();
@@ -1924,10 +2110,11 @@ fn track_row_changed_callback(ctx: TrackRowChangedContext<'_>) -> TrackRowChange
                 // table needs a full rebuild — but only if the user can
                 // actually see it.
                 let search_text = current_search_text.borrow().clone();
-                refresh_playlists_table_if_visible(
+                refresh_playlists_view_if_visible(
                     &runtime.borrow(),
                     &content_stack,
                     &playlists_table,
+                    &playlists_header,
                     sidebar.current_selection(),
                     &search_text,
                     &playlists_dirty,

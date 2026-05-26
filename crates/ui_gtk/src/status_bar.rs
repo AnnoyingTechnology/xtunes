@@ -371,7 +371,7 @@ pub(crate) fn library_status_text(
     )
 }
 
-fn duration_text(duration_seconds: u64) -> String {
+pub(crate) fn duration_text(duration_seconds: u64) -> String {
     let hours = duration_seconds / 3_600;
     if hours >= 24 {
         let days = hours / 24;
@@ -399,7 +399,11 @@ fn file_size_text(size_bytes: u64) -> String {
     }
 }
 
-fn pluralize(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
+pub(crate) fn pluralize(
+    count: usize,
+    singular: &'static str,
+    plural: &'static str,
+) -> &'static str {
     if count == 1 { singular } else { plural }
 }
 

@@ -57,13 +57,33 @@ impl TrackContextActionId {
     }
 }
 
-/// Visual grouping inside the popover. Safe actions render above the separator
-/// next to "Add to Playlist"; destructive actions render below it.
+/// Visual grouping inside the popover. Sections render in the order
+/// declared below, with a horizontal separator drawn between any two
+/// adjacent non-empty groups. The "Add to Playlist" submenu button (when
+/// present) is treated as an implicit first group above `Queue`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrackContextActionSection {
-    Safe,
+    /// Playback queue manipulation: Play Next, Add to Queue.
+    Queue,
+    /// Track inspection: Get Info.
+    Info,
+    /// Library navigation: Show Album.
+    Navigate,
+    /// On-disk file operations: Copy, Show in Folder.
+    Files,
+    /// Removals: Remove from Library, Move to Trash, Remove from Playlist.
     Destructive,
 }
+
+/// Section render order. Used by the popover builder to walk groups in a
+/// stable, declaration-driven sequence.
+const TRACK_CONTEXT_SECTION_ORDER: &[TrackContextActionSection] = &[
+    TrackContextActionSection::Queue,
+    TrackContextActionSection::Info,
+    TrackContextActionSection::Navigate,
+    TrackContextActionSection::Files,
+    TrackContextActionSection::Destructive,
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TrackSelectionRequirement {
@@ -114,7 +134,7 @@ impl TrackContextAction {
         Self {
             id: TrackContextActionId::PlayNext,
             label: "Play Next",
-            section: TrackContextActionSection::Safe,
+            section: TrackContextActionSection::Queue,
             selection: TrackSelectionRequirement::AtLeastOne,
             confirmation: TrackActionConfirmation::None,
             visibility: Some(visibility),
@@ -129,7 +149,7 @@ impl TrackContextAction {
         Self {
             id: TrackContextActionId::AddToQueue,
             label: "Add to Queue",
-            section: TrackContextActionSection::Safe,
+            section: TrackContextActionSection::Queue,
             selection: TrackSelectionRequirement::AtLeastOne,
             confirmation: TrackActionConfirmation::None,
             visibility: Some(visibility),
@@ -141,7 +161,7 @@ impl TrackContextAction {
         Self {
             id: TrackContextActionId::GetInfo,
             label: "Get Info",
-            section: TrackContextActionSection::Safe,
+            section: TrackContextActionSection::Info,
             selection: TrackSelectionRequirement::Single,
             confirmation: TrackActionConfirmation::None,
             visibility: None,
@@ -153,7 +173,7 @@ impl TrackContextAction {
         Self {
             id: TrackContextActionId::CopyFiles,
             label: "Copy",
-            section: TrackContextActionSection::Safe,
+            section: TrackContextActionSection::Files,
             selection: TrackSelectionRequirement::AtLeastOne,
             confirmation: TrackActionConfirmation::None,
             visibility: None,
@@ -165,7 +185,7 @@ impl TrackContextAction {
         Self {
             id: TrackContextActionId::ShowInFolder,
             label: "Show in Folder",
-            section: TrackContextActionSection::Safe,
+            section: TrackContextActionSection::Files,
             selection: TrackSelectionRequirement::AtLeastOne,
             confirmation: TrackActionConfirmation::None,
             visibility: None,
@@ -180,7 +200,7 @@ impl TrackContextAction {
         Self {
             id: TrackContextActionId::ShowAlbum,
             label: "Show Album",
-            section: TrackContextActionSection::Safe,
+            section: TrackContextActionSection::Navigate,
             selection: TrackSelectionRequirement::Single,
             confirmation: TrackActionConfirmation::None,
             visibility: Some(visibility),
@@ -392,33 +412,37 @@ impl TrackRowContextMenu {
         content.add_css_class("track-context-menu");
 
         let mut add_button = None;
-        let mut has_safe_section = false;
+        let mut prior_group_rendered = false;
         if self.add_to_playlist.is_some() {
             let button = submenu_button("Add to Playlist\u{2026}");
             content.append(&button);
             add_button = Some(button);
-            has_safe_section = true;
+            prior_group_rendered = true;
         }
 
         let available: Vec<&TrackContextAction> =
             self.actions.available_actions(track_ids).collect();
-        let (safe, destructive): (Vec<&TrackContextAction>, Vec<&TrackContextAction>) = available
-            .into_iter()
-            .partition(|action| action.section == TrackContextActionSection::Safe);
 
-        for action in &safe {
-            self.append_action_button(&content, popover, action, track_ids);
-            has_safe_section = true;
-        }
+        for &section in TRACK_CONTEXT_SECTION_ORDER {
+            let mut group_iter = available
+                .iter()
+                .copied()
+                .filter(|action| action.section == section)
+                .peekable();
+            if group_iter.peek().is_none() {
+                continue;
+            }
 
-        if has_safe_section && !destructive.is_empty() {
-            let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
-            separator.add_css_class("track-context-menu-separator");
-            content.append(&separator);
-        }
+            if prior_group_rendered {
+                let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+                separator.add_css_class("track-context-menu-separator");
+                content.append(&separator);
+            }
 
-        for action in &destructive {
-            self.append_action_button(&content, popover, action, track_ids);
+            for action in group_iter {
+                self.append_action_button(&content, popover, action, track_ids);
+            }
+            prior_group_rendered = true;
         }
 
         (content, add_button)
@@ -737,30 +761,42 @@ mod tests {
     }
 
     #[test]
-    fn safe_actions_render_above_destructive_ones() {
+    fn actions_are_assigned_to_their_visual_sections() {
         let callback = no_op_callback();
         assert_eq!(
             TrackContextAction::play_next(callback.clone(), always_visible()).section,
-            TrackContextActionSection::Safe,
+            TrackContextActionSection::Queue,
         );
         assert_eq!(
-            TrackContextAction::copy_files(callback.clone()).section,
-            TrackContextActionSection::Safe,
+            TrackContextAction::add_to_queue(callback.clone(), always_visible()).section,
+            TrackContextActionSection::Queue,
         );
         assert_eq!(
-            TrackContextAction::show_in_folder(callback.clone()).section,
-            TrackContextActionSection::Safe,
+            TrackContextAction::get_info(callback.clone()).section,
+            TrackContextActionSection::Info,
         );
         assert_eq!(
             TrackContextAction::show_album(callback.clone(), always_visible()).section,
-            TrackContextActionSection::Safe,
+            TrackContextActionSection::Navigate,
+        );
+        assert_eq!(
+            TrackContextAction::copy_files(callback.clone()).section,
+            TrackContextActionSection::Files,
+        );
+        assert_eq!(
+            TrackContextAction::show_in_folder(callback.clone()).section,
+            TrackContextActionSection::Files,
         );
         assert_eq!(
             TrackContextAction::remove_from_library(callback.clone()).section,
             TrackContextActionSection::Destructive,
         );
         assert_eq!(
-            TrackContextAction::move_to_trash(callback).section,
+            TrackContextAction::move_to_trash(callback.clone()).section,
+            TrackContextActionSection::Destructive,
+        );
+        assert_eq!(
+            TrackContextAction::remove_from_playlist(callback, always_visible()).section,
             TrackContextActionSection::Destructive,
         );
     }
