@@ -1091,7 +1091,7 @@ before extending the current behavior:
   to a specific field is also undecided.
 - **match semantics**: substring vs. token-prefix vs. fuzzy; case
   sensitivity; diacritic folding; whether multiple whitespace-separated
-  terms are ANDed across fields (typical library-search behavior) or
+  terms are AND-combined across fields (typical library-search behavior) or
   treated as a single phrase.
 - **operators and modalities**: whether to support quoted phrases,
   field-scoped queries (e.g. `artist:bowie`), negation (`-live`),

@@ -449,7 +449,8 @@ impl NowPlayingView {
             "Fetching artwork…".to_owned(),
             false,
         );
-        self.pending_fetch_notification_id.set(Some(notification_id));
+        self.pending_fetch_notification_id
+            .set(Some(notification_id));
         true
     }
 

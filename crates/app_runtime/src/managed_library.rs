@@ -231,7 +231,9 @@ impl ApplicationRuntime {
             self.library_tracks
                 .iter()
                 .find(|existing| existing.id == incoming.id)
-                .is_some_and(|existing| existing.location.is_missing() != incoming.location.is_missing())
+                .is_some_and(|existing| {
+                    existing.location.is_missing() != incoming.location.is_missing()
+                })
         });
         replace_library_tracks_by_id(&mut self.library_tracks, result.tracks);
         self.refresh_playback_queue_track_ids();
@@ -487,14 +489,13 @@ impl LibraryImportContext {
             }
         }
 
-        let mut next_track_id = library_scan::next_track_id(&self.existing_tracks)?;
+        let first_track_id = library_scan::next_track_id(&self.existing_tracks)?;
         let mut tracks = Vec::new();
-        for import in imports {
+        for (next_track_id, import) in (first_track_id..).zip(imports) {
             let Some(track_id) = sustain_domain::TrackId::new(next_track_id) else {
                 remove_copied_files(&copied_paths);
                 return Err(ApplicationRuntimeError::LibraryStoreFailed);
             };
-            next_track_id += 1;
             tracks.push(Track {
                 id: track_id,
                 location: TrackLocation::available(import.relative_path),
@@ -800,7 +801,9 @@ fn plan_library_consolidation(
         // refresh.
         if !track.location.is_missing() {
             let mut updated = track.clone();
-            updated.location = updated.location.with_availability(TrackAvailability::Missing);
+            updated.location = updated
+                .location
+                .with_availability(TrackAvailability::Missing);
             missing_track_updates.push(updated);
         }
     };

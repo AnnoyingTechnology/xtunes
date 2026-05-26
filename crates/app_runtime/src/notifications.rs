@@ -196,7 +196,8 @@ impl NotificationCenter {
             self.persistent_stack.remove(index);
             return;
         }
-        self.ephemeral_queue.retain(|notification| notification.id != id);
+        self.ephemeral_queue
+            .retain(|notification| notification.id != id);
     }
 
     /// Drop the displayed ephemeral once its timer has elapsed. The
@@ -237,8 +238,7 @@ impl NotificationCenter {
 // case-by-case knowledge of what it means.
 
 use crate::{
-    ApplicationRuntimeError, LibraryConsolidationSummary, LibraryImportSummary,
-    LibraryScanSummary,
+    ApplicationRuntimeError, LibraryConsolidationSummary, LibraryImportSummary, LibraryScanSummary,
 };
 
 pub fn library_scan_running_text() -> String {
@@ -585,10 +585,8 @@ mod tests {
         // coalescing.
         let mut center = NotificationCenter::new();
         for index in 0..NOTIFICATION_QUEUE_HARD_CAP {
-            center.__test_force_push_ephemeral(
-                NotificationCategory::Command,
-                format!("msg {index}"),
-            );
+            center
+                .__test_force_push_ephemeral(NotificationCategory::Command, format!("msg {index}"));
         }
         assert_eq!(center.ephemeral_queue().len(), NOTIFICATION_QUEUE_HARD_CAP);
 

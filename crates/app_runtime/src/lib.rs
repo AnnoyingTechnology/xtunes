@@ -58,9 +58,8 @@ pub use notifications::{
     EPHEMERAL_NOTIFICATION_DURATION, NOTIFICATION_QUEUE_HARD_CAP, NOTIFICATION_TRANSITION,
     Notification, NotificationCategory, NotificationCenter, NotificationId, NotificationKind,
     NotificationSeverity, library_consolidation_outcome_text, library_consolidation_running_text,
-    library_import_outcome_text, library_import_running_text,
-    library_path_change_outcome_text, library_scan_outcome_text, library_scan_running_text,
-    runtime_error_text,
+    library_import_outcome_text, library_import_running_text, library_path_change_outcome_text,
+    library_scan_outcome_text, library_scan_running_text, runtime_error_text,
 };
 
 pub type ApplicationRuntimeResult<T> = Result<T, ApplicationRuntimeError>;
@@ -618,9 +617,7 @@ impl ApplicationRuntime {
         severity: NotificationSeverity,
         body: String,
     ) -> NotificationId {
-        let id = self
-            .notifications
-            .push_ephemeral(category, severity, body);
+        let id = self.notifications.push_ephemeral(category, severity, body);
         self.notify_notification_observer();
         id
     }
@@ -650,7 +647,7 @@ impl ApplicationRuntime {
     /// Install the observer fired after every lazy availability flip
     /// (failed-play detection, library-path re-stat). The observer
     /// must not synchronously re-enter the runtime — defer onto the
-    /// main loop, same contract as [`set_notification_observer`].
+    /// main loop, same contract as [`Self::set_notification_observer`].
     pub fn set_track_availability_observer(&mut self, observer: TrackAvailabilityObserver) {
         self.track_availability_observer = Some(observer);
     }
@@ -1758,12 +1755,11 @@ mod tests {
 
         std::fs::remove_file(&track_path).expect("remove track");
 
-        let outcome = runtime.handle_command(ApplicationCommand::Playback(
-            PlaybackCommand::PlayTrack {
+        let outcome =
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack {
                 track_id: id,
                 queue: sustain_domain::PlaybackQueueRequest::Library,
-            },
-        ));
+            }));
         assert_eq!(outcome, Err(ApplicationRuntimeError::TrackUnavailable));
         assert!(runtime.library_tracks()[0].location.is_missing());
 
@@ -1804,12 +1800,11 @@ mod tests {
 
         // Step 1: remove the file, fail a play, observe the flag flip.
         std::fs::remove_file(&track_path).expect("remove track");
-        let first = runtime.handle_command(ApplicationCommand::Playback(
-            PlaybackCommand::PlayTrack {
+        let first =
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack {
                 track_id: id,
                 queue: sustain_domain::PlaybackQueueRequest::Library,
-            },
-        ));
+            }));
         assert_eq!(first, Err(ApplicationRuntimeError::TrackUnavailable));
         assert!(runtime.library_tracks()[0].location.is_missing());
 
@@ -1821,12 +1816,11 @@ mod tests {
         // Step 3: a fresh play succeeds because `play_track` re-stats
         // the resolved path; both the in-memory and persisted flags
         // flip back to Available.
-        let second = runtime.handle_command(ApplicationCommand::Playback(
-            PlaybackCommand::PlayTrack {
+        let second =
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack {
                 track_id: id,
                 queue: sustain_domain::PlaybackQueueRequest::Library,
-            },
-        ));
+            }));
         assert_eq!(second, Ok(()));
         assert!(!runtime.library_tracks()[0].location.is_missing());
 

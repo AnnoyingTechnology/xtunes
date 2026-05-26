@@ -87,21 +87,20 @@ pub(super) fn attach_drag_and_drop(
     drop_target.connect_motion(move |target, _x, y| {
         let kind = peek_drag_kind(target);
         match kind {
-            Some(DragKind::Tracks) => {
-                if target_accepts_tracks {
-                    if current_position_for_motion.get() != DropPosition::Into {
-                        current_position_for_motion.set(DropPosition::Into);
-                    }
-                    set_drop_indicator(
-                        &row_for_motion,
-                        DropPosition::Into,
-                        &current_indicator_for_motion,
-                    );
-                    gdk::DragAction::COPY
-                } else {
-                    clear_drop_indicator(&row_for_motion, &current_indicator_for_motion);
-                    gdk::DragAction::empty()
+            Some(DragKind::Tracks) if target_accepts_tracks => {
+                if current_position_for_motion.get() != DropPosition::Into {
+                    current_position_for_motion.set(DropPosition::Into);
                 }
+                set_drop_indicator(
+                    &row_for_motion,
+                    DropPosition::Into,
+                    &current_indicator_for_motion,
+                );
+                gdk::DragAction::COPY
+            }
+            Some(DragKind::Tracks) => {
+                clear_drop_indicator(&row_for_motion, &current_indicator_for_motion);
+                gdk::DragAction::empty()
             }
             Some(DragKind::PlaylistItem) => {
                 let row_height = row_for_motion.height() as f64;

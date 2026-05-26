@@ -181,7 +181,7 @@ where
     }
 
     let mut sorted: Vec<ColorBucket> = buckets.into_values().collect();
-    sorted.sort_by(|a, b| b.score.cmp(&a.score));
+    sorted.sort_by_key(|bucket| std::cmp::Reverse(bucket.score));
     sorted
 }
 

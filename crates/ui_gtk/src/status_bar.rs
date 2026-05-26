@@ -90,18 +90,20 @@ impl StatusBar {
         self.refresh_from(&runtime.borrow());
         let lane = self.lane.clone();
         let runtime_for_observer = runtime.clone();
-        runtime.borrow_mut().set_notification_observer(Box::new(move || {
-            // The runtime is mid-borrow when this fires, so defer the
-            // render onto the GLib main loop. Multiple notifications
-            // in a single tick collapse into multiple idles; the
-            // render is idempotent so the redundant calls are cheap.
-            let lane = lane.clone();
-            let runtime = runtime_for_observer.clone();
-            glib::idle_add_local_once(move || {
-                lane.refresh(read_lane_input(&runtime.borrow()));
-                lane.install_auto_dismiss(&runtime);
-            });
-        }));
+        runtime
+            .borrow_mut()
+            .set_notification_observer(Box::new(move || {
+                // The runtime is mid-borrow when this fires, so defer the
+                // render onto the GLib main loop. Multiple notifications
+                // in a single tick collapse into multiple idles; the
+                // render is idempotent so the redundant calls are cheap.
+                let lane = lane.clone();
+                let runtime = runtime_for_observer.clone();
+                glib::idle_add_local_once(move || {
+                    lane.refresh(read_lane_input(&runtime.borrow()));
+                    lane.install_auto_dismiss(&runtime);
+                });
+            }));
     }
 
     fn refresh_from(&self, runtime: &ApplicationRuntime) {
@@ -303,14 +305,15 @@ impl NotificationLane {
         // consolidation pushes its persistent.
         let was_idle = self.inner.displayed_id.get().is_none();
         if was_idle {
-            self.inner.stack.set_visible_child_full(
-                target_name,
-                gtk::StackTransitionType::None,
-            );
+            self.inner
+                .stack
+                .set_visible_child_full(target_name, gtk::StackTransitionType::None);
         } else {
             self.inner.stack.set_visible_child_name(target_name);
         }
-        self.inner.showing_slot_a.set(!self.inner.showing_slot_a.get());
+        self.inner
+            .showing_slot_a
+            .set(!self.inner.showing_slot_a.get());
         self.inner.displayed_id.set(Some(notification.id));
         self.inner.displayed_is_ephemeral.set(is_ephemeral);
 
