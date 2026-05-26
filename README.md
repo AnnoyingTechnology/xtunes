@@ -10,7 +10,7 @@ Sustain (`open-sustain/sustain`) is a Linux music player heavily inspired by old
 > Each new release was a treat and what I still miss years after switching to Linux.
 > Advent of solid LLM agents in late 2025 allowed me to get a substitute rolling.
 
-This player is not an iTunes clone for a few reasons :
+This player is not pixel-perfect iTunes taxidermy for a few reasons :
 - each versions brought and took away good things, I'm cherry picking what I believe to be tasteful,
 - bloat has not been ported,
 - features for music lovers have been added.
@@ -22,7 +22,7 @@ The interface is working natively in both light and dark modes.
 It leverages natives features of Gnome to get the right blend of bespoke visual component without abusing GTK or bending Gnome.
 For example native _icons_ are used, so are native _accent color_.
 
-The library management has two modes, similar to what iTunes does :
+The library management has two modes, similar to what iTunes did :
 - "Don't touch my files" (default), which only scans a designated library folder. In this mode, your audio files can only be "enhanced" by populating more ID.3 tags. They are never moved or re-organized.
 - "Keep my library organized", which arranges and sorts the files cleanly by Artist and Album in the designated library folder. 
 

@@ -1887,3 +1887,41 @@ a user's music or library state, ever, under any code path?"
 
 A security audit of the codebase by LLM coding agents (Codex and Claude,
 run independently) is a hard gate before any public release.
+
+## Pre-Release Code Quality Pass
+
+The workspace currently enables a strict but compact clippy baseline:
+`forbid(unsafe_code)` and warn on `panic`, `todo`, `unimplemented`,
+`unwrap_used`. That catches the most dangerous patterns but leaves a
+large class of "debatable choices" untouched.
+
+Before the first public release, do a focused pass that turns on the
+full clippy `pedantic` and `nursery` groups workspace-wide, plus a
+selective subset of the `restriction` group (e.g.
+`arithmetic_side_effects`, `dbg_macro`, `expect_used`,
+`indexing_slicing`, `missing_panics_doc`, `unwrap_in_result`).
+
+Expected shape of the pass:
+
+- First run surfaces a backlog of warnings across the workspace.
+- For each: either fix it, or `#[allow(...)]` at the call site with a
+  `reason = "..."` documenting why the lint is wrong *here*.
+- Lints that don't match the project's style get disabled
+  workspace-wide via `[workspace.lints.clippy]` with a comment
+  explaining the decision.
+- CI keeps `-D warnings` so the ratchet sticks.
+
+The pass is the closest equivalent to running a Sonar-style code-smell
+review against the codebase. It is deliberately deferred until the
+feature surface is closer to frozen — landing it while the runtime
+shape is still moving would mean re-triaging the same lints repeatedly.
+
+Adjacent, lower-priority follow-ups for the same pass:
+
+- Enable CodeQL (Rust, GitHub-native, free) via repo Settings →
+  Code scanning. Adds data-flow / taint analysis on top of clippy.
+- Wire CodSpeed to enforce the 400 ms cold-start budget as a CI gate
+  instead of a manual eyeball check on every PR.
+- Run `cargo-mutants` on a nightly schedule to verify the domain-logic
+  test suite actually catches the bugs it claims to.
+
