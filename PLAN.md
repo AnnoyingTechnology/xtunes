@@ -26,7 +26,7 @@ Sustain owns its database, playlists, statistics, search behavior, settings,
 and playback state. Ratings are part of the application model, but their
 durable storage is the audio file's native metadata tags. Migrations from
 other players (iTunes, Rhythmbox, Apple Music) are out of scope as a
-maintained feature; see `MIGRATING_TO_SUSTAIN.md` for what users (or an
+maintained feature; see `docs/migrating-to-sustain.md` for what users (or an
 LLM coding agent acting on their behalf) need to know to write a one-off
 backfill against their specific export.
 
@@ -64,12 +64,9 @@ domain        -> no application-specific dependencies
 The `domain` crate must not depend on GTK, GStreamer, SQLite, D-Bus, or
 filesystem watchers.
 
-The `importer/` crate exists in the workspace but is no longer part of
-Sustain's product surface — migrations from iTunes/Rhythmbox are handled
-out-of-band by user-written backfill scripts (see
-`MIGRATING_TO_SUSTAIN.md`). The crate is preserved as-is for use by other
-projects that reference it; do not remove or modify it from the Sustain
-side without confirming the cross-project dependency.
+Migrations from iTunes/Rhythmbox are out of scope for Sustain itself —
+they are handled out-of-band by user-written backfill scripts (see
+`docs/migrating-to-sustain.md`).
 
 ## Core Model
 

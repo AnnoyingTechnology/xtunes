@@ -90,6 +90,30 @@ canonical store), either:
    time the file is scanned if the tag is empty. Option 1 is the correct
    one.
 
+## Merging history onto existing rows
+
+When overlaying external history onto a Sustain row, apply per-field rules
+rather than blanket-overwriting:
+
+- `date_added_at_unix` — **min** (oldest wins; recovers the original add date
+  that the scan stamped to "now").
+- `play_count` — choose a strategy and document it: `max(sustain, external)`
+  when the external era is already represented in Sustain; `sustain + external`
+  only when the two eras provably do not overlap; or the "smart" rule
+  `sustain >= external ? sustain : sustain + external` for the common case
+  where one era partially absorbs the other.
+- `skip_count` — **max**.
+- `last_played_at_unix`, `last_skipped_at_unix` — **max** (most recent wins).
+- A field that is absent in the external source must leave Sustain's value
+  untouched. Do not write `0` or `NULL` over existing data.
+
+## Source-specific guides
+
+Field-by-field specs for individual source libraries:
+
+- [Migrating from Rhythmbox](migrating-from-rhythmbox.md)
+- [Migrating from iTunes / Apple Music](migrating-from-itunes.md)
+
 ## Schema reference
 
 The authoritative schema is in
