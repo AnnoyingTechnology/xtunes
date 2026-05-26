@@ -2049,9 +2049,9 @@ fn playlist_track_context_actions(
 /// Build the drag-reorder callback for the playlist track table. The callback
 /// only acts when a *regular* playlist is selected in the sidebar — smart
 /// playlists and the Library pseudo-entry are derived/dynamic and have no
-/// authoritative entry order to mutate. The PLAN.md punch-list item is
-/// explicit: "no GTK-only row reorder path"; this dispatches
-/// `MovePlaylistEntries` so the runtime/SQLite are the source of truth.
+/// authoritative entry order to mutate. No GTK-only row reorder path:
+/// this dispatches `MovePlaylistEntries` so the runtime/SQLite are the
+/// source of truth.
 ///
 /// Post-dispatch the callback rebuilds **only** the playlists table —
 /// nothing in the library, the album set, or the sidebar tree changes

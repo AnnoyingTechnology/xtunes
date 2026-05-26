@@ -24,7 +24,7 @@ fn main() {
     // Resolve the on-disk library database location up front so the
     // single-instance lock and the GTK application id are both keyed off
     // the exact same path the library store will end up opening. See
-    // `instance_lock.rs` and `PLAN.md` `## Single-Instance Enforcement`.
+    // `instance_lock.rs` for the integrity rationale.
     let Some(database_path) = sustain_library_store::default_database_path() else {
         eprintln!(
             "Sustain: cannot resolve the library database path (XDG_DATA_HOME and HOME are both unset)."

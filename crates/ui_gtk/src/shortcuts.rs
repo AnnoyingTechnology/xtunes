@@ -12,7 +12,7 @@
 //! currently looking at, with no need to swap action enabled-states on
 //! every selection change.
 //!
-//! Shortcut scope per PLAN.md "Committed shortcuts":
+//! Committed shortcut scope:
 //!
 //! - `app.new-playlist`        → Ctrl+N         : new empty playlist
 //! - `app.new-smart-playlist`  → Ctrl+Alt+N     : new smart playlist (opens editor)
@@ -176,10 +176,10 @@ fn install_show_in_folder(context: &GlobalShortcutContext) {
         if selection.is_empty() {
             return;
         }
-        // Multi-row scope per PLAN.md: act on the first selected track.
-        // Opening one file-manager window per track on a large selection
-        // would be hostile; cross-folder selections still resolve to a
-        // single, predictable parent directory.
+        // Multi-row scope: act on the first selected track. Opening one
+        // file-manager window per track on a large selection would be
+        // hostile; cross-folder selections still resolve to a single,
+        // predictable parent directory.
         callback(selection);
     });
     context.app.add_action(&action);

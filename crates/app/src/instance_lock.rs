@@ -4,8 +4,10 @@
 //! Single-instance enforcement keyed to the resolved library database path.
 //!
 //! Two Sustain processes pointed at the same on-disk library must not run
-//! concurrently — see `PLAN.md` `## Single-Instance Enforcement` for the
-//! integrity rationale. This module owns two complementary primitives:
+//! concurrently — the integrity rationale is library-wide (interleaved SQLite
+//! writes across multi-statement invariants, racing tag/rating writes,
+//! duplicate scan inserts, MPRIS bus-name collisions). This module owns two
+//! complementary primitives:
 //!
 //! - [`acquire`] takes an `flock(LOCK_EX | LOCK_NB)` on a sidecar `.lock`
 //!   file living next to the database file. The lock is released when the
@@ -99,7 +101,7 @@ pub(crate) fn acquire(database_path: &Path) -> AcquireOutcome {
 /// returned string is the literal value passed to
 /// `gtk::Application::application_id` and must be both stable across the
 /// process's two roles (primary + remote) and unique per distinct database
-/// target, so the comments in [`acquire`] and `PLAN.md` hold.
+/// target, so the contract documented on [`acquire`] holds.
 pub(crate) fn application_id_for(database_path: &Path) -> String {
     let hash = fnv1a_64(database_path.as_os_str().as_encoded_bytes());
     format!("{GTK_APPLICATION_ID_PREFIX}{hash:016x}")

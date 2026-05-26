@@ -223,8 +223,7 @@ impl NotificationLane {
         // pushes the previous child out to the left. The frame clock
         // runs the animation, so the main loop is never busy-waiting
         // on a timer. Crossfade-while-sliding is not a GTK4 primitive;
-        // if the maintainer later wants the precise overlap from
-        // PLAN.md (slide + fade in one motion) we can wire a custom
+        // a precise slide-plus-fade overlap would need a custom
         // tick_callback animator. The bare slide carries the intent.
         stack.set_transition_type(gtk::StackTransitionType::SlideLeft);
         stack.set_transition_duration(NOTIFICATION_TRANSITION.as_millis() as u32);
