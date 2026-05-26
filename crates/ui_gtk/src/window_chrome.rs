@@ -9,7 +9,7 @@ use super::{RESIZE_CORNER_SIZE, RESIZE_EDGE_THICKNESS, WINDOW_SHADOW_MARGIN};
 
 pub(crate) fn install_window_state_chrome(
     window: &gtk::ApplicationWindow,
-    window_frame: &gtk::Box,
+    window_frame: &gtk::Overlay,
 ) {
     update_window_state_chrome(window, window_frame);
 
@@ -24,7 +24,7 @@ pub(crate) fn install_window_state_chrome(
     });
 }
 
-fn update_window_state_chrome(window: &gtk::ApplicationWindow, window_frame: &gtk::Box) {
+fn update_window_state_chrome(window: &gtk::ApplicationWindow, window_frame: &gtk::Overlay) {
     let is_floating = !window.is_fullscreen() && !window.is_maximized();
     let margin = if is_floating {
         window_frame.add_css_class("window-frame");

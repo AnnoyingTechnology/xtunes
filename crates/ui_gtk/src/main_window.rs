@@ -475,17 +475,21 @@ pub(crate) fn build_main_window(
     root.append(&content_area);
     root.append(&status_bar.widget());
 
-    let window_frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    window_frame.add_css_class("csd");
-    window_frame.set_hexpand(true);
-    window_frame.set_vexpand(true);
-    window_frame.append(&root);
+    // `window_frame` is the visible window: it carries `.window-frame`
+    // (shadow + rounded corners) and hosts the resize-handle overlays so the
+    // handles snap to the actual visible edges. `shadow_gutter` is the outer
+    // box whose only job is to provide the inset where the shadow renders.
+    let window_frame = gtk::Overlay::new();
+    window_frame.set_child(Some(&root));
+    install_resize_handles(&window_frame, &window);
     install_window_state_chrome(&window, &window_frame);
 
-    let shell = gtk::Overlay::new();
-    shell.set_child(Some(&window_frame));
-    install_resize_handles(&shell, &window);
-    window.set_child(Some(&shell));
+    let shadow_gutter = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    shadow_gutter.add_css_class("csd");
+    shadow_gutter.set_hexpand(true);
+    shadow_gutter.set_vexpand(true);
+    shadow_gutter.append(&window_frame);
+    window.set_child(Some(&shadow_gutter));
 
     // Any debounced save scheduled within the debounce window of shutdown
     // would otherwise be lost: the timer's main loop never gets to fire.

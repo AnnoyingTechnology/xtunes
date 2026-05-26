@@ -274,6 +274,14 @@ listview.albums-list > row:focus {
     min-height: 0;
 }
 
+/* Match ALBUM_GRID_MARGIN (14px) used for row left/right gutters. Padding
+   on the listview node scrolls with content: artwork can still flow to the
+   viewport edge mid-scroll, while the first and last rows keep breathing
+   room at the top and bottom scroll extremes. */
+listview.albums-list {
+    padding: 14px 0;
+}
+
 .album-row {
     background-color: transparent;
 }
