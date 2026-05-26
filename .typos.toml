@@ -1,0 +1,10 @@
+[default.extend-words]
+# Timing-instrumentation variable names. `t0`/`tact`/`tbw`/`trun` are
+# short identifiers, not English words; typos misreads `trun` as `turn`.
+trun = "trun"
+
+# "ANDed" — past-tense of the logical AND operator. Standard technical
+# prose; typos misreads the embedded "Ded".
+ANDed = "ANDed"
+ORed = "ORed"
+XORed = "XORed"

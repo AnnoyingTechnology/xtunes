@@ -20,16 +20,18 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
 
       - name: Run analysis
-        uses: ossf/scorecard-action@v2
+        uses: ossf/scorecard-action@v2.4.2
         with:
           results_file: results.sarif
           results_format: sarif
-          publish_results: true
+          # publish_results requires repo enrollment in the OpenSSF
+          # allowlist; leave off until that is set up.
+          publish_results: false
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

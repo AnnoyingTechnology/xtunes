@@ -8,7 +8,12 @@ all-features = true
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-ignore = []
+ignore = [
+    # `paste` is archived/unmaintained but functionally correct. Pulled in
+    # transitively via lofty 0.24. Track upstream migration to `pastey`
+    # rather than monkey-patching here.
+    "RUSTSEC-2024-0436",
+]
 
 [licenses]
 # Sustain is GPL-3.0-or-later. Inbound dependency licenses must be
@@ -30,6 +35,9 @@ allow = [
     "BSD-3-Clause",
     "BSL-1.0",
     "CC0-1.0",
+    # Community Data License Agreement, permissive variant. Used by
+    # `webpki-roots` (a data package: the Mozilla CA bundle).
+    "CDLA-Permissive-2.0",
     "GPL-2.0-or-later",
     "GPL-3.0",
     "GPL-3.0-or-later",
@@ -49,7 +57,11 @@ exceptions = []
 
 [bans]
 multiple-versions = "warn"
+# Path dependencies in this workspace (sustain-* crates) are intentionally
+# unversioned. `allow-wildcard-paths` lets cargo-deny ignore those while
+# still rejecting wildcard versions on third-party crates from crates.io.
 wildcards = "deny"
+allow-wildcard-paths = true
 highlight = "all"
 
 [sources]

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [lib]
 name = "sustain_importer"
@@ -11,7 +12,6 @@ path = "src/lib.rs"
 
 [dependencies]
 sustain-domain = { path = "../domain" }
-sustain-library-store = { path = "../library_store" }
 
 [lints]
 workspace = true

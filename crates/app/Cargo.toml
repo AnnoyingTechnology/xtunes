@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Music library and player for Linux"
 license.workspace = true
+publish.workspace = true
 homepage = "https://github.com/open-sustain/sustain"
 repository = "https://github.com/open-sustain/sustain"
 authors = ["AnnoyingTechnology"]

@@ -25,25 +25,31 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # Build jobs run inside debian:trixie-slim because the workspace requires
+  # GTK >= 4.18 (Cargo.toml: `features = ["v4_18"]`). Ubuntu 24.04 ships
+  # GTK 4.14; Debian trixie ships 4.18. This also matches the project's
+  # Debian-first target platform.
   clippy:
     name: clippy
     runs-on: ubuntu-24.04
+    container:
+      image: debian:trixie-slim
     steps:
-      - uses: actions/checkout@v4
-      - name: Install system dependencies
+      - name: Install prerequisites
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
             libgtk-4-dev \
             libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev \
-            pkg-config
+            libgstreamer-plugins-base1.0-dev
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -53,17 +59,19 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-24.04
+    container:
+      image: debian:trixie-slim
     steps:
-      - uses: actions/checkout@v4
-      - name: Install system dependencies
+      - name: Install prerequisites
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
             libgtk-4-dev \
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
-            pkg-config \
             xvfb
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: xvfb-run -a cargo test --workspace --locked --no-fail-fast
@@ -71,16 +79,18 @@ jobs:
   doc:
     name: rustdoc
     runs-on: ubuntu-24.04
+    container:
+      image: debian:trixie-slim
     steps:
-      - uses: actions/checkout@v4
-      - name: Install system dependencies
+      - name: Install prerequisites
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
             libgtk-4-dev \
             libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev \
-            pkg-config
+            libgstreamer-plugins-base1.0-dev
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --locked --no-deps --document-private-items
@@ -89,7 +99,7 @@ jobs:
     name: cargo-deny
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
@@ -100,7 +110,7 @@ jobs:
     name: cargo-machete
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
@@ -111,5 +121,5 @@ jobs:
     name: typos
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: crate-ci/typos@v1

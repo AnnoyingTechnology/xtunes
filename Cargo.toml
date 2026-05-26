@@ -19,6 +19,11 @@ resolver = "3"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
+# Sustain ships as a Debian package, not a crates.io library. Every
+# crate in the workspace is private; this opts them all out of `cargo
+# publish` and lets cargo-deny accept the unversioned path deps that
+# link the crates together.
+publish = false
 
 [workspace.dependencies]
 gtk = { package = "gtk4", version = "0.10", features = ["v4_18"] }

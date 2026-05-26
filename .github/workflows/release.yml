@@ -21,28 +21,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Build inside debian:trixie-slim so the .deb links against Debian's
+  # GTK 4.18 / glibc, matching the target platform. Ubuntu 24.04 ships
+  # GTK 4.14 which is too old for the workspace's `v4_18` feature.
   deb:
-    name: Build .deb (${{ matrix.runner }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: amd64
+    name: Build .deb (debian-trixie-amd64)
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:trixie-slim
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-
-      - name: Install system dependencies
+      - name: Install prerequisites
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
             libgtk-4-dev \
             libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev \
-            pkg-config
+            libgstreamer-plugins-base1.0-dev
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
