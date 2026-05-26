@@ -170,7 +170,7 @@ impl ApplicationRuntime {
     /// Resolves the absolute on-disk path for `track_id`. Does NOT
     /// consult the persisted `is_missing` flag — that flag is a
     /// cache of the last observed availability, and the caller
-    /// ([`play_track`]) reconciles it against the live filesystem on
+    /// ([`Self::play_track`]) reconciles it against the live filesystem on
     /// every play. Returning `TrackUnavailable` here therefore means
     /// the runtime cannot even form a candidate path (track id not
     /// in the library, or no library root configured), not that the
@@ -200,7 +200,7 @@ impl ApplicationRuntime {
         self.set_track_availability(track_id, TrackAvailability::Missing)
     }
 
-    /// Counterpart to [`mark_track_missing`]: flip a previously-missing
+    /// Counterpart to [`Self::mark_track_missing`]: flip a previously-missing
     /// track back to `Available` once a live playback attempt has
     /// proven the file is reachable again (e.g. the user renamed it
     /// back, restored from trash, or remounted the volume). Same
@@ -282,8 +282,8 @@ impl ApplicationRuntime {
 
     /// Drive the play-statistics accounting forward by `elapsed` of
     /// wall-clock time. The UI calls this on a steady cadence
-    /// (currently 1 Hz, see [`super::lib`] now-playing refresh timer).
-    /// Accumulation only happens while the playback service reports
+    /// (currently 1 Hz, driven by the now-playing refresh timer in the
+    /// crate root). Accumulation only happens while the playback service reports
     /// the [`PlaybackState::Playing`] state, and only against the
     /// track currently associated with the session.
     ///

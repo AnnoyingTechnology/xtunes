@@ -261,7 +261,7 @@ impl TrackTable {
     /// Any managed column missing from `layout` keeps its factory defaults and
     /// is appended after the explicit entries.
     ///
-    /// The [`applying_layout`] guard is set for the duration so the resulting
+    /// The [`Self::applying_layout`] guard is set for the duration so the resulting
     /// `notify::*` and `items-changed` signals do not loop back into a save.
     pub(crate) fn apply_layout(&self, layout: &TrackColumnLayout) {
         let _guard = ApplyLayoutGuard::enter(self.applying_layout.clone());

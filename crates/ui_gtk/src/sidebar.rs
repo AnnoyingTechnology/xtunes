@@ -189,7 +189,7 @@ impl PlaylistSidebar {
 
     /// Arm an inline rename for `item` on the next bind that matches it.
     /// Designed for the "create then immediately name" flow: callers set this
-    /// before calling [`refresh`], so the new row enters edit mode the moment
+    /// before calling [`Self::refresh`], so the new row enters edit mode the moment
     /// it is bound.
     pub(crate) fn arm_pending_rename(&self, item: PlaylistItem) {
         *self.pending_rename.borrow_mut() = Some(item);

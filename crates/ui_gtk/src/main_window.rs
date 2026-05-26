@@ -1375,7 +1375,7 @@ fn install_mpris_command_consumer(
     });
 }
 
-/// Drains [`MetadataWriteResult`]s posted by the async metadata writer
+/// Drains [`sustain_app_runtime::MetadataWriteResult`]s posted by the async metadata writer
 /// and surfaces failures to the user.
 ///
 /// The runtime applies the optimistic in-memory + SQLite update

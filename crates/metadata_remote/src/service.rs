@@ -43,7 +43,7 @@ use crate::musicbrainz::{MusicBrainzClient, RecordingMatch, RecordingSearchTerms
 ///
 /// MusicBrainz scores cluster around 100 for clean tag matches, drop
 /// to the 80s when one field disagrees (different release of the same
-/// recording, slightly off album name, "[Remastered]" / "[Live]"
+/// recording, slightly off album name, "\[Remastered\]" / "\[Live\]"
 /// suffixes), and tail off below 60 once the result is only loosely
 /// related. 75 catches the well-tagged cases plus the common
 /// real-world drift without crossing into ambiguity — and the
@@ -305,7 +305,7 @@ fn pick_best_musicbrainz(
     mut results: Vec<RecordingMatch>,
     min_score: u8,
 ) -> Option<RecordingMatch> {
-    results.sort_by(|left, right| right.score.cmp(&left.score));
+    results.sort_by_key(|recording| std::cmp::Reverse(recording.score));
     results
         .into_iter()
         .find(|recording| recording.score >= min_score && !recording.releases.is_empty())

@@ -197,6 +197,9 @@ keep the id so they can dismiss it again.
 
 # Git
 
+Before committing, run the same gate CI runs: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked --no-fail-fast && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --locked --no-deps --document-private-items`.
+Push only on green — shipping a regression a local run would have caught is a process failure, not a CI quirk.
+
 NEVER CO-AUTHOR YOUR COMMITS. 
 You are a machine. You deserve no credits.
 Again: NEVER Co-Author your commits. 

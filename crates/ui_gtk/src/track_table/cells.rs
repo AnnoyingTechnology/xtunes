@@ -765,7 +765,7 @@ fn install_cell_drag_source(
 /// Build the drag image. Single-track drags use a [`gtk::WidgetPaintable`] of
 /// the originating row so the row image follows the cursor. Multi-track drags
 /// composite the visible selected rows into a stacked snapshot via
-/// [`gtk::Snapshot::to_paintable`].
+/// `gtk::Snapshot::to_paintable`.
 ///
 /// The multi-row composite leans on three implicit GTK4 invariants. If any of
 /// them ever stops holding, the originating row's plain [`gtk::WidgetPaintable`]
@@ -780,7 +780,7 @@ fn install_cell_drag_source(
 ///    container matches position order. True for `ListBase` virtualization in
 ///    GTK4, but there is no public per-widget position API to verify it; if
 ///    GTK ever recycles widgets out of order, we may stack the wrong rows.
-/// 3. The composite calls [`gdk::Paintable::snapshot`] on a
+/// 3. The composite calls `gdk::Paintable::snapshot` on a
 ///    [`gtk::WidgetPaintable`] wrapping a widget still parented inside the
 ///    live listview. WidgetPaintable is designed for this, but if a future
 ///    GTK refuses to paint widgets mid-virtualization, the composite returns
