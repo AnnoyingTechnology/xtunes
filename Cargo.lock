@@ -1824,7 +1824,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sustain-app"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "rustix",
  "sustain-app-runtime",
@@ -1838,7 +1838,7 @@ dependencies = [
 
 [[package]]
 name = "sustain-app-runtime"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "async-channel",
  "sustain-domain",
@@ -1853,7 +1853,7 @@ dependencies = [
 
 [[package]]
 name = "sustain-desktop"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "async-channel",
  "async-io",
@@ -1863,18 +1863,18 @@ dependencies = [
 
 [[package]]
 name = "sustain-domain"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "sustain-importer"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "sustain-domain",
 ]
 
 [[package]]
 name = "sustain-library-store"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "rusqlite",
  "sustain-domain",
@@ -1882,7 +1882,7 @@ dependencies = [
 
 [[package]]
 name = "sustain-metadata"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "lofty",
  "sha2",
@@ -1891,7 +1891,7 @@ dependencies = [
 
 [[package]]
 name = "sustain-metadata-remote"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "ureq",
@@ -1899,7 +1899,7 @@ dependencies = [
 
 [[package]]
 name = "sustain-playback"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "gstreamer",
  "sustain-domain",
@@ -1907,14 +1907,14 @@ dependencies = [
 
 [[package]]
 name = "sustain-search"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "sustain-domain",
 ]
 
 [[package]]
 name = "sustain-settings"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "directories",
  "serde",
@@ -1924,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "sustain-ui-gtk"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "async-channel",
  "directories",
