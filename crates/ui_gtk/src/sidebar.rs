@@ -23,7 +23,9 @@ mod row_context;
 pub(crate) use drag_drop::{DropPosition, parse_tracks_payload, tracks_drag_payload};
 use drag_drop::{SharedDropIndicator, attach_drag_and_drop};
 use model::{SidebarItem, build_tree_model, select_item, selected_item};
-use row_context::{attach_rename_entry_signals, attach_row_context_menu, begin_rename};
+use row_context::{
+    SidebarRowContext, attach_rename_entry_signals, attach_row_context_menu, begin_rename,
+};
 
 pub(crate) type SidebarSelectionChangedCallback = Rc<dyn Fn(Option<SidebarSelection>)>;
 pub(crate) type SidebarMoveCallback = Rc<dyn Fn(PlaylistItem, PlaylistItem, DropPosition)>;
@@ -443,13 +445,15 @@ fn build_row_factory(
         );
         attach_row_context_menu(
             expander.upcast_ref::<gtk::Widget>(),
-            playlist_item,
-            label_text.clone(),
-            name_stack.clone(),
-            label.clone(),
-            entry.clone(),
-            on_delete.clone(),
-            on_edit_smart_playlist.clone(),
+            SidebarRowContext {
+                item: playlist_item,
+                current_name: label_text.clone(),
+                name_stack: name_stack.clone(),
+                label: label.clone(),
+                entry: entry.clone(),
+                on_delete: on_delete.clone(),
+                on_edit_smart_playlist: on_edit_smart_playlist.clone(),
+            },
         );
         attach_rename_entry_signals(
             &entry,

@@ -16,55 +16,75 @@ use sustain_domain::{
 
 use crate::{
     PlaylistFolder, PlaylistFolderId, PlaylistId, Rating, SmartPlaylistId, StoreError, StoreResult,
-    Track, TrackId,
+    Track, TrackId, schema::track_column_index as track_column,
 };
 
 pub(crate) fn track_from_row(row: &Row<'_>) -> StoreResult<Track> {
-    let duration_seconds = optional_i64(row, 11)?;
-    let rating_value = row.get::<_, i64>(13).map_err(StoreError::from)?;
+    let duration_seconds = optional_i64(row, track_column::DURATION_SECONDS)?;
+    let rating_value = row
+        .get::<_, i64>(track_column::RATING)
+        .map_err(StoreError::from)?;
 
     Ok(Track {
-        id: track_id_from_db(row.get(0).map_err(StoreError::from)?)?,
+        id: track_id_from_db(row.get(track_column::ID).map_err(StoreError::from)?)?,
         location: track_location_from_row(row)?,
-        content_hash: optional_track_content_hash_from_row(row, 30)?,
+        content_hash: optional_track_content_hash_from_row(row, track_column::CONTENT_HASH)?,
         metadata: TrackMetadata {
-            title: row.get(2).map_err(StoreError::from)?,
-            artist: row.get(3).map_err(StoreError::from)?,
-            album: row.get(4).map_err(StoreError::from)?,
-            album_artist: row.get(5).map_err(StoreError::from)?,
-            composer: row.get(6).map_err(StoreError::from)?,
-            grouping: row.get(20).map_err(StoreError::from)?,
-            genre: row.get(7).map_err(StoreError::from)?,
-            track_number: optional_u32(row, 8)?,
-            track_total: optional_u32(row, 21)?,
-            disc_number: optional_u32(row, 9)?,
-            disc_total: optional_u32(row, 22)?,
-            year: optional_i64(row, 10)?.map(|value| value as i32),
-            compilation: row.get(23).map_err(StoreError::from)?,
-            bpm: optional_u32(row, 24)?,
-            key: row.get(25).map_err(StoreError::from)?,
-            comments: row.get(26).map_err(StoreError::from)?,
+            title: row.get(track_column::TITLE).map_err(StoreError::from)?,
+            artist: row.get(track_column::ARTIST).map_err(StoreError::from)?,
+            album: row.get(track_column::ALBUM).map_err(StoreError::from)?,
+            album_artist: row
+                .get(track_column::ALBUM_ARTIST)
+                .map_err(StoreError::from)?,
+            composer: row.get(track_column::COMPOSER).map_err(StoreError::from)?,
+            grouping: row.get(track_column::GROUPING).map_err(StoreError::from)?,
+            genre: row.get(track_column::GENRE).map_err(StoreError::from)?,
+            track_number: optional_u32(row, track_column::TRACK_NUMBER)?,
+            track_total: optional_u32(row, track_column::TRACK_TOTAL)?,
+            disc_number: optional_u32(row, track_column::DISC_NUMBER)?,
+            disc_total: optional_u32(row, track_column::DISC_TOTAL)?,
+            year: optional_i64(row, track_column::YEAR)?.map(|value| value as i32),
+            compilation: row
+                .get(track_column::COMPILATION)
+                .map_err(StoreError::from)?,
+            bpm: optional_u32(row, track_column::BPM)?,
+            key: row
+                .get(track_column::MUSICAL_KEY)
+                .map_err(StoreError::from)?,
+            comments: row.get(track_column::COMMENTS).map_err(StoreError::from)?,
             duration: duration_seconds.map(seconds_to_duration),
-            bitrate_kbps: optional_u32(row, 12)?,
-            sample_rate_hz: optional_u32(row, 27)?,
-            channels: optional_u8(row, 28)?,
-            lyrics: row.get(29).map_err(StoreError::from)?,
+            bitrate_kbps: optional_u32(row, track_column::BITRATE_KBPS)?,
+            sample_rate_hz: optional_u32(row, track_column::SAMPLE_RATE_HZ)?,
+            channels: optional_u8(row, track_column::CHANNELS)?,
+            lyrics: row.get(track_column::LYRICS).map_err(StoreError::from)?,
         },
         rating: Rating::new(rating_value as u8).unwrap_or_else(Rating::unrated),
         statistics: PlayStatistics {
-            play_count: row.get::<_, i64>(14).map_err(StoreError::from)? as u64,
-            skip_count: row.get::<_, i64>(15).map_err(StoreError::from)? as u64,
-            last_played_at: optional_i64(row, 16)?.map(unix_to_system_time),
-            last_skipped_at: optional_i64(row, 17)?.map(unix_to_system_time),
-            date_added_at: optional_i64(row, 18)?.map(unix_to_system_time),
+            play_count: row
+                .get::<_, i64>(track_column::PLAY_COUNT)
+                .map_err(StoreError::from)? as u64,
+            skip_count: row
+                .get::<_, i64>(track_column::SKIP_COUNT)
+                .map_err(StoreError::from)? as u64,
+            last_played_at: optional_i64(row, track_column::LAST_PLAYED_AT_UNIX)?
+                .map(unix_to_system_time),
+            last_skipped_at: optional_i64(row, track_column::LAST_SKIPPED_AT_UNIX)?
+                .map(unix_to_system_time),
+            date_added_at: optional_i64(row, track_column::DATE_ADDED_AT_UNIX)?
+                .map(unix_to_system_time),
         },
-        file_size_bytes: optional_i64(row, 31)?.map(|value| value as u64),
+        file_size_bytes: optional_i64(row, track_column::FILE_SIZE_BYTES)?
+            .map(|value| value as u64),
     })
 }
 
 fn track_location_from_row(row: &Row<'_>) -> StoreResult<TrackLocation> {
-    let path = row.get::<_, String>(1).map_err(StoreError::from)?;
-    let is_missing = row.get::<_, bool>(19).map_err(StoreError::from)?;
+    let path = row
+        .get::<_, String>(track_column::RELATIVE_PATH)
+        .map_err(StoreError::from)?;
+    let is_missing = row
+        .get::<_, bool>(track_column::IS_MISSING)
+        .map_err(StoreError::from)?;
     let relative_path =
         TrackRelativePath::new(path.clone()).ok_or(StoreError::InvalidStoredPath(path))?;
 

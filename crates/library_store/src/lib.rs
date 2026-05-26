@@ -18,11 +18,16 @@ pub use sustain_domain::{
 
 mod memory;
 mod query;
+mod schema;
 mod sqlite_rows;
 
 pub use memory::InMemoryLibraryStore;
 
 use query::{sort_tracks, track_matches_search};
+use schema::{
+    SAVE_TRACK_SQL, SCHEMA_SQL, SELECT_ALL_TRACKS_SQL, SELECT_TRACK_BY_CONTENT_HASH_SQL,
+    SELECT_TRACK_BY_ID_SQL,
+};
 use sqlite_rows::{
     build_limit, duration_to_seconds, limit_selection_name, load_smart_playlist_rules,
     match_kind_from_name, match_kind_name, optional_i64, optional_playlist_folder_id_from_row,
@@ -178,135 +183,9 @@ impl SqliteLibraryStore {
             .map_err(|_| StoreError::StoreUnavailable)
     }
 
-    // Sustain is in pre-release development: the SQLite schema is not yet stable.
-    // Schema changes are made by editing the CREATE TABLE statements below; any
-    // existing local database is expected to be wiped and rebuilt from a library
-    // re-scan, not migrated. Do not add migration code for in-development schemas.
     fn migrate(&self) -> StoreResult<()> {
         self.connection_guard()?
-            .execute_batch(
-                r#"
-                PRAGMA foreign_keys = ON;
-
-                CREATE TABLE IF NOT EXISTS tracks (
-                    id INTEGER PRIMARY KEY,
-                    relative_path TEXT NOT NULL UNIQUE,
-                    title TEXT,
-                    artist TEXT,
-                    album TEXT,
-                    album_artist TEXT,
-                    composer TEXT,
-                    genre TEXT,
-                    track_number INTEGER,
-                    disc_number INTEGER,
-                    year INTEGER,
-                    duration_seconds INTEGER,
-                    bitrate_kbps INTEGER,
-                    rating INTEGER NOT NULL DEFAULT 0,
-                    play_count INTEGER NOT NULL DEFAULT 0,
-                    skip_count INTEGER NOT NULL DEFAULT 0,
-                    last_played_at_unix INTEGER,
-                    last_skipped_at_unix INTEGER,
-                    date_added_at_unix INTEGER,
-                    is_missing INTEGER NOT NULL DEFAULT 0,
-                    grouping TEXT,
-                    track_total INTEGER,
-                    disc_total INTEGER,
-                    compilation INTEGER,
-                    bpm INTEGER,
-                    musical_key TEXT,
-                    comments TEXT,
-                    sample_rate_hz INTEGER,
-                    channels INTEGER,
-                    lyrics TEXT,
-                    content_hash TEXT,
-                    file_size_bytes INTEGER
-                );
-
-                CREATE INDEX IF NOT EXISTS tracks_content_hash_idx
-                    ON tracks(content_hash)
-                    WHERE content_hash IS NOT NULL;
-
-                CREATE TABLE IF NOT EXISTS playlist_folders (
-                    id INTEGER PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    parent_folder_id INTEGER,
-                    position INTEGER NOT NULL DEFAULT 0,
-                    FOREIGN KEY (parent_folder_id) REFERENCES playlist_folders(id) ON DELETE CASCADE
-                );
-
-                CREATE TABLE IF NOT EXISTS playlists (
-                    id INTEGER PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    parent_folder_id INTEGER,
-                    position INTEGER NOT NULL DEFAULT 0,
-                    FOREIGN KEY (parent_folder_id) REFERENCES playlist_folders(id) ON DELETE CASCADE
-                );
-
-                CREATE TABLE IF NOT EXISTS playlist_entries (
-                    playlist_id INTEGER NOT NULL,
-                    track_id INTEGER NOT NULL,
-                    position INTEGER NOT NULL,
-                    PRIMARY KEY (playlist_id, track_id),
-                    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
-                    FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
-                );
-
-                CREATE TABLE IF NOT EXISTS smart_playlists (
-                    id INTEGER PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    parent_folder_id INTEGER,
-                    position INTEGER NOT NULL DEFAULT 0,
-                    match_kind TEXT NOT NULL,
-                    limit_count INTEGER,
-                    limit_selection TEXT,
-                    FOREIGN KEY (parent_folder_id) REFERENCES playlist_folders(id) ON DELETE CASCADE
-                );
-
-                CREATE TABLE IF NOT EXISTS smart_playlist_rules (
-                    smart_playlist_id INTEGER NOT NULL,
-                    position INTEGER NOT NULL,
-                    kind TEXT NOT NULL,
-                    field TEXT,
-                    text_operator TEXT,
-                    text_value TEXT,
-                    number_operator TEXT,
-                    number_value INTEGER,
-                    rating_stars INTEGER,
-                    date_unix INTEGER,
-                    days_value INTEGER,
-                    PRIMARY KEY (smart_playlist_id, position),
-                    FOREIGN KEY (smart_playlist_id) REFERENCES smart_playlists(id) ON DELETE CASCADE
-                );
-
-                CREATE TABLE IF NOT EXISTS track_column_layout_default (
-                    column_id TEXT PRIMARY KEY,
-                    position  INTEGER NOT NULL,
-                    visible   INTEGER NOT NULL,
-                    width_px  INTEGER NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS track_column_layout_playlist_override (
-                    playlist_id INTEGER NOT NULL,
-                    column_id   TEXT    NOT NULL,
-                    position    INTEGER NOT NULL,
-                    visible     INTEGER NOT NULL,
-                    width_px    INTEGER NOT NULL,
-                    PRIMARY KEY (playlist_id, column_id),
-                    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
-                );
-
-                CREATE TABLE IF NOT EXISTS track_column_layout_smart_playlist_override (
-                    smart_playlist_id INTEGER NOT NULL,
-                    column_id         TEXT    NOT NULL,
-                    position          INTEGER NOT NULL,
-                    visible           INTEGER NOT NULL,
-                    width_px          INTEGER NOT NULL,
-                    PRIMARY KEY (smart_playlist_id, column_id),
-                    FOREIGN KEY (smart_playlist_id) REFERENCES smart_playlists(id) ON DELETE CASCADE
-                );
-                "#,
-            )
+            .execute_batch(SCHEMA_SQL)
             .map_err(StoreError::from)
     }
 }
@@ -345,79 +224,7 @@ fn save_track_with_connection(connection: &Connection, track: &Track) -> StoreRe
     let relative_path = track.location.relative_path.as_path().to_string_lossy();
     connection
         .execute(
-            r#"
-            INSERT INTO tracks (
-                id,
-                relative_path,
-                title,
-                artist,
-                album,
-                album_artist,
-                composer,
-                genre,
-                track_number,
-                disc_number,
-                year,
-                duration_seconds,
-                bitrate_kbps,
-                rating,
-                play_count,
-                skip_count,
-                last_played_at_unix,
-                last_skipped_at_unix,
-                date_added_at_unix,
-                is_missing,
-                grouping,
-                track_total,
-                disc_total,
-                compilation,
-                bpm,
-                musical_key,
-                comments,
-                sample_rate_hz,
-                channels,
-                lyrics,
-                content_hash,
-                file_size_bytes
-            )
-            VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-                ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32
-            )
-            ON CONFLICT(id) DO UPDATE SET
-                relative_path = excluded.relative_path,
-                title = excluded.title,
-                artist = excluded.artist,
-                album = excluded.album,
-                album_artist = excluded.album_artist,
-                composer = excluded.composer,
-                genre = excluded.genre,
-                track_number = excluded.track_number,
-                disc_number = excluded.disc_number,
-                year = excluded.year,
-                duration_seconds = excluded.duration_seconds,
-                bitrate_kbps = excluded.bitrate_kbps,
-                rating = excluded.rating,
-                play_count = excluded.play_count,
-                skip_count = excluded.skip_count,
-                last_played_at_unix = excluded.last_played_at_unix,
-                last_skipped_at_unix = excluded.last_skipped_at_unix,
-                date_added_at_unix = excluded.date_added_at_unix,
-                is_missing = excluded.is_missing,
-                grouping = excluded.grouping,
-                track_total = excluded.track_total,
-                disc_total = excluded.disc_total,
-                compilation = excluded.compilation,
-                bpm = excluded.bpm,
-                musical_key = excluded.musical_key,
-                comments = excluded.comments,
-                sample_rate_hz = excluded.sample_rate_hz,
-                channels = excluded.channels,
-                lyrics = excluded.lyrics,
-                content_hash = excluded.content_hash,
-                file_size_bytes = excluded.file_size_bytes
-            "#,
+            SAVE_TRACK_SQL.as_str(),
             params![
                 track.id.get(),
                 relative_path,
@@ -482,45 +289,7 @@ impl LibraryStore for SqliteLibraryStore {
     fn track(&self, track_id: TrackId) -> StoreResult<Option<Track>> {
         let connection = self.connection_guard()?;
         let mut statement = connection
-            .prepare(
-                r#"
-                SELECT
-                    id,
-                    relative_path,
-                    title,
-                    artist,
-                    album,
-                    album_artist,
-                    composer,
-                    genre,
-                    track_number,
-                    disc_number,
-                    year,
-                    duration_seconds,
-                    bitrate_kbps,
-                    rating,
-                    play_count,
-                    skip_count,
-                    last_played_at_unix,
-                    last_skipped_at_unix,
-                    date_added_at_unix,
-                    is_missing,
-                    grouping,
-                    track_total,
-                    disc_total,
-                    compilation,
-                    bpm,
-                    musical_key,
-                    comments,
-                    sample_rate_hz,
-                    channels,
-                    lyrics,
-                    content_hash,
-                    file_size_bytes
-                FROM tracks
-                WHERE id = ?1
-                "#,
-            )
+            .prepare(SELECT_TRACK_BY_ID_SQL.as_str())
             .map_err(StoreError::from)?;
         let mut rows = statement
             .query(params![track_id.get()])
@@ -538,47 +307,7 @@ impl LibraryStore for SqliteLibraryStore {
     ) -> StoreResult<Option<Track>> {
         let connection = self.connection_guard()?;
         let mut statement = connection
-            .prepare(
-                r#"
-                SELECT
-                    id,
-                    relative_path,
-                    title,
-                    artist,
-                    album,
-                    album_artist,
-                    composer,
-                    genre,
-                    track_number,
-                    disc_number,
-                    year,
-                    duration_seconds,
-                    bitrate_kbps,
-                    rating,
-                    play_count,
-                    skip_count,
-                    last_played_at_unix,
-                    last_skipped_at_unix,
-                    date_added_at_unix,
-                    is_missing,
-                    grouping,
-                    track_total,
-                    disc_total,
-                    compilation,
-                    bpm,
-                    musical_key,
-                    comments,
-                    sample_rate_hz,
-                    channels,
-                    lyrics,
-                    content_hash,
-                    file_size_bytes
-                FROM tracks
-                WHERE content_hash = ?1
-                ORDER BY id
-                LIMIT 1
-                "#,
-            )
+            .prepare(SELECT_TRACK_BY_CONTENT_HASH_SQL.as_str())
             .map_err(StoreError::from)?;
         let mut rows = statement
             .query(params![content_hash.as_str()])
@@ -593,45 +322,7 @@ impl LibraryStore for SqliteLibraryStore {
     fn tracks(&self) -> StoreResult<Vec<Track>> {
         let connection = self.connection_guard()?;
         let mut statement = connection
-            .prepare(
-                r#"
-                SELECT
-                    id,
-                    relative_path,
-                    title,
-                    artist,
-                    album,
-                    album_artist,
-                    composer,
-                    genre,
-                    track_number,
-                    disc_number,
-                    year,
-                    duration_seconds,
-                    bitrate_kbps,
-                    rating,
-                    play_count,
-                    skip_count,
-                    last_played_at_unix,
-                    last_skipped_at_unix,
-                    date_added_at_unix,
-                    is_missing,
-                    grouping,
-                    track_total,
-                    disc_total,
-                    compilation,
-                    bpm,
-                    musical_key,
-                    comments,
-                    sample_rate_hz,
-                    channels,
-                    lyrics,
-                    content_hash,
-                    file_size_bytes
-                FROM tracks
-                ORDER BY id
-                "#,
-            )
+            .prepare(SELECT_ALL_TRACKS_SQL.as_str())
             .map_err(StoreError::from)?;
         let mut rows = statement.query([]).map_err(StoreError::from)?;
         let mut tracks = Vec::new();

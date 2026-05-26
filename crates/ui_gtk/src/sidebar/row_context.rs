@@ -7,17 +7,18 @@ use sustain_app_runtime::PlaylistItem;
 
 use super::{DeleteCallbackHolder, EditSmartPlaylistCallbackHolder, RenameCallbackHolder};
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn attach_row_context_menu(
-    row: &gtk::Widget,
-    item: PlaylistItem,
-    current_name: String,
-    name_stack: gtk::Stack,
-    label: gtk::Label,
-    entry: gtk::Entry,
-    on_delete: DeleteCallbackHolder,
-    on_edit_smart_playlist: EditSmartPlaylistCallbackHolder,
-) {
+#[derive(Clone)]
+pub(super) struct SidebarRowContext {
+    pub(super) item: PlaylistItem,
+    pub(super) current_name: String,
+    pub(super) name_stack: gtk::Stack,
+    pub(super) label: gtk::Label,
+    pub(super) entry: gtk::Entry,
+    pub(super) on_delete: DeleteCallbackHolder,
+    pub(super) on_edit_smart_playlist: EditSmartPlaylistCallbackHolder,
+}
+
+pub(super) fn attach_row_context_menu(row: &gtk::Widget, context: SidebarRowContext) {
     remove_secondary_gestures(row);
 
     let gesture = gtk::GestureClick::new();
@@ -25,18 +26,7 @@ pub(super) fn attach_row_context_menu(
     let row_widget = row.clone();
     gesture.connect_pressed(move |gesture, _n_press, x, y| {
         gesture.set_state(gtk::EventSequenceState::Claimed);
-        popup_row_context_menu(
-            &row_widget,
-            item,
-            current_name.clone(),
-            name_stack.clone(),
-            label.clone(),
-            entry.clone(),
-            on_delete.clone(),
-            on_edit_smart_playlist.clone(),
-            x,
-            y,
-        );
+        popup_row_context_menu(&row_widget, context.clone(), x, y);
     });
     row.add_controller(gesture);
 }
@@ -63,19 +53,7 @@ fn remove_secondary_gestures(widget: &gtk::Widget) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn popup_row_context_menu(
-    anchor: &gtk::Widget,
-    item: PlaylistItem,
-    current_name: String,
-    name_stack: gtk::Stack,
-    label: gtk::Label,
-    entry: gtk::Entry,
-    on_delete: DeleteCallbackHolder,
-    on_edit_smart_playlist: EditSmartPlaylistCallbackHolder,
-    x: f64,
-    y: f64,
-) {
+fn popup_row_context_menu(anchor: &gtk::Widget, context: SidebarRowContext, x: f64, y: f64) {
     let popover = gtk::Popover::new();
     popover.set_has_arrow(false);
     popover.add_css_class("compact-context-menu");
@@ -84,10 +62,10 @@ fn popup_row_context_menu(
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.add_css_class("sidebar-context-menu");
 
-    if let PlaylistItem::SmartPlaylist(smart_playlist_id) = item {
+    if let PlaylistItem::SmartPlaylist(smart_playlist_id) = context.item {
         let edit_button = row_action_button("Edit\u{2026}");
         let popover_for_edit = popover.clone();
-        let on_edit = on_edit_smart_playlist.clone();
+        let on_edit = context.on_edit_smart_playlist.clone();
         edit_button.connect_clicked(move |_| {
             popover_for_edit.popdown();
             if let Some(callback) = on_edit.borrow().as_ref() {
@@ -99,25 +77,25 @@ fn popup_row_context_menu(
 
     let rename_button = row_action_button("Rename");
     let popover_for_rename = popover.clone();
-    let name_stack_for_rename = name_stack.clone();
-    let label_for_rename = label.clone();
-    let entry_for_rename = entry.clone();
+    let name_stack_for_rename = context.name_stack.clone();
+    let label_for_rename = context.label.clone();
+    let entry_for_rename = context.entry.clone();
     rename_button.connect_clicked(move |_| {
         popover_for_rename.popdown();
         begin_rename(&name_stack_for_rename, &label_for_rename, &entry_for_rename);
     });
     content.append(&rename_button);
 
-    let delete_button = row_action_button(delete_label_for(item));
+    let delete_button = row_action_button(delete_label_for(context.item));
     let popover_for_delete = popover.clone();
     let anchor_for_delete = anchor.clone();
     delete_button.connect_clicked(move |_| {
         popover_for_delete.popdown();
         confirm_and_delete(
             &anchor_for_delete,
-            item,
-            current_name.clone(),
-            on_delete.clone(),
+            context.item,
+            context.current_name.clone(),
+            context.on_delete.clone(),
         );
     });
     content.append(&delete_button);
