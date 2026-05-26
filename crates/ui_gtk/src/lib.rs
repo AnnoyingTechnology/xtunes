@@ -103,7 +103,11 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     let trun = std::time::Instant::now();
     macro_rules! tlog {
         ($label:expr) => {
-            eprintln!("[TIMING] {:>8.1}ms run: {}", trun.elapsed().as_secs_f64() * 1000.0, $label);
+            eprintln!(
+                "[TIMING] {:>8.1}ms run: {}",
+                trun.elapsed().as_secs_f64() * 1000.0,
+                $label
+            );
         };
     }
     tlog!("entered");
@@ -182,7 +186,10 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
         let runtime = runtime.clone();
         move |app| {
             let tact = std::time::Instant::now();
-            eprintln!("[TIMING]   activate: entered (run+0={:.1}ms)", trun.elapsed().as_secs_f64() * 1000.0);
+            eprintln!(
+                "[TIMING]   activate: entered (run+0={:.1}ms)",
+                trun.elapsed().as_secs_f64() * 1000.0
+            );
             let mpris_command_rx = mpris_command_rx_holder.borrow_mut().take();
             let write_result_rx = write_result_rx_holder.borrow_mut().take();
             let fetch_result_rx = fetch_result_rx_holder.borrow_mut().take();
@@ -194,14 +201,23 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
                 write_result_rx,
                 fetch_result_rx,
             );
-            eprintln!("[TIMING]   activate: build_main_window returned at {:.1}ms", tact.elapsed().as_secs_f64() * 1000.0);
+            eprintln!(
+                "[TIMING]   activate: build_main_window returned at {:.1}ms",
+                tact.elapsed().as_secs_f64() * 1000.0
+            );
             window.present();
-            eprintln!("[TIMING]   activate: window.present() returned at {:.1}ms", tact.elapsed().as_secs_f64() * 1000.0);
+            eprintln!(
+                "[TIMING]   activate: window.present() returned at {:.1}ms",
+                tact.elapsed().as_secs_f64() * 1000.0
+            );
             // Fires after the main loop has finished its current dispatch
             // batch — i.e. roughly when the window has had a chance to map.
             let tact_for_idle = tact;
             gtk::glib::idle_add_local_once(move || {
-                eprintln!("[TIMING]   activate: first idle reached at {:.1}ms", tact_for_idle.elapsed().as_secs_f64() * 1000.0);
+                eprintln!(
+                    "[TIMING]   activate: first idle reached at {:.1}ms",
+                    tact_for_idle.elapsed().as_secs_f64() * 1000.0
+                );
             });
         }
     });

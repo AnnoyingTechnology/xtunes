@@ -44,9 +44,7 @@ pub(crate) fn maybe_auto_resume_library_consolidation(
         let runtime = runtime.borrow();
         let settings = runtime.settings();
         settings.library.management_mode == LibraryManagementMode::CopyAddedFilesIntoLibrary
-            && settings
-                .library_path()
-                .is_some_and(|path| path.is_dir())
+            && settings.library_path().is_some_and(|path| path.is_dir())
             && !runtime.background_task_status().is_running()
     };
     if should_resume {

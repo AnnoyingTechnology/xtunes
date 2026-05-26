@@ -235,13 +235,12 @@ fn open_preferences_window(
         } else {
             Some(PathBuf::from(path_text))
         };
-        let path_is_valid = library_path
-            .as_ref()
-            .is_some_and(|path| path.is_dir());
+        let path_is_valid = library_path.as_ref().is_some_and(|path| path.is_dir());
 
         if check_button.is_active() && !path_is_valid {
-            scan_status_for_organization
-                .set_text(scan_error_text(ApplicationRuntimeError::LibraryPathUnavailable));
+            scan_status_for_organization.set_text(scan_error_text(
+                ApplicationRuntimeError::LibraryPathUnavailable,
+            ));
             suppress_organization_toggle_for_callback.set(true);
             check_button.set_active(false);
             suppress_organization_toggle_for_callback.set(false);

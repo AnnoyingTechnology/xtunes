@@ -79,7 +79,11 @@ pub(crate) fn build_main_window(
     let tbw = std::time::Instant::now();
     macro_rules! tlog {
         ($label:expr) => {
-            eprintln!("[TIMING]     build_main_window+{:>7.1}ms {}", tbw.elapsed().as_secs_f64() * 1000.0, $label);
+            eprintln!(
+                "[TIMING]     build_main_window+{:>7.1}ms {}",
+                tbw.elapsed().as_secs_f64() * 1000.0,
+                $label
+            );
         };
     }
     tlog!("entered");
@@ -388,8 +392,7 @@ pub(crate) fn build_main_window(
     library_changed_holder.replace(Some(library_changed.clone()));
     let scan_requested =
         library_scan_requested_callback(&runtime, library_changed.clone(), &status_bar);
-    let consolidation_requested =
-        library_consolidation_requested_callback(&runtime, &status_bar);
+    let consolidation_requested = library_consolidation_requested_callback(&runtime, &status_bar);
     let import_requested =
         library_import_requested_callback(&runtime, library_changed.clone(), &status_bar);
     install_file_drop_target(&songs_drop_overlay, &songs_drop_indicator, import_requested);
@@ -540,11 +543,8 @@ fn install_playlists_view_activator(
             return;
         }
         let search_text = current_search_text.borrow().clone();
-        let rows = playlist_table_rows_for(
-            &runtime.borrow(),
-            sidebar.current_selection(),
-            &search_text,
-        );
+        let rows =
+            playlist_table_rows_for(&runtime.borrow(), sidebar.current_selection(), &search_text);
         playlists_table.replace_rows(rows);
         playlists_dirty.set(false);
     });

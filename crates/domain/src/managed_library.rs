@@ -319,12 +319,8 @@ mod tests {
         // Simulate the file having been moved to the planner's
         // destination on a previous run; pass the new filename as the
         // source.
-        let second_plan = plan(
-            &metadata,
-            first_plan.file_name.as_str(),
-            &BTreeSet::new(),
-        )
-        .expect("second plan");
+        let second_plan =
+            plan(&metadata, first_plan.file_name.as_str(), &BTreeSet::new()).expect("second plan");
 
         assert_eq!(
             second_plan.relative_path, first_plan.relative_path,

@@ -13,7 +13,11 @@ fn main() {
     let t0 = std::time::Instant::now();
     macro_rules! tlog {
         ($label:expr) => {
-            eprintln!("[TIMING] {:>8.1}ms {}", t0.elapsed().as_secs_f64() * 1000.0, $label);
+            eprintln!(
+                "[TIMING] {:>8.1}ms {}",
+                t0.elapsed().as_secs_f64() * 1000.0,
+                $label
+            );
         };
     }
     tlog!("main() entered");
