@@ -11,7 +11,7 @@ Sustain (`open-sustain/sustain`) is a Linux music player heavily inspired by old
 
 > I was an Apple fanboy during the iTunes golden era (2005-2015).
 > Each new release was a treat and what I still miss years after switching to Linux.
-> Advent of solid LLM agents in late 2025 allowed me to get a substitute rolling.
+> Advent of solid LLM agents in late 2025 allowed me to get a spiritual successor rolling.
 
 This player is not pixel-perfect iTunes taxidermy for a few reasons :
 - each versions brought and took away good things, I'm cherry picking what I believe to be tasteful,
@@ -21,9 +21,7 @@ This player is not pixel-perfect iTunes taxidermy for a few reasons :
 This player is not designed by commity. 
 It's autoritarian, as I believe was the case for most good Apple products.
 
-The interface is working natively in both light and dark modes. 
-It leverages natives features of Gnome to get the right blend of bespoke visual component without abusing GTK or bending Gnome.
-For example native _icons_ are used, so are native _accent color_.
+The interface respects both light and dark modes natively. It leverages GNOME's core features to strike the right balance of bespoke visual components without abusing GTK or fighting the desktop environment. For instance, it uses your native system icons and accent colors out of the box.
 
 The library management has two modes, similar to what iTunes did :
 - "Don't touch my files" (default), which only scans a designated library folder. In this mode, your audio files can only be "enhanced" by populating more ID.3 tags. They are never moved or re-organized.
@@ -38,27 +36,25 @@ organization step rather than falling back to copy/delete.
 
 ## Stack
 
-The stack is Rust, GTK4, GStreamer, and SQLite. It should work on any linux distro. 
-I'm striving for fast, safe and maintainable code.
+* Language: Rust (for speed, safety, and keeping the codebase maintainable)
+* UI: GTK4 (integrated natively with GNOME)
+* Audio Engine: GStreamer
+* Database: SQLite
+
+No Electron, no web wrappers. It’s built to be fast, lightweight, and play nice with pretty much any Linux distro.
 
 ## Features
 
 Implemented:
-- Playlists, Smart playlists, playlists folders
+- Playlists, Smart playlists, playlists folders, Album views, Library management
 
-_probably_ coming later :
-- Import from iTunes/Apple Music (.xml)
-- Import from Rhythmbox
-- BPM detection [drift from iTunes features]
-- Key detection [drift from iTunes features]
-- "Smart shuffle", using a local machine learning model [drift from iTunes features]
-- Duplicates consolidation, to preserve the best audio version, but aggregate tags and attributes [drift from iTunes features]
-- Artwork and ID.3 backfill, to consolidate a library with holes. [drift from iTunes features]
-- Sync to Android [drift from iTunes features]
-- [Export to XDJ](https://github.com/AnnoyingTechnology/rhythmbox-to-pioneer-xdj-exporter) [drift from iTunes features]
-- Encode a CD
-- Convert an existing library file to MP3 320 or Flac
+## Roadmap
 
+- BPM and Key detection
+- "Smart shuffle" powered by a local machine learning model
+- Duplicates consolidation (preserve the best audio version, aggregate tags)
+- Artwork and ID3 backfill
+- Sync to Android / Export to [XDJ](https://github.com/AnnoyingTechnology/rhythmbox-to-pioneer-xdj-exporter)
 
 ## Key locations
 
@@ -77,8 +73,7 @@ cargo clippy --workspace --all-targets
 
 ### Sidenote
 
-A longtime friend who stayed on macOS told me iTunes (now Apple Music) had "lost the plot" and that he'd love a version without all the junk. He told me the latest Apple Music puts the player at the bottom of the window. I didn't believe him, turns out it's true.
-Apple has lost its way, but 2010-era Apple nailed music playback and I know what would improve on that. So there's probably room for a deshitified iTunes on macOS too.
+Apple has lost its way, but 2010-era Apple really nailed music playback. I just wanted to build on top of what made that era great. Honestly, seeing where Apple Music is today, there’s probably room for a deshitified iTunes on macOS, too.
 
 ## No Apple intellectual property
 
