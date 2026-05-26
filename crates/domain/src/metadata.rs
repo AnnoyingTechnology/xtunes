@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TrackMetadata {
@@ -63,6 +63,31 @@ impl TrackMetadata {
         self.sample_rate_hz = scanned.sample_rate_hz;
         self.channels = scanned.channels;
     }
+
+    /// When a file has no Title tag, promote the source file stem to
+    /// the title so the only human-readable name we have is captured
+    /// in stable storage. Called once per track at import / first
+    /// scan; after that the value lives in SQLite and is no longer
+    /// derived from the file's name. This is what stops the managed
+    /// library planner from mutating its own input on every run: with
+    /// title held in the database, the planner never has to fall back
+    /// to `source_path.file_stem()` (which changes after each move),
+    /// so the planned destination converges instead of accumulating
+    /// track-number prefixes one launch at a time.
+    pub fn ensure_title_from_filename(&mut self, path: &Path) {
+        if self
+            .title
+            .as_deref()
+            .is_some_and(|title| !title.trim().is_empty())
+        {
+            return;
+        }
+        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+            && !stem.trim().is_empty()
+        {
+            self.title = Some(stem.to_owned());
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -108,7 +133,51 @@ fn apply_field_change<T: Clone>(target: &mut Option<T>, change: &FieldChange<T>)
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{FieldChange, MetadataChange, TrackMetadata};
+
+    #[test]
+    fn ensure_title_from_filename_promotes_stem_when_title_is_missing() {
+        let mut metadata = TrackMetadata::default();
+
+        metadata.ensure_title_from_filename(Path::new("/library/Singles/Track - Artist.mp3"));
+
+        assert_eq!(metadata.title.as_deref(), Some("Track - Artist"));
+    }
+
+    #[test]
+    fn ensure_title_from_filename_promotes_stem_when_title_is_blank() {
+        let mut metadata = TrackMetadata {
+            title: Some("   ".to_owned()),
+            ..TrackMetadata::default()
+        };
+
+        metadata.ensure_title_from_filename(Path::new("/library/foo.flac"));
+
+        assert_eq!(metadata.title.as_deref(), Some("foo"));
+    }
+
+    #[test]
+    fn ensure_title_from_filename_keeps_existing_title() {
+        let mut metadata = TrackMetadata {
+            title: Some("Real Title".to_owned()),
+            ..TrackMetadata::default()
+        };
+
+        metadata.ensure_title_from_filename(Path::new("/library/should-not-be-used.mp3"));
+
+        assert_eq!(metadata.title.as_deref(), Some("Real Title"));
+    }
+
+    #[test]
+    fn ensure_title_from_filename_is_a_noop_when_path_has_no_filename() {
+        let mut metadata = TrackMetadata::default();
+
+        metadata.ensure_title_from_filename(Path::new("/"));
+
+        assert_eq!(metadata.title, None);
+    }
 
     #[test]
     fn metadata_changes_default_to_unchanged() {

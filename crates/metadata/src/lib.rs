@@ -177,13 +177,14 @@ where
             }
         };
 
-        let metadata = match self.metadata_service.read_metadata(&path) {
+        let mut metadata = match self.metadata_service.read_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) => {
                 scan.failures.push(ScanFailure { path, error });
                 return;
             }
         };
+        metadata.ensure_title_from_filename(&path);
         let rating = match self.metadata_service.read_rating(&path) {
             Ok(Some(rating)) => rating,
             Ok(None) => Rating::unrated(),

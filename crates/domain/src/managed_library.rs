@@ -81,12 +81,19 @@ impl ManagedTrackPathPlanner {
             UNKNOWN_ALBUM,
             self.max_component_bytes,
         );
+        // The title fallback intentionally does NOT read the source
+        // file's name. The planner is called repeatedly across runs
+        // (auto-resume on every launch + retargets after edits), and
+        // each successful move changes what `source_path.file_stem()`
+        // returns. Folding that into the destination produced
+        // accumulating track-number prefixes on every launch — the
+        // very loop this fallback was meant to avoid. Callers populate
+        // `metadata.title` from the source filename at first scan /
+        // import time (see `TrackMetadata::ensure_title_from_filename`),
+        // so by the time the planner runs the database already holds
+        // a stable title for files with no Title tag.
         let title = sanitize_component(
-            input
-                .metadata
-                .title
-                .as_deref()
-                .or_else(|| input.source_path.file_stem().and_then(|stem| stem.to_str())),
+            input.metadata.title.as_deref(),
             UNTITLED,
             self.max_component_bytes,
         );
@@ -260,26 +267,69 @@ mod tests {
     }
 
     #[test]
-    fn planner_uses_deterministic_missing_metadata_fallbacks() {
+    fn planner_uses_untitled_when_metadata_title_is_missing() {
+        // The planner deliberately does NOT consult the source
+        // filename — that would feed its own previous output back
+        // into the next plan and accumulate prefixes on every run.
+        // Callers populate `metadata.title` from the filename at
+        // first scan (see `TrackMetadata::ensure_title_from_filename`),
+        // so by the time the planner runs the database already holds
+        // a stable title; if it doesn't, the file is genuinely
+        // nameless and "Untitled" is the right answer.
         let metadata = TrackMetadata::default();
 
         let plan = plan(&metadata, "Original File.MP3", &BTreeSet::new()).expect("planned");
 
         assert_eq!(plan.artist_component, "Unknown Artist");
         assert_eq!(plan.album_component, "Unknown Album");
-        assert_eq!(plan.file_name, "Original File.MP3");
+        assert_eq!(plan.file_name, "Untitled.MP3");
     }
 
     #[test]
-    fn planner_uses_untitled_when_title_and_source_stem_are_unusable() {
+    fn planner_uses_untitled_when_title_is_unusable() {
         let metadata = TrackMetadata {
             title: Some("///".to_owned()),
             ..TrackMetadata::default()
         };
 
-        let plan = plan(&metadata, "   .flac", &BTreeSet::new()).expect("planned");
+        let plan = plan(&metadata, "anything.flac", &BTreeSet::new()).expect("planned");
 
         assert_eq!(plan.file_name, "Untitled.flac");
+    }
+
+    #[test]
+    fn planner_is_idempotent_under_track_number_prefix_after_move() {
+        // Regression: with the old file-stem fallback, a track whose
+        // tag-title was missing got the source filename as a stand-in
+        // title, then a track-number prefix in the planned name. On
+        // the next run the file was already named "01 X.mp3", so the
+        // fallback yielded "01 X" and the planner produced
+        // "01 01 X.mp3" — moving the same track again, forever. With
+        // the fallback removed, the planner uses "Untitled" and the
+        // destination is stable regardless of what `source_path`
+        // says.
+        let metadata = TrackMetadata {
+            track_number: Some(1),
+            ..TrackMetadata::default()
+        };
+        let first_plan =
+            plan(&metadata, "Original Filename.mp3", &BTreeSet::new()).expect("first plan");
+        assert_eq!(first_plan.file_name, "01 Untitled.mp3");
+
+        // Simulate the file having been moved to the planner's
+        // destination on a previous run; pass the new filename as the
+        // source.
+        let second_plan = plan(
+            &metadata,
+            first_plan.file_name.as_str(),
+            &BTreeSet::new(),
+        )
+        .expect("second plan");
+
+        assert_eq!(
+            second_plan.relative_path, first_plan.relative_path,
+            "planner output must converge between runs"
+        );
     }
 
     #[test]

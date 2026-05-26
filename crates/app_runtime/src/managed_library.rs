@@ -373,10 +373,11 @@ impl LibraryImportContext {
                 continue;
             }
 
-            let metadata = self
+            let mut metadata = self
                 .metadata_service
                 .read_metadata(&source_path)
                 .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
+            metadata.ensure_title_from_filename(&source_path);
             let rating = self
                 .metadata_service
                 .read_rating(&source_path)
@@ -501,10 +502,11 @@ impl LibraryImportContext {
                 continue;
             }
 
-            let metadata = self
+            let mut metadata = self
                 .metadata_service
                 .read_metadata(&source_path)
                 .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
+            metadata.ensure_title_from_filename(&source_path);
             let rating = self
                 .metadata_service
                 .read_rating(&source_path)

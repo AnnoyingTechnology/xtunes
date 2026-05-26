@@ -263,7 +263,9 @@ fn open_preferences_window(
             .dispatch(ApplicationCommand::UpdateSettings(settings))
         {
             Ok(()) if check_button.is_active() => {
-                match consolidation_requested_for_organization() {
+                match consolidation_requested_for_organization(
+                    crate::library_consolidation::ConsolidationTrigger::UserAction,
+                ) {
                     Ok(()) => {
                         path_entry_for_organization_sensitivity.set_sensitive(false);
                         folder_button_for_organization_sensitivity.set_sensitive(false);

@@ -489,6 +489,24 @@ impl ApplicationRuntime {
         &self.background_task_status
     }
 
+    /// Resets the background-task status back to `Idle`, but only if
+    /// the task is currently sitting in a *Completed variant. Used by
+    /// the UI to dismiss a finished-but-uninteresting result (a
+    /// consolidation auto-resume that found nothing to do) without
+    /// having to display it. Running and Failed states are left
+    /// untouched — silencing an in-flight task or a failure would
+    /// hide information the user genuinely needs.
+    pub fn dismiss_completed_background_task_status(&mut self) {
+        if matches!(
+            self.background_task_status,
+            BackgroundTaskStatus::LibraryScanCompleted(_)
+                | BackgroundTaskStatus::LibraryImportCompleted(_)
+                | BackgroundTaskStatus::LibraryConsolidationCompleted(_)
+        ) {
+            self.background_task_status = BackgroundTaskStatus::Idle;
+        }
+    }
+
     pub fn request_library_consolidation_cancellation(&self) {
         if let Some(cancellation_requested) = &self.library_consolidation_cancellation {
             cancellation_requested.store(true, Ordering::SeqCst);
@@ -652,6 +670,7 @@ impl Default for ApplicationRuntime {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic, reason = "test failures use panic! to report context")]
 mod tests {
     use std::{
         path::{Path, PathBuf},
