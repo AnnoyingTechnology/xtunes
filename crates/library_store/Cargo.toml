@@ -10,7 +10,7 @@ name = "sustain_library_store"
 path = "src/lib.rs"
 
 [dependencies]
-rusqlite = { version = "0.39.0", features = ["bundled"] }
+rusqlite = { version = "0.40.0", features = ["bundled"] }
 sustain-domain = { path = "../domain" }
 
 [lints]
