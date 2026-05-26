@@ -1,9 +1,10 @@
 # Sustain Project Basis
 
-`Sustain` is a Linux-only, Debian-first music library/player intended to replace
-Rhythmbox for a single primary user. The product target is an
-iTunes-like desktop music manager, roughly aligned with the dense, predictable
-library workflow of iTunes 11, circa 2012.
+`Sustain` is a Linux-only, Debian-first music library/player for a single
+primary user. The product target is an iTunes-like desktop music manager,
+roughly aligned with the dense, predictable library workflow of iTunes 11,
+circa 2012. Sustain is its own product — not a clone of any prior Linux
+player, not a continuation of any other project's UX.
 
 Project and application naming:
 
@@ -11,9 +12,6 @@ Project and application naming:
 - Rust binary name: `sustain`
 - Rust crate/package prefix: `sustain-*` / `sustain_*`
 - Linux application id: `io.github.open_sustain.sustain`
-
-Rhythmbox is treated as an import source only. Do not design runtime features
-that depend on Rhythmbox internals, plugins, themes, or UI behavior.
 
 ## Approved Stack
 
@@ -59,7 +57,6 @@ Prioritize:
 - first-class native GTK light and dark appearance; do not add an Sustain theme picker
 - fast search/filtering over a large local music library
 - settings/preferences
-- robust import from Rhythmbox library data
 - durable SQLite schema with explicit migrations
 - clean media-key and MPRIS integration
 - boring, maintainable Linux-native dependencies
