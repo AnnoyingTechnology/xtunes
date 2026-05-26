@@ -17,10 +17,10 @@ use sustain_app_runtime::{
 
 use super::{
     ALBUMS_VIEW, APP_ID, ApplicationCommand, ApplicationRuntime, ArtworkFetchResultReceiver,
-    LibraryChangedCallback, LibraryChangedHolder, MetadataWriteResultReceiver,
-    MprisCommandReceiver, PLAYLISTS_VIEW, PlaybackChangedCallback, SONGS_VIEW, SharedMprisService,
-    SharedRuntime, ShowAlbumAction, ShowAlbumHolder, TrackRowChangedCallback,
-    TrackRowChangedHolder,
+    AvailabilityChangedCallback, LibraryChangedCallback, LibraryChangedHolder,
+    MetadataWriteResultReceiver, MprisCommandReceiver, PLAYLISTS_VIEW, PlaybackChangedCallback,
+    SONGS_VIEW, SharedMprisService, SharedRuntime, ShowAlbumAction, ShowAlbumHolder,
+    TrackRowChangedCallback, TrackRowChangedHolder,
     accent::install_accent_css,
     albums::AlbumsView,
     app_css::install_app_css,
@@ -315,6 +315,7 @@ pub(crate) fn build_main_window(
         visible_summary_refresh.clone(),
         &current_search_text,
     );
+    install_track_availability_observer(&runtime, &songs_table, &playlists_table);
     let track_row_changed = track_row_changed_callback(TrackRowChangedContext {
         runtime: &runtime,
         songs_table: &songs_table,
@@ -600,6 +601,44 @@ fn library_changed_callback(
         sidebar.refresh();
         visible_summary_refresh();
     })
+}
+
+/// Wires the runtime's `track_availability_observer` to a narrow
+/// per-row refresh on both track tables. The runtime fires this
+/// observer after every lazy `is_missing` flip (failed-play
+/// detection, library-path re-stat, consolidation source miss).
+/// The deferred closure snapshots `(track_id, is_missing)` from the
+/// runtime and asks each loaded table to patch matching rows in
+/// place; never a `replace_rows`, so scroll/focus/selection survive
+/// — see the design note on [`AvailabilityChangedCallback`].
+fn install_track_availability_observer(
+    runtime: &SharedRuntime,
+    songs_table: &TrackTable,
+    playlists_table: &TrackTable,
+) {
+    let runtime_for_observer = runtime.clone();
+    let songs_table = songs_table.clone();
+    let playlists_table = playlists_table.clone();
+    let refresh: AvailabilityChangedCallback = Rc::new(move || {
+        let availability: HashMap<TrackId, bool> = runtime_for_observer
+            .borrow()
+            .library_tracks()
+            .iter()
+            .map(|track| (track.id, track.location.is_missing()))
+            .collect();
+        let lookup = |id: TrackId| availability.get(&id).copied();
+        songs_table.refresh_missing_flags(&lookup);
+        playlists_table.refresh_missing_flags(&lookup);
+    });
+    runtime
+        .borrow_mut()
+        .set_track_availability_observer(Box::new(move || {
+            // The runtime is mid-borrow when this fires — defer
+            // the refresh onto the GLib main loop so the closure
+            // can re-borrow the runtime read-only without panicking.
+            let refresh = refresh.clone();
+            glib::idle_add_local_once(move || refresh());
+        }));
 }
 
 fn visible_summary_refresh_callback(

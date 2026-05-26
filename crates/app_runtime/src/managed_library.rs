@@ -19,8 +19,8 @@ use std::{
 
 use sustain_domain::{
     FieldChange, LibraryManagementMode, ManagedTrackPathInput, ManagedTrackPathPlanner,
-    MetadataChange, PlayStatistics, Rating, Track, TrackContentHash, TrackId, TrackLocation,
-    TrackRelativePath,
+    MetadataChange, PlayStatistics, Rating, Track, TrackAvailability, TrackContentHash, TrackId,
+    TrackLocation, TrackRelativePath,
 };
 use sustain_metadata::{audio_format_from_path, hash_file_content};
 
@@ -221,8 +221,23 @@ impl ApplicationRuntime {
     pub fn apply_library_consolidation_result(&mut self, result: LibraryConsolidationResult) {
         let summary = result.summary;
         self.last_library_consolidation_summary = Some(summary.clone());
+        // `result.tracks` now carries both the relocated (still
+        // available) tracks AND any rows whose `is_missing` flag the
+        // planner flipped because the source file had vanished —
+        // fire the availability observer so the UI repaints the
+        // status column on those rows without the cost of a full
+        // table rebuild.
+        let flipped_availability = result.tracks.iter().any(|incoming| {
+            self.library_tracks
+                .iter()
+                .find(|existing| existing.id == incoming.id)
+                .is_some_and(|existing| existing.location.is_missing() != incoming.location.is_missing())
+        });
         replace_library_tracks_by_id(&mut self.library_tracks, result.tracks);
         self.refresh_playback_queue_track_ids();
+        if flipped_availability {
+            self.notify_track_availability_observer();
+        }
         self.library_consolidation_cancellation = None;
         self.background_task_status = crate::BackgroundTaskStatus::Idle;
         if let Some(id) = self.library_consolidation_notification_id.take() {
@@ -658,10 +673,23 @@ impl LibraryConsolidationContext {
         recover_library_consolidation_journal(&library_path, self.library_store.as_ref())?;
 
         let plan = plan_library_consolidation(&library_path, &self.existing_tracks)?;
+
+        // Persist any `is_missing` flag corrections discovered during
+        // planning before touching any files on disk: the flag flip
+        // is durable even if a later move fails, and the result we
+        // return always carries the corrected tracks so the runtime's
+        // in-memory copy matches SQLite. Done in one transaction via
+        // `save_tracks` to keep the cost bounded on a 10k library.
+        if !plan.missing_track_updates.is_empty() {
+            self.library_store
+                .save_tracks(&plan.missing_track_updates)
+                .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
+        }
+
         if plan.moves.is_empty() {
             remove_consolidation_journal_if_present(&library_path)?;
             return Ok(LibraryConsolidationResult {
-                tracks: Vec::new(),
+                tracks: plan.missing_track_updates,
                 summary: LibraryConsolidationSummary {
                     planned_tracks: 0,
                     moved_tracks: 0,
@@ -674,7 +702,7 @@ impl LibraryConsolidationContext {
 
         write_consolidation_journal(&library_path, &plan.moves)?;
 
-        let mut updated_tracks = Vec::new();
+        let mut updated_tracks = plan.missing_track_updates;
         let mut moved_tracks = 0;
         let mut cancelled = false;
 
@@ -726,7 +754,18 @@ impl LibraryConsolidationContext {
 struct LibraryConsolidationPlan {
     moves: Vec<PlannedLibraryConsolidationMove>,
     already_organized_tracks: usize,
+    /// Total number of tracks whose source file was missing or
+    /// non-regular at plan time — surfaced in the
+    /// [`LibraryConsolidationSummary`] so the user sees a stable
+    /// count of orphaned rows regardless of whether the SQLite flag
+    /// was already correct.
     missing_tracks: usize,
+    /// Subset of the missing tracks whose persisted `is_missing` flag
+    /// was still `false` at plan time. The runner flips and persists
+    /// these in a single transaction so subsequent reads of SQLite
+    /// see the corrected availability, and the per-row warning icon
+    /// in the table lights up.
+    missing_track_updates: Vec<Track>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -751,16 +790,30 @@ fn plan_library_consolidation(
     let mut moves = Vec::new();
     let mut already_organized_tracks = 0;
     let mut missing_tracks = 0;
+    let mut missing_track_updates: Vec<Track> = Vec::new();
+    let mut record_missing_track = |track: &Track| {
+        missing_tracks += 1;
+        // Only push an update when the persisted flag is actually
+        // wrong; an already-missing row needs no rewrite. The runner
+        // commits the whole batch in a single transaction so the
+        // table's missing-file indicator lights up on the very next
+        // refresh.
+        if !track.location.is_missing() {
+            let mut updated = track.clone();
+            updated.location = updated.location.with_availability(TrackAvailability::Missing);
+            missing_track_updates.push(updated);
+        }
+    };
 
     for track in existing_tracks {
         let source_relative_path = track.location.relative_path.clone();
         let source_path = track.location.absolute_path(library_path);
         let Ok(source_metadata) = fs::symlink_metadata(&source_path) else {
-            missing_tracks += 1;
+            record_missing_track(track);
             continue;
         };
         if !source_metadata.file_type().is_file() {
-            missing_tracks += 1;
+            record_missing_track(track);
             continue;
         }
 
@@ -798,6 +851,7 @@ fn plan_library_consolidation(
         moves,
         already_organized_tracks,
         missing_tracks,
+        missing_track_updates,
     })
 }
 

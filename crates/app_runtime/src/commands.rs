@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use sustain_domain::{ApplicationCommand, LibraryManagementMode};
+use sustain_domain::{ApplicationCommand, LibraryManagementMode, Track};
 
-use crate::{ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult};
+use crate::{
+    ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult, NotificationCategory,
+    NotificationSeverity, library_scan, notifications,
+};
 
 impl ApplicationRuntime {
     pub fn handle_command(&mut self, command: ApplicationCommand) -> ApplicationRuntimeResult<()> {
@@ -15,6 +18,16 @@ impl ApplicationRuntime {
                 if self.background_task_status.is_running()
                     && settings.library != self.settings.library
                 {
+                    // The only narrow exception is the management-mode
+                    // flip from managed → unmanaged DURING an active
+                    // consolidation, same library path: the user is
+                    // explicitly aborting the organization job they
+                    // just started. Every other library change — and
+                    // in particular any `library.path` change — is
+                    // rejected outright, because changing the root
+                    // mid-flight would point persisted track paths at
+                    // a different filesystem location than the one the
+                    // task is still moving files into.
                     let cancellation_allowed = self
                         .background_task_status
                         .is_library_consolidation_running()
@@ -30,16 +43,28 @@ impl ApplicationRuntime {
                         return Err(ApplicationRuntimeError::BackgroundTaskRunning);
                     }
                 }
+                let previous_library_path = self.settings.library.path.clone();
                 if let Some(settings_store) = &self.settings_store {
                     settings_store
                         .save_settings(settings.clone())
                         .map_err(|_| ApplicationRuntimeError::SettingsSaveFailed)?;
                 }
                 self.settings = settings;
-                // Per the documented lazy-availability contract on
-                // load_library_tracks, settings changes do not stat
-                // tracks. Reconciliation is the scan's job (or lazy
-                // detection on touch).
+                // Settings changes that do NOT alter `library.path`
+                // never stat tracks — toggling the management-mode
+                // checkbox in Preferences must not freeze the UI on a
+                // 10k library. A library path change is the exception:
+                // it is structural reconciliation (semantically closer
+                // to a scan than to a preference toggle), the user
+                // just typed/picked the new root, and the cost is
+                // bounded by the library size.
+                let new_library_path = self.settings.library.path.clone();
+                if let (Some(previous), Some(new)) =
+                    (previous_library_path.as_ref(), new_library_path.as_ref())
+                    && previous != new
+                {
+                    self.reconcile_track_availability_after_library_path_change(new.clone())?;
+                }
             }
             ApplicationCommand::ScanLibrary { library_path } => {
                 self.scan_library(library_path)?;
@@ -136,6 +161,63 @@ impl ApplicationRuntime {
                 self.add_external_library_items(paths)?;
             }
         }
+
+        Ok(())
+    }
+
+    /// Re-stat every persisted track against `new_library_path` and
+    /// flush the resulting availability flags to SQLite, then surface
+    /// the outcome as an ephemeral notification. Called once per
+    /// accepted library-path change (never on no-op updates, never on
+    /// management-mode toggles), so the user gets an immediate, honest
+    /// picture of what is reachable under the new root instead of
+    /// having to wait until they click a track to discover it is gone.
+    fn reconcile_track_availability_after_library_path_change(
+        &mut self,
+        new_library_path: std::path::PathBuf,
+    ) -> ApplicationRuntimeResult<()> {
+        let total = self.library_tracks.len();
+        let mut changed: Vec<Track> = Vec::new();
+        let mut newly_missing = 0usize;
+        let mut reconciled = Vec::with_capacity(total);
+        for track in std::mem::take(&mut self.library_tracks) {
+            let was_missing = track.location.is_missing();
+            let reconciled_track =
+                library_scan::track_with_current_availability(&new_library_path, track);
+            let now_missing = reconciled_track.location.is_missing();
+            if was_missing != now_missing {
+                changed.push(reconciled_track.clone());
+                if now_missing {
+                    newly_missing += 1;
+                }
+            }
+            reconciled.push(reconciled_track);
+        }
+        self.library_tracks = reconciled;
+
+        if !changed.is_empty()
+            && let Some(store) = self.library_store.as_ref()
+        {
+            store
+                .save_tracks(&changed)
+                .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
+        }
+
+        if !changed.is_empty() {
+            self.refresh_playback_queue_track_ids();
+            self.notify_track_availability_observer();
+        }
+
+        let severity = if newly_missing > 0 {
+            NotificationSeverity::Warning
+        } else {
+            NotificationSeverity::Info
+        };
+        self.push_ephemeral_notification(
+            NotificationCategory::LibraryScan,
+            severity,
+            notifications::library_path_change_outcome_text(newly_missing, total),
+        );
 
         Ok(())
     }

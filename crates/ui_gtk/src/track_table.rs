@@ -149,6 +149,45 @@ impl TrackTable {
         false
     }
 
+    /// Walk the underlying store once, refreshing each row's
+    /// `is_missing` flag from `lookup`, then repaint the status icon
+    /// on whichever rows are currently bound to a visible cell. Never
+    /// emits `gio::ListModel::items-changed`: scroll position, focus,
+    /// and selection survive a missing-flag flip — the table did not
+    /// restructure, only the per-row status-column rendering needs to
+    /// change. The same pattern the rating cell uses for its own
+    /// click-driven updates (see `update_row`).
+    ///
+    /// Cost is bounded by `store.n_items()` for the data sync plus
+    /// the visible-row count for the icon repaint, never library-wide
+    /// re-bind cost. Callers pass `lookup` returning `None` for ids
+    /// they don't know about; those rows are left untouched.
+    pub(crate) fn refresh_missing_flags(&self, lookup: &dyn Fn(TrackId) -> Option<bool>) {
+        let n_items = self.store.n_items();
+        for position in 0..n_items {
+            let Some(row_object) = self
+                .store
+                .item(position)
+                .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+            else {
+                continue;
+            };
+            let track_id = match row_object.try_borrow::<TrackTableRow>() {
+                Ok(row) => row.track_id,
+                Err(_) => continue,
+            };
+            let Some(track_id) = track_id else { continue };
+            let Some(now_missing) = lookup(track_id) else {
+                continue;
+            };
+            let mut row = row_object.borrow_mut::<TrackTableRow>();
+            if row.is_missing != now_missing {
+                row.is_missing = now_missing;
+            }
+        }
+        self.status_bindings.refresh(self.playing_track_id.get());
+    }
+
     /// Returns the [`TrackId`]s of the currently selected rows, in the
     /// table's current sort order. Empty when the table is empty or no
     /// rows are selected.

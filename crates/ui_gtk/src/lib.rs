@@ -89,6 +89,16 @@ pub(crate) type LibraryChangedCallback = Rc<dyn Fn()>;
 pub(crate) type LibraryChangedHolder = Rc<RefCell<Option<LibraryChangedCallback>>>;
 pub(crate) type TrackRowChangedCallback = Rc<dyn Fn(sustain_app_runtime::TrackId)>;
 pub(crate) type TrackRowChangedHolder = Rc<RefCell<Option<TrackRowChangedCallback>>>;
+/// Re-sync the `is_missing` flag on every loaded row from the
+/// runtime's view of the library, repaint visible status icons, and
+/// leave scroll/focus/selection untouched. Fired after operations
+/// the runtime can use to flip availability without rebuilding the
+/// table (a lazy-detection failed play, a library-path change that
+/// re-stats existing tracks). The bulk-rebuild
+/// [`LibraryChangedCallback`] would also work, but it splices the
+/// store and thus blows scroll position — unacceptable when the
+/// table content itself has not structurally changed.
+pub(crate) type AvailabilityChangedCallback = Rc<dyn Fn()>;
 pub(crate) type PlaybackChangedCallback = Rc<dyn Fn()>;
 pub(crate) type ShowAlbumAction = Rc<dyn Fn(sustain_app_runtime::TrackId)>;
 pub(crate) type ShowAlbumHolder = Rc<RefCell<Option<ShowAlbumAction>>>;

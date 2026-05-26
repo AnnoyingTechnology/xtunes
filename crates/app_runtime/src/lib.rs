@@ -58,8 +58,9 @@ pub use notifications::{
     EPHEMERAL_NOTIFICATION_DURATION, NOTIFICATION_QUEUE_HARD_CAP, NOTIFICATION_TRANSITION,
     Notification, NotificationCategory, NotificationCenter, NotificationId, NotificationKind,
     NotificationSeverity, library_consolidation_outcome_text, library_consolidation_running_text,
-    library_import_outcome_text, library_import_running_text, library_scan_outcome_text,
-    library_scan_running_text, runtime_error_text,
+    library_import_outcome_text, library_import_running_text,
+    library_path_change_outcome_text, library_scan_outcome_text, library_scan_running_text,
+    runtime_error_text,
 };
 
 pub type ApplicationRuntimeResult<T> = Result<T, ApplicationRuntimeError>;
@@ -240,12 +241,28 @@ pub struct ApplicationRuntime {
     // fires, so calling back into the runtime synchronously would
     // panic).
     notification_observer: Option<NotificationObserver>,
+    // Fires whenever the runtime flips any track's `is_missing` flag
+    // outside the scan path (e.g. lazy detection on a failed play, a
+    // library-path change that re-stats every track). The UI shell
+    // installs this once to drive its narrow per-row icon refresh —
+    // see the design note on [`TrackAvailabilityObserver`].
+    track_availability_observer: Option<TrackAvailabilityObserver>,
 }
 
 /// Callback fired after every mutation of [`NotificationCenter`]. Held
 /// as a trait object so feature crates can plug GTK-specific dispatch
 /// without coupling `app_runtime` to GTK.
 pub type NotificationObserver = Box<dyn Fn()>;
+
+/// Callback fired whenever the runtime flips at least one persisted
+/// track's `is_missing` flag *outside* the bulk scan path. The
+/// observer receives no payload — the UI is expected to re-read
+/// [`ApplicationRuntime::library_tracks`] and patch its own row data
+/// for the (typically narrow) set of tracks whose availability now
+/// differs. Like [`NotificationObserver`], the runtime is mid-borrow
+/// when this fires; observers must defer their work onto the main
+/// loop (e.g. `glib::idle_add_local_once`).
+pub type TrackAvailabilityObserver = Box<dyn Fn()>;
 
 impl ApplicationRuntime {
     pub fn new() -> Self {
@@ -280,6 +297,7 @@ impl ApplicationRuntime {
             clock: Arc::new(SystemClock),
             notifications: NotificationCenter::new(),
             notification_observer: None,
+            track_availability_observer: None,
         }
     }
 
@@ -321,6 +339,7 @@ impl ApplicationRuntime {
             clock: Arc::new(SystemClock),
             notifications: NotificationCenter::new(),
             notification_observer: None,
+            track_availability_observer: None,
         })
     }
 
@@ -624,6 +643,20 @@ impl ApplicationRuntime {
 
     fn notify_notification_observer(&self) {
         if let Some(observer) = &self.notification_observer {
+            observer();
+        }
+    }
+
+    /// Install the observer fired after every lazy availability flip
+    /// (failed-play detection, library-path re-stat). The observer
+    /// must not synchronously re-enter the runtime — defer onto the
+    /// main loop, same contract as [`set_notification_observer`].
+    pub fn set_track_availability_observer(&mut self, observer: TrackAvailabilityObserver) {
+        self.track_availability_observer = Some(observer);
+    }
+
+    pub(crate) fn notify_track_availability_observer(&self) {
+        if let Some(observer) = &self.track_availability_observer {
             observer();
         }
     }
@@ -1581,14 +1614,14 @@ mod tests {
     }
 
     #[test]
-    fn update_settings_does_not_re_stat_existing_tracks() {
-        // The documented lazy-availability contract (see
-        // load_library_tracks) requires that settings changes never
-        // touch the filesystem on a per-track basis. Reconciliation
-        // belongs to the scan path (or lazy on-touch detection), not
-        // to UpdateSettings — otherwise toggling a setting on a
-        // large library would freeze the UI thread for the duration
-        // of N stat() calls.
+    fn update_settings_does_not_re_stat_existing_tracks_when_path_is_unchanged() {
+        // UpdateSettings re-stats tracks ONLY when the user changes
+        // `library.path` (see
+        // `update_settings_re_stats_existing_tracks_when_library_path_changes`).
+        // Every other settings mutation — management-mode toggle,
+        // playback volume, anything stored on `UserSettings` — must
+        // stay free of stat() syscalls so toggling a Preferences
+        // checkbox on a 10k library does not freeze the UI thread.
         let library_root = unique_test_directory();
         std::fs::create_dir_all(&library_root).expect("create test library");
         let track_path = library_root.join("track.flac");
@@ -1620,6 +1653,190 @@ mod tests {
         assert!(!runtime.library_tracks()[0].location.is_missing());
 
         std::fs::remove_dir_all(library_root).expect("remove test library");
+    }
+
+    #[test]
+    fn update_settings_re_stats_existing_tracks_when_library_path_changes() {
+        // A library-path change is structural reconciliation: every
+        // persisted track must be re-stat'd against the new root and
+        // its availability flag flushed to SQLite, so the missing-file
+        // indicator lights up the moment the user confirms the new
+        // path instead of waiting for the next scan.
+        let old_root = unique_test_directory();
+        let new_root = unique_test_directory();
+        std::fs::create_dir_all(&old_root).expect("create old library root");
+        std::fs::create_dir_all(&new_root).expect("create new library root");
+        std::fs::write(old_root.join("present.flac"), b"audio").expect("write present file");
+        std::fs::write(new_root.join("present.flac"), b"audio").expect("mirror present file");
+        // `vanished.flac` lives under the OLD root only. After the
+        // path change, its persisted relative path resolves to a
+        // non-existent file under `new_root`.
+        std::fs::write(old_root.join("vanished.flac"), b"audio").expect("write vanished file");
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let present_id = track_id(101);
+        let vanished_id = track_id(102);
+        assert_eq!(
+            store.save_track(test_track(present_id, "present.flac")),
+            Ok(())
+        );
+        assert_eq!(
+            store.save_track(test_track(vanished_id, "vanished.flac")),
+            Ok(())
+        );
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(old_root.clone()))),
+        ))
+        .expect("load settings")
+        .with_library_services(store.clone(), Arc::new(TestMetadataService))
+        .expect("library services initialize");
+
+        for track in runtime.library_tracks() {
+            assert!(!track.location.is_missing());
+        }
+
+        let new_settings = UserSettings::with_library_path(Some(new_root.clone()));
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::UpdateSettings(new_settings)),
+            Ok(())
+        );
+
+        let present = runtime
+            .library_tracks()
+            .iter()
+            .find(|track| track.id == present_id)
+            .expect("present track survives path change");
+        let vanished = runtime
+            .library_tracks()
+            .iter()
+            .find(|track| track.id == vanished_id)
+            .expect("vanished track survives path change");
+        assert!(!present.location.is_missing(), "mirrored file resolves");
+        assert!(
+            vanished.location.is_missing(),
+            "absent file flips to Missing"
+        );
+
+        // SQLite is the source of truth — the flag must be durable
+        // across a reload, not merely flipped in memory.
+        let reloaded = store
+            .track(vanished_id)
+            .expect("reload vanished")
+            .expect("vanished row exists");
+        assert!(reloaded.location.is_missing());
+
+        std::fs::remove_dir_all(old_root).expect("remove old library root");
+        std::fs::remove_dir_all(new_root).expect("remove new library root");
+    }
+
+    #[test]
+    fn play_track_flips_is_missing_when_file_has_vanished() {
+        // Lazy availability detection: clicking a track whose file is
+        // no longer on disk must (a) return TrackUnavailable so the
+        // UI shows the missing-file feedback, and (b) flip the
+        // persisted `is_missing` flag so the table's warning
+        // indicator lights up immediately and subsequent reads of
+        // SQLite see the corrected state.
+        let library_root = unique_test_directory();
+        std::fs::create_dir_all(&library_root).expect("create library root");
+        let track_path = library_root.join("ghost.flac");
+        std::fs::write(&track_path, b"audio").expect("write track");
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let id = track_id(33);
+        assert_eq!(store.save_track(test_track(id, "ghost.flac")), Ok(()));
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(library_root.clone()))),
+        ))
+        .expect("load settings")
+        .with_library_services(store.clone(), Arc::new(TestMetadataService))
+        .expect("library services initialize");
+
+        assert!(!runtime.library_tracks()[0].location.is_missing());
+
+        std::fs::remove_file(&track_path).expect("remove track");
+
+        let outcome = runtime.handle_command(ApplicationCommand::Playback(
+            PlaybackCommand::PlayTrack {
+                track_id: id,
+                queue: sustain_domain::PlaybackQueueRequest::Library,
+            },
+        ));
+        assert_eq!(outcome, Err(ApplicationRuntimeError::TrackUnavailable));
+        assert!(runtime.library_tracks()[0].location.is_missing());
+
+        let reloaded = store
+            .track(id)
+            .expect("reload track")
+            .expect("track row exists");
+        assert!(reloaded.location.is_missing());
+
+        std::fs::remove_dir_all(library_root).expect("remove library root");
+    }
+
+    #[test]
+    fn play_track_recovers_availability_when_file_reappears() {
+        // The `is_missing` flag is a cache of the last observed
+        // availability, never a gate. Once a track has been flipped
+        // to Missing, a subsequent play attempt must still re-stat
+        // the path: if the file is back (rename undone, volume
+        // remounted, restored from trash), the flag flips back to
+        // Available and playback proceeds. Without this, a typo'd
+        // rename would soft-brick the row forever.
+        let library_root = unique_test_directory();
+        std::fs::create_dir_all(&library_root).expect("create library root");
+        let track_path = library_root.join("returning.flac");
+        std::fs::write(&track_path, b"audio").expect("write track");
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let id = track_id(34);
+        assert_eq!(store.save_track(test_track(id, "returning.flac")), Ok(()));
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(library_root.clone()))),
+        ))
+        .expect("load settings")
+        .with_library_services(store.clone(), Arc::new(TestMetadataService))
+        .expect("library services initialize")
+        .with_playback_service(Box::new(NullPlaybackService::new()));
+
+        // Step 1: remove the file, fail a play, observe the flag flip.
+        std::fs::remove_file(&track_path).expect("remove track");
+        let first = runtime.handle_command(ApplicationCommand::Playback(
+            PlaybackCommand::PlayTrack {
+                track_id: id,
+                queue: sustain_domain::PlaybackQueueRequest::Library,
+            },
+        ));
+        assert_eq!(first, Err(ApplicationRuntimeError::TrackUnavailable));
+        assert!(runtime.library_tracks()[0].location.is_missing());
+
+        // Step 2: put the file back. The flag still says Missing —
+        // nothing else has touched the row.
+        std::fs::write(&track_path, b"audio").expect("restore track");
+        assert!(runtime.library_tracks()[0].location.is_missing());
+
+        // Step 3: a fresh play succeeds because `play_track` re-stats
+        // the resolved path; both the in-memory and persisted flags
+        // flip back to Available.
+        let second = runtime.handle_command(ApplicationCommand::Playback(
+            PlaybackCommand::PlayTrack {
+                track_id: id,
+                queue: sustain_domain::PlaybackQueueRequest::Library,
+            },
+        ));
+        assert_eq!(second, Ok(()));
+        assert!(!runtime.library_tracks()[0].location.is_missing());
+
+        let reloaded = store
+            .track(id)
+            .expect("reload track")
+            .expect("track row exists");
+        assert!(!reloaded.location.is_missing());
+
+        std::fs::remove_dir_all(library_root).expect("remove library root");
     }
 
     #[test]

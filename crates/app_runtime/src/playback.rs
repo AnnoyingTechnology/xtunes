@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use sustain_domain::{
     PlaybackCommand, PlaybackQueue, PlaybackQueueRequest, PlaybackQueueSource, PlaybackSession,
-    PlaybackState, TrackId, TrackPlaybackSource,
+    PlaybackState, TrackAvailability, TrackId, TrackPlaybackSource,
 };
 use sustain_playback::PlaybackService;
 
@@ -122,6 +122,31 @@ impl ApplicationRuntime {
 
     fn play_track(&mut self, track_id: TrackId) -> ApplicationRuntimeResult<()> {
         let source = self.track_playback_source(track_id)?;
+        // Lazy availability reconciliation: every play attempt
+        // re-stats the resolved path and brings the persisted
+        // `is_missing` flag into agreement with what is actually on
+        // disk right now. The flag is therefore a *cache* of the
+        // last observed availability — never a gate that prevents
+        // future plays. This is how a track recovers after the user
+        // renames its file back into place: the click flows through
+        // here, the `Path::exists` check sees the file again, the
+        // flag flips back to Available, and playback proceeds.
+        let exists = source.path.exists();
+        let recorded_missing = self
+            .library_tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .map(|track| track.location.is_missing())
+            .unwrap_or(false);
+        match (exists, recorded_missing) {
+            (false, true) => return Err(ApplicationRuntimeError::TrackUnavailable),
+            (false, false) => {
+                self.mark_track_missing(track_id)?;
+                return Err(ApplicationRuntimeError::TrackUnavailable);
+            }
+            (true, true) => self.mark_track_available(track_id)?,
+            (true, false) => {}
+        }
         self.playback_service()?
             .play_track(source)
             .map_err(|_| ApplicationRuntimeError::PlaybackFailed)?;
@@ -142,6 +167,14 @@ impl ApplicationRuntime {
         Ok(())
     }
 
+    /// Resolves the absolute on-disk path for `track_id`. Does NOT
+    /// consult the persisted `is_missing` flag — that flag is a
+    /// cache of the last observed availability, and the caller
+    /// ([`play_track`]) reconciles it against the live filesystem on
+    /// every play. Returning `TrackUnavailable` here therefore means
+    /// the runtime cannot even form a candidate path (track id not
+    /// in the library, or no library root configured), not that the
+    /// file is necessarily gone.
     fn track_playback_source(
         &self,
         track_id: TrackId,
@@ -149,12 +182,59 @@ impl ApplicationRuntime {
         let track = self
             .library_tracks
             .iter()
-            .find(|track| track.id == track_id && !track.location.is_missing())
+            .find(|track| track.id == track_id)
             .ok_or(ApplicationRuntimeError::TrackUnavailable)?;
         let path = self
             .absolute_track_path(track)
             .ok_or(ApplicationRuntimeError::TrackUnavailable)?;
         Ok(TrackPlaybackSource::new(track_id, path))
+    }
+
+    /// Flip a track's persisted availability to `Missing` after a live
+    /// playback attempt has proven the file is gone. Persists the
+    /// updated row and rebuilds the playback queue so the missing
+    /// track stops appearing in next/previous navigation. No-op when
+    /// the track is already flagged missing or no library store is
+    /// installed.
+    fn mark_track_missing(&mut self, track_id: TrackId) -> ApplicationRuntimeResult<()> {
+        self.set_track_availability(track_id, TrackAvailability::Missing)
+    }
+
+    /// Counterpart to [`mark_track_missing`]: flip a previously-missing
+    /// track back to `Available` once a live playback attempt has
+    /// proven the file is reachable again (e.g. the user renamed it
+    /// back, restored from trash, or remounted the volume). Same
+    /// persistence and observer plumbing.
+    fn mark_track_available(&mut self, track_id: TrackId) -> ApplicationRuntimeResult<()> {
+        self.set_track_availability(track_id, TrackAvailability::Available)
+    }
+
+    fn set_track_availability(
+        &mut self,
+        track_id: TrackId,
+        availability: TrackAvailability,
+    ) -> ApplicationRuntimeResult<()> {
+        let Some(index) = self
+            .library_tracks
+            .iter()
+            .position(|track| track.id == track_id)
+        else {
+            return Ok(());
+        };
+        if self.library_tracks[index].location.availability == availability {
+            return Ok(());
+        }
+        let mut updated = self.library_tracks[index].clone();
+        updated.location = updated.location.with_availability(availability);
+        if let Some(store) = self.library_store.as_ref() {
+            store
+                .save_track(updated.clone())
+                .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
+        }
+        self.library_tracks[index] = updated;
+        self.refresh_playback_queue_track_ids();
+        self.notify_track_availability_observer();
+        Ok(())
     }
 
     fn play_previous_track(&mut self) -> ApplicationRuntimeResult<()> {

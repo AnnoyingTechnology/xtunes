@@ -304,6 +304,29 @@ pub fn library_consolidation_outcome_text(summary: &LibraryConsolidationSummary)
     )
 }
 
+/// Outcome string emitted after the user changes their library path.
+/// `newly_missing` is the number of tracks whose file did not resolve
+/// under the new root; `total` is the size of the persisted library.
+/// Both reflect SQLite state immediately after the re-stat pass.
+pub fn library_path_change_outcome_text(newly_missing: usize, total: usize) -> String {
+    if total == 0 {
+        return "Library folder updated.".to_owned();
+    }
+    if newly_missing == 0 {
+        return format!(
+            "Library folder updated: all {} {} found.",
+            total,
+            pluralize(total, "track", "tracks"),
+        );
+    }
+    format!(
+        "Library folder updated: {} of {} {} not found at the new location.",
+        newly_missing,
+        total,
+        pluralize(total, "track", "tracks"),
+    )
+}
+
 pub fn runtime_error_text(error: &ApplicationRuntimeError) -> &'static str {
     match error {
         ApplicationRuntimeError::BackgroundTaskRunning => {
@@ -344,8 +367,8 @@ pub fn runtime_error_text(error: &ApplicationRuntimeError) -> &'static str {
         ApplicationRuntimeError::SettingsLoadFailed
         | ApplicationRuntimeError::SettingsSaveFailed => "The library path could not be saved.",
         ApplicationRuntimeError::PlaybackFailed
-        | ApplicationRuntimeError::PlaybackServiceUnavailable
-        | ApplicationRuntimeError::TrackUnavailable => "Playback is not available.",
+        | ApplicationRuntimeError::PlaybackServiceUnavailable => "Playback is not available.",
+        ApplicationRuntimeError::TrackUnavailable => "Track file is missing.",
         ApplicationRuntimeError::TrackTrashFailed => "The track could not be moved to trash.",
         ApplicationRuntimeError::ArtworkFetchingUnavailable => {
             "Remote artwork retrieval is not available in this build."
