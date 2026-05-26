@@ -12,7 +12,7 @@ use gtk::{gdk, glib};
 use sustain_app_runtime::{
     PlaybackCommand, PlaybackQueueRequest, PlaybackQueueSource, Playlist, PlaylistEntry,
     PlaylistFolder, PlaylistFolderId, PlaylistItem, Rating, Track, TrackColumnLayout,
-    TrackColumnLayoutScope, TrackId, track_matches_search_text,
+    TrackColumnLayoutScope, TrackId, UiSettings, UiViewMode, track_matches_search_text,
 };
 
 use super::{
@@ -75,7 +75,7 @@ pub(crate) fn build_main_window(
     mpris_command_rx: Option<MprisCommandReceiver>,
     metadata_write_result_rx: Option<MetadataWriteResultReceiver>,
     artwork_fetch_result_rx: Option<ArtworkFetchResultReceiver>,
-) -> gtk::ApplicationWindow {
+) -> BuiltMainWindow {
     let tbw = std::time::Instant::now();
     macro_rules! tlog {
         ($label:expr) => {
@@ -107,13 +107,15 @@ pub(crate) fn build_main_window(
     install_app_css();
     install_accent_css();
 
-    // Shared current-search-text state. Lives only in memory: per the
-    // agreed product decision, the query never persists across restarts —
-    // a populated search field on launch would silently hide most of the
-    // library and confuse the user. Captured by all view-rebuild paths.
-    let current_search_text: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let initial_ui_settings = runtime.borrow().settings().ui.clone();
+    let initial_search_text = initial_ui_settings.search_text.trim().to_owned();
 
-    let library_tracks = runtime_library_table_rows(&runtime.borrow(), "");
+    // Shared current-search-text state. Captured by all view-rebuild paths
+    // and persisted on normal shutdown with the rest of the UI session.
+    let current_search_text: Rc<RefCell<String>> =
+        Rc::new(RefCell::new(initial_search_text.clone()));
+
+    let library_tracks = runtime_library_table_rows(&runtime.borrow(), &initial_search_text);
     tlog!("library rows materialised");
     let status_bar = {
         let runtime_for_cancel = runtime.clone();
@@ -156,6 +158,7 @@ pub(crate) fn build_main_window(
     );
     let initial_volume = runtime.borrow().settings().playback.volume;
     let titlebar = build_titlebar(now_playing.widget(), initial_volume);
+    titlebar.set_search_text(&initial_search_text);
     let playback_changed = playback_changed_callback(
         &runtime,
         &now_playing,
@@ -190,8 +193,12 @@ pub(crate) fn build_main_window(
     let sidebar_widget = sidebar.widget();
     sidebar_widget.set_visible(false);
 
-    let library_track_activated =
-        library_track_activated_callback(&command_controller, playback_changed.clone());
+    let library_track_activated = library_track_activated_callback(
+        &command_controller,
+        &runtime,
+        playback_changed.clone(),
+        &current_search_text,
+    );
     let library_changed_holder: LibraryChangedHolder = Rc::new(RefCell::new(None));
     let track_row_changed_holder: TrackRowChangedHolder = Rc::new(RefCell::new(None));
     let parent_window = window.clone().upcast::<gtk::Window>();
@@ -203,6 +210,7 @@ pub(crate) fn build_main_window(
         &command_controller,
         playback_changed.clone(),
         library_changed_holder.clone(),
+        track_row_changed_holder.clone(),
     );
     let add_to_playlist_provider = add_to_playlist_provider(&runtime);
     let add_to_playlist_callback =
@@ -219,6 +227,7 @@ pub(crate) fn build_main_window(
         &command_controller,
         playback_changed.clone(),
         library_changed_holder.clone(),
+        track_row_changed_holder.clone(),
         &sidebar,
     );
     let playlist_context_menu = TrackRowContextMenu::new(playlist_context_actions, parent_window)
@@ -319,6 +328,7 @@ pub(crate) fn build_main_window(
     let track_row_changed = track_row_changed_callback(TrackRowChangedContext {
         runtime: &runtime,
         songs_table: &songs_table,
+        albums_view: &albums_view,
         playlists_table: &playlists_table,
         sidebar: &sidebar,
         content_stack: &content_stack,
@@ -349,6 +359,9 @@ pub(crate) fn build_main_window(
         visible_summary_refresh.clone(),
         &current_search_text,
     ));
+    if let Some(selection) = initial_ui_settings.playlist_selection {
+        sidebar.select_item(selection);
+    }
     install_search_wiring(
         &titlebar,
         SearchWiringContext {
@@ -415,8 +428,10 @@ pub(crate) fn build_main_window(
         command_controller,
         scan_requested,
         consolidation_requested.clone(),
+        UiViewMode::Songs,
         visible_summary_refresh,
     );
+    let deferred_startup = DeferredStartup::new(initial_ui_settings.view_mode, &mode_bar);
     let albums_view_for_reveal = albums_view.clone();
     let show_albums_view = mode_bar.show_albums.clone();
     let show_album_action: ShowAlbumAction = Rc::new(move |track_id| {
@@ -449,6 +464,7 @@ pub(crate) fn build_main_window(
         content_stack: content_stack.clone(),
         show_playlists: mode_bar.show_playlists.clone(),
         library_changed_holder: library_changed_holder.clone(),
+        track_row_changed_holder: track_row_changed_holder.clone(),
     });
     main_content.append(&mode_bar.widget);
     main_content.append(&content_stack);
@@ -476,10 +492,20 @@ pub(crate) fn build_main_window(
     let songs_table_for_close = songs_table.clone();
     let playlists_table_for_close = playlists_table.clone();
     let titlebar_for_close = titlebar.clone();
+    let runtime_for_close = runtime.clone();
+    let content_stack_for_close = content_stack.clone();
+    let sidebar_for_close = sidebar.clone();
     window.connect_close_request(move |_window| {
         songs_table_for_close.flush_pending_layout_save();
         playlists_table_for_close.flush_pending_layout_save();
         titlebar_for_close.flush_pending_volume_save();
+        let _ = runtime_for_close
+            .borrow_mut()
+            .save_ui_settings(ui_settings_from_widgets(
+                &titlebar_for_close,
+                &content_stack_for_close,
+                &sidebar_for_close,
+            ));
         glib::Propagation::Proceed
     });
 
@@ -491,7 +517,48 @@ pub(crate) fn build_main_window(
     maybe_auto_resume_library_consolidation(&runtime, &consolidation_requested);
     tlog!("auto-resume kicked off");
 
-    window
+    BuiltMainWindow {
+        window,
+        deferred_startup,
+    }
+}
+
+pub(crate) struct BuiltMainWindow {
+    pub(crate) window: gtk::ApplicationWindow,
+    deferred_startup: DeferredStartup,
+}
+
+impl BuiltMainWindow {
+    pub(crate) fn run_deferred_startup(self) {
+        self.deferred_startup.run();
+    }
+}
+
+struct DeferredStartup {
+    restore_view_mode: Option<Box<dyn FnOnce()>>,
+}
+
+impl DeferredStartup {
+    fn new(view_mode: UiViewMode, mode_bar: &super::mode_bar::ModeBar) -> Self {
+        let restore_view_mode = match view_mode {
+            UiViewMode::Songs => None,
+            UiViewMode::Albums => {
+                let show_albums = mode_bar.show_albums.clone();
+                Some(Box::new(move || show_albums()) as Box<dyn FnOnce()>)
+            }
+            UiViewMode::Playlists => {
+                let show_playlists = mode_bar.show_playlists.clone();
+                Some(Box::new(move || show_playlists()) as Box<dyn FnOnce()>)
+            }
+        };
+        Self { restore_view_mode }
+    }
+
+    fn run(self) {
+        if let Some(restore) = self.restore_view_mode {
+            restore();
+        }
+    }
 }
 
 /// Defer the cost of populating the Albums view until the user
@@ -547,6 +614,29 @@ fn install_playlists_view_activator(
         playlists_table.replace_rows(rows);
         playlists_dirty.set(false);
     });
+}
+
+fn ui_settings_from_widgets(
+    titlebar: &Titlebar,
+    content_stack: &gtk::Stack,
+    sidebar: &PlaylistSidebar,
+) -> UiSettings {
+    UiSettings {
+        search_text: titlebar.search_text(),
+        view_mode: view_mode_from_stack(content_stack),
+        playlist_selection: match sidebar.current_selection() {
+            Some(SidebarSelection::Item(item)) => Some(item),
+            Some(SidebarSelection::Library) | None => None,
+        },
+    }
+}
+
+fn view_mode_from_stack(content_stack: &gtk::Stack) -> UiViewMode {
+    match content_stack.visible_child_name().as_deref() {
+        Some(ALBUMS_VIEW) => UiViewMode::Albums,
+        Some(PLAYLISTS_VIEW) => UiViewMode::Playlists,
+        _ => UiViewMode::Songs,
+    }
 }
 
 /// Rebuild the playlists table only when the user is actually looking
@@ -965,9 +1055,9 @@ fn sidebar_selection_changed_callback(
 /// on the album grid. We therefore cancel any in-flight rebuild and
 /// schedule a fresh one [`SEARCH_REBUILD_DEBOUNCE`] in the future on
 /// every keystroke, collapsing a typing burst into one rebuild when
-/// the user pauses. No flush-on-close: search state is purely
-/// in-memory and never persisted, so dropping a pending rebuild at
-/// shutdown loses nothing.
+/// the user pauses. The raw SearchEntry text is saved on close as part of
+/// the UI session, so closing inside the debounce window preserves the query
+/// even if the last rebuild never runs.
 struct SearchWiringContext {
     current_search_text: Rc<RefCell<String>>,
     runtime: SharedRuntime,
@@ -1589,16 +1679,21 @@ fn handle_mpris_command(
 /// order. Matches the iTunes 11 "Music" library default.
 fn library_track_activated_callback(
     command_controller: &SharedCommandController,
+    runtime: &SharedRuntime,
     playback_changed: PlaybackChangedCallback,
+    current_search_text: &Rc<RefCell<String>>,
 ) -> TrackActivatedCallback {
     let command_controller = command_controller.clone();
+    let runtime = runtime.clone();
+    let current_search_text = current_search_text.clone();
 
     Rc::new(move |track_id: TrackId| {
+        let queue = {
+            let search_text = current_search_text.borrow().clone();
+            queue_request_for_library(&runtime.borrow(), &search_text)
+        };
         if command_controller.dispatch_succeeded(ApplicationCommand::Playback(
-            PlaybackCommand::PlayTrack {
-                track_id,
-                queue: PlaybackQueueRequest::Library,
-            },
+            PlaybackCommand::PlayTrack { track_id, queue },
         )) {
             playback_changed();
         }
@@ -1657,6 +1752,10 @@ fn queue_request_for_playlist_selection(
     selection: Option<SidebarSelection>,
     search_text: &str,
 ) -> PlaybackQueueRequest {
+    if matches!(selection, Some(SidebarSelection::Library)) {
+        return queue_request_for_library(runtime, search_text);
+    }
+
     let candidates: Vec<(Track, PlaybackQueueSource)> = match selection {
         Some(SidebarSelection::Item(PlaylistItem::Playlist(playlist_id))) => {
             let Some(playlist) = runtime
@@ -1690,7 +1789,7 @@ fn queue_request_for_playlist_selection(
             .into_iter()
             .map(|track| (track.clone(), PlaybackQueueSource::Selection))
             .collect(),
-        _ => return PlaybackQueueRequest::Library,
+        _ => return queue_request_for_library(runtime, search_text),
     };
 
     let source = match candidates.first() {
@@ -1706,6 +1805,25 @@ fn queue_request_for_playlist_selection(
         .collect();
     PlaybackQueueRequest::Explicit {
         source,
+        ordered_track_ids,
+    }
+}
+
+fn queue_request_for_library(
+    runtime: &ApplicationRuntime,
+    search_text: &str,
+) -> PlaybackQueueRequest {
+    if search_text.trim().is_empty() {
+        return PlaybackQueueRequest::Library;
+    }
+    let ordered_track_ids = runtime
+        .library_tracks()
+        .iter()
+        .filter(|track| track_matches_search_text(track, search_text))
+        .map(|track| track.id)
+        .collect();
+    PlaybackQueueRequest::Explicit {
+        source: PlaybackQueueSource::SearchResults,
         ordered_track_ids,
     }
 }
@@ -1749,10 +1867,10 @@ fn rating_changed_callback(
 }
 
 /// Targeted refresh path for single-track mutations (rating, play count).
-/// Updates only the affected row in the visible tables and refreshes the
-/// status-bar summary. Skips the AlbumsView grid (rating/play-count don't
-/// affect album grouping) and the sidebar tree (row-field mutations do not
-/// alter playlist/folder structure).
+/// Updates only the affected row in the visible tables, refreshes the
+/// AlbumsView model without touching the Songs table's store, and refreshes
+/// the status-bar summary. Skips the sidebar tree because row-field mutations
+/// do not alter playlist/folder structure.
 ///
 /// When a smart playlist is selected, the Playlists table falls back to a
 /// full reflow because the mutation may add/remove the track from the
@@ -1760,6 +1878,7 @@ fn rating_changed_callback(
 struct TrackRowChangedContext<'a> {
     runtime: &'a SharedRuntime,
     songs_table: &'a TrackTable,
+    albums_view: &'a AlbumsView,
     playlists_table: &'a TrackTable,
     sidebar: &'a PlaylistSidebar,
     content_stack: &'a gtk::Stack,
@@ -1771,6 +1890,7 @@ struct TrackRowChangedContext<'a> {
 fn track_row_changed_callback(ctx: TrackRowChangedContext<'_>) -> TrackRowChangedCallback {
     let runtime = ctx.runtime.clone();
     let songs_table = ctx.songs_table.clone();
+    let albums_view = ctx.albums_view.clone();
     let playlists_table = ctx.playlists_table.clone();
     let sidebar = ctx.sidebar.clone();
     let content_stack = ctx.content_stack.clone();
@@ -1792,6 +1912,7 @@ fn track_row_changed_callback(ctx: TrackRowChangedContext<'_>) -> TrackRowChange
         };
 
         songs_table.update_row(track_id, row.clone());
+        albums_view.replace_tracks(runtime.borrow().library_tracks().to_vec());
 
         match sidebar.current_selection() {
             Some(SidebarSelection::Item(PlaylistItem::SmartPlaylist(_))) => {
@@ -1826,6 +1947,7 @@ fn track_context_actions(
     command_controller: &SharedCommandController,
     playback_changed: PlaybackChangedCallback,
     library_changed_holder: LibraryChangedHolder,
+    track_row_changed_holder: TrackRowChangedHolder,
 ) -> TrackContextActionSet {
     TrackContextActionSet::new(vec![
         TrackContextAction::play_next(
@@ -1841,6 +1963,7 @@ fn track_context_actions(
             runtime,
             command_controller,
             &library_changed_holder,
+            &track_row_changed_holder,
         )),
         TrackContextAction::show_album(
             show_album_callback(show_album_holder),
@@ -1863,6 +1986,7 @@ fn track_context_actions(
     ])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn playlist_track_context_actions(
     runtime: &SharedRuntime,
     window: &gtk::Window,
@@ -1870,6 +1994,7 @@ fn playlist_track_context_actions(
     command_controller: &SharedCommandController,
     playback_changed: PlaybackChangedCallback,
     library_changed_holder: LibraryChangedHolder,
+    track_row_changed_holder: TrackRowChangedHolder,
     sidebar: &PlaylistSidebar,
 ) -> TrackContextActionSet {
     TrackContextActionSet::new(vec![
@@ -1886,6 +2011,7 @@ fn playlist_track_context_actions(
             runtime,
             command_controller,
             &library_changed_holder,
+            &track_row_changed_holder,
         )),
         TrackContextAction::show_album(
             show_album_callback(show_album_holder),

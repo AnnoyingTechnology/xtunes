@@ -101,6 +101,14 @@ impl PlaybackQueue {
         self.rebuild_play_order(shuffle_seed);
     }
 
+    pub fn set_shuffle_enabled(&mut self, enabled: bool, shuffle_seed: u64) {
+        if self.options.shuffle_enabled == enabled {
+            return;
+        }
+        self.options = self.options.with_shuffle_enabled(enabled);
+        self.rebuild_play_order(shuffle_seed);
+    }
+
     pub fn toggle_repeat_mode(&mut self) {
         self.options = self.options.with_repeat_toggled();
     }

@@ -17,15 +17,16 @@ use sustain_app_runtime::{
 
 use super::{
     SMART_PLAYLIST_EDITOR_HEIGHT, SMART_PLAYLIST_EDITOR_WIDTH, WINDOW_SHADOW_MARGIN,
-    command_controller::SharedCommandController,
+    command_controller::SharedCommandController, sidebar_context::unique_default_name,
 };
 
 mod model;
 
 use model::{
     EDITOR_FIELDS, EditorField, EditorOperator, LIMIT_SELECTIONS, MATCH_KINDS, RuleError,
-    ValueInput, ValueKind, decompose_rule, effective_value_kind, extract_rule, index_of_field,
-    index_of_limit_selection, index_of_match_kind, index_of_operator, operators_for_field,
+    ValueInput, ValueKind, automatic_name_for_single_text_rule, decompose_rule,
+    effective_value_kind, extract_rule, index_of_field, index_of_limit_selection,
+    index_of_match_kind, index_of_operator, operators_for_field,
 };
 
 #[derive(Clone)]
@@ -445,8 +446,13 @@ pub(crate) fn open_smart_playlist_editor(
             Ok(rule_set) => {
                 let command = match &mode {
                     SmartPlaylistEditorMode::Create { name } => {
+                        let name = smart_playlist_name_for_create(
+                            &command_controller_for_ok,
+                            name,
+                            &rule_set,
+                        );
                         ApplicationCommand::CreateSmartPlaylist {
-                            name: name.clone(),
+                            name,
                             parent_folder_id: None,
                             rules: rule_set,
                         }
@@ -497,6 +503,23 @@ pub(crate) fn open_smart_playlist_editor(
 
     window.present();
     ok_button.grab_focus();
+}
+
+fn smart_playlist_name_for_create(
+    command_controller: &SharedCommandController,
+    fallback_name: &str,
+    rule_set: &SmartPlaylistRuleSet,
+) -> String {
+    let preferred = automatic_name_for_single_text_rule(rule_set)
+        .unwrap_or_else(|| fallback_name.trim().to_owned());
+    let existing_names: Vec<String> = command_controller
+        .runtime()
+        .borrow()
+        .smart_playlists()
+        .iter()
+        .map(|smart| smart.name.clone())
+        .collect();
+    unique_default_name(existing_names, &preferred)
 }
 
 fn append_rule_row(rules_container: &gtk::Box, rule_rows: &Rc<RefCell<Vec<RuleRow>>>) {

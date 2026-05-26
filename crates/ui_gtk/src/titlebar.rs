@@ -260,6 +260,14 @@ impl Titlebar {
         self.search.select_region(0, -1);
     }
 
+    pub(crate) fn search_text(&self) -> String {
+        self.search.text().trim().to_owned()
+    }
+
+    pub(crate) fn set_search_text(&self, text: &str) {
+        self.search.set_text(text);
+    }
+
     /// Cancel any pending debounced volume save and run it now. Invoked from
     /// the window-close path so an adjustment made within
     /// [`VOLUME_SAVE_DEBOUNCE`] of shutdown is still persisted.

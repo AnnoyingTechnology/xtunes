@@ -242,6 +242,54 @@ impl StatusBindings {
     }
 }
 
+struct TextBinding {
+    list_item: gtk::ListItem,
+    label: gtk::Label,
+    column: TrackTableColumn,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct TextBindings(Rc<RefCell<Vec<TextBinding>>>);
+
+impl TextBindings {
+    pub(super) fn refresh_track(&self, track_id: TrackId) {
+        let mut bindings = self.0.borrow_mut();
+        bindings.retain(|binding| binding.list_item.item().is_some());
+        for binding in bindings.iter() {
+            refresh_text_binding(binding, track_id);
+        }
+    }
+}
+
+struct RatingBinding {
+    list_item: gtk::ListItem,
+    rating_box: glib::WeakRef<gtk::Box>,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct RatingBindings(Rc<RefCell<Vec<RatingBinding>>>);
+
+impl RatingBindings {
+    fn register(&self, list_item: &gtk::ListItem, rating_box: &gtk::Box) {
+        let mut bindings = self.0.borrow_mut();
+        bindings.retain(|binding| binding.list_item != *list_item);
+        bindings.push(RatingBinding {
+            list_item: list_item.clone(),
+            rating_box: rating_box.downgrade(),
+        });
+    }
+
+    pub(super) fn refresh_track(&self, track_id: TrackId) {
+        let mut bindings = self.0.borrow_mut();
+        bindings.retain(|binding| {
+            binding.list_item.item().is_some() && binding.rating_box.upgrade().is_some()
+        });
+        for binding in bindings.iter() {
+            refresh_rating_binding(binding, track_id);
+        }
+    }
+}
+
 pub(super) fn build_status_column(
     playing_track_id: Rc<Cell<Option<TrackId>>>,
     bindings: StatusBindings,
@@ -258,12 +306,14 @@ pub(super) fn build_status_column(
 
 pub(super) fn build_text_cell_factory(
     column: TrackTableColumn,
+    bindings: TextBindings,
     context_menu: Option<TrackTableContextMenu>,
     row_reorder: Option<RowReorderHooks>,
 ) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
     let context_for_setup = context_menu;
     let reorder_for_setup = row_reorder;
+    let bindings_for_setup = bindings.clone();
     factory.connect_setup(move |_factory, item| {
         let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -292,6 +342,23 @@ pub(super) fn build_text_cell_factory(
 
         cell.append(&label);
         list_item.set_child(Some(&cell));
+
+        bindings_for_setup.0.borrow_mut().push(TextBinding {
+            list_item: list_item.clone(),
+            label,
+            column,
+        });
+    });
+
+    let bindings_for_teardown = bindings;
+    factory.connect_teardown(move |_factory, item| {
+        let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        bindings_for_teardown
+            .0
+            .borrow_mut()
+            .retain(|binding| binding.list_item != *list_item);
     });
 
     factory.connect_bind(move |_factory, item| {
@@ -330,6 +397,7 @@ pub(super) fn build_text_cell_factory(
 }
 
 pub(super) fn build_rating_cell_factory(
+    bindings: RatingBindings,
     context_menu: Option<TrackTableContextMenu>,
     rating_changed: Option<RatingChangedCallback>,
     row_reorder: Option<RowReorderHooks>,
@@ -358,6 +426,18 @@ pub(super) fn build_rating_cell_factory(
         list_item.set_child(Some(&cell));
     });
 
+    let bindings_for_teardown = bindings.clone();
+    factory.connect_teardown(move |_factory, item| {
+        let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        bindings_for_teardown
+            .0
+            .borrow_mut()
+            .retain(|binding| binding.list_item != *list_item);
+    });
+
+    let bindings_for_bind = bindings;
     factory.connect_bind(move |_factory, item| {
         let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -426,6 +506,7 @@ pub(super) fn build_rating_cell_factory(
         }
 
         cell.append(&rating_box);
+        bindings_for_bind.register(list_item, &rating_box);
     });
 
     factory
@@ -919,6 +1000,46 @@ fn row_track_id(item: Option<glib::Object>) -> Option<TrackId> {
     let row_object = item?.downcast::<glib::BoxedAnyObject>().ok()?;
     let row = row_object.try_borrow::<TrackTableRow>().ok()?;
     row.track_id
+}
+
+fn refresh_text_binding(binding: &TextBinding, target_track_id: TrackId) {
+    let Some(row_object) = binding
+        .list_item
+        .item()
+        .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+    else {
+        return;
+    };
+    let Ok(row) = row_object.try_borrow::<TrackTableRow>() else {
+        return;
+    };
+    if row.track_id != Some(target_track_id) {
+        return;
+    }
+    binding.label.set_text(&binding.column.text(&row));
+}
+
+fn refresh_rating_binding(binding: &RatingBinding, target_track_id: TrackId) {
+    let Some(row_object) = binding
+        .list_item
+        .item()
+        .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+    else {
+        return;
+    };
+    let Ok(row) = row_object.try_borrow::<TrackTableRow>() else {
+        return;
+    };
+    if row.track_id != Some(target_track_id) {
+        return;
+    }
+    let rating = row.rating;
+    drop(row);
+
+    let Some(rating_box) = binding.rating_box.upgrade() else {
+        return;
+    };
+    sync_rating_buttons(&rating_box, rating);
 }
 
 fn refresh_status_icon(

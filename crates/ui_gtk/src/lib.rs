@@ -67,7 +67,7 @@ const SIDEBAR_MAX_WIDTH: i32 = 300;
 const STATUS_BAR_HEIGHT: i32 = 28;
 const VOLUME_WIDTH: i32 = 192;
 const VOLUME_MAGNET_THRESHOLD: f64 = 0.90;
-const WINDOW_SHADOW_MARGIN: i32 = 14;
+const WINDOW_SHADOW_MARGIN: i32 = 24;
 /// Fixed reverse-DNS id of the installed `.desktop` entry / icon theme name.
 ///
 /// This is the value used when **looking up the application's icon** (window
@@ -203,7 +203,7 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
             let mpris_command_rx = mpris_command_rx_holder.borrow_mut().take();
             let write_result_rx = write_result_rx_holder.borrow_mut().take();
             let fetch_result_rx = fetch_result_rx_holder.borrow_mut().take();
-            let window = build_main_window(
+            let main_window = build_main_window(
                 app,
                 runtime.clone(),
                 mpris_service.clone(),
@@ -215,7 +215,7 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
                 "[TIMING]   activate: build_main_window returned at {:.1}ms",
                 tact.elapsed().as_secs_f64() * 1000.0
             );
-            window.present();
+            main_window.window.present();
             eprintln!(
                 "[TIMING]   activate: window.present() returned at {:.1}ms",
                 tact.elapsed().as_secs_f64() * 1000.0
@@ -228,6 +228,7 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
                     "[TIMING]   activate: first idle reached at {:.1}ms",
                     tact_for_idle.elapsed().as_secs_f64() * 1000.0
                 );
+                main_window.run_deferred_startup();
             });
         }
     });

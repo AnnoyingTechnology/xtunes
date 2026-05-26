@@ -81,6 +81,7 @@ pub(crate) struct NowPlayingView {
     /// re-issuing a request when `refresh()` runs on the same track
     /// (the playback poll triggers `refresh()` every second).
     artwork_path: Rc<RefCell<Option<PathBuf>>>,
+    prefetched_artwork_path: Rc<RefCell<Option<PathBuf>>>,
     /// Monotonic counter bumped on every track change. Callbacks queued
     /// against the loader capture the value they were issued with and
     /// drop themselves if the track has changed since, so a slow decode
@@ -184,6 +185,7 @@ impl NowPlayingView {
         artwork_box.append(&artwork_inner_stack);
 
         let artwork_path: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
+        let prefetched_artwork_path: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
         let artwork_color_provider = install_artwork_color_provider();
         let pending_fetch_track_id: Rc<Cell<Option<TrackId>>> = Rc::new(Cell::new(None));
         let pending_fetch_notification_id: Rc<Cell<Option<NotificationId>>> =
@@ -256,6 +258,7 @@ impl NowPlayingView {
             artwork_spinner,
             artwork_loader,
             artwork_path,
+            prefetched_artwork_path,
             artwork_generation: Rc::new(Cell::new(0)),
             artwork_color_provider,
             pending_fetch_track_id,
@@ -465,6 +468,34 @@ impl NowPlayingView {
         Some(ArtworkSource::embedded_track(cache_path, absolute))
     }
 
+    fn prefetch_next_artwork(&self) {
+        let next_track = {
+            let runtime = self.runtime.borrow();
+            let Some(next_track_id) = runtime.playback_queue_next_track_id() else {
+                return;
+            };
+            runtime
+                .library_tracks()
+                .iter()
+                .find(|track| track.id == next_track_id)
+                .cloned()
+        };
+        let Some(next_track) = next_track else {
+            return;
+        };
+        let Some(source) = self.artwork_source(&next_track) else {
+            return;
+        };
+        let path = absolute_path_of(&source);
+        if *self.prefetched_artwork_path.borrow() == Some(path.clone()) {
+            return;
+        }
+        *self.prefetched_artwork_path.borrow_mut() = Some(path);
+        if self.artwork_loader.cached(&source).is_none() {
+            self.artwork_loader.request(source, Box::new(|_| {}));
+        }
+    }
+
     fn apply_decoded_artwork(&self, decoded: &DecodedArtwork) {
         // Page selection is decided by `apply_artwork_state`; this
         // method only loads the texture (or clears it). Keeping the
@@ -535,6 +566,7 @@ impl NowPlayingView {
             .set_position(progress_fraction(position, duration), true);
         sync_playback_option_icon(&self.shuffle_icon, now_playing.options.shuffle_enabled);
         sync_playback_option_icon(&self.repeat_icon, now_playing.options.repeat_enabled());
+        self.prefetch_next_artwork();
     }
 }
 

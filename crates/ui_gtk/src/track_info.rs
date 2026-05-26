@@ -5,7 +5,10 @@ use gtk::prelude::*;
 use gtk::{gdk, glib};
 use sustain_app_runtime::{ApplicationCommand, MetadataChange, Track, TrackId};
 
-use super::{LibraryChangedHolder, SharedRuntime, command_controller::SharedCommandController};
+use super::{
+    LibraryChangedHolder, SharedRuntime, TrackRowChangedHolder,
+    command_controller::SharedCommandController,
+};
 
 mod artwork;
 mod details;
@@ -33,6 +36,7 @@ pub(crate) fn open_track_info_dialog(
     runtime: &SharedRuntime,
     command_controller: &SharedCommandController,
     library_changed_holder: &LibraryChangedHolder,
+    track_row_changed_holder: &TrackRowChangedHolder,
     track_id: TrackId,
 ) {
     let (track, absolute_path) = {
@@ -141,6 +145,7 @@ pub(crate) fn open_track_info_dialog(
 
     let command_controller = command_controller.clone();
     let library_changed_holder = library_changed_holder.clone();
+    let track_row_changed_holder = track_row_changed_holder.clone();
     let window_for_ok = window.clone();
     let details_for_ok = details.clone();
     let lyrics_for_ok = lyrics.clone();
@@ -180,8 +185,12 @@ pub(crate) fn open_track_info_dialog(
                 Err(_) => any_failed = true,
             }
         }
-        if any_succeeded && let Some(callback) = library_changed_holder.borrow().as_ref() {
-            callback();
+        if any_succeeded {
+            if let Some(callback) = track_row_changed_holder.borrow().as_ref() {
+                callback(track_id);
+            } else if let Some(callback) = library_changed_holder.borrow().as_ref() {
+                callback();
+            }
         }
         if !attempted || !any_failed {
             window_for_ok.close();

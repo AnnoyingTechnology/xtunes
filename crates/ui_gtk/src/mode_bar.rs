@@ -4,6 +4,7 @@
 use std::rc::Rc;
 
 use gtk::prelude::*;
+use sustain_app_runtime::UiViewMode;
 
 use super::{
     ALBUMS_VIEW, MODE_BAR_HEIGHT, MODE_BUTTON_HEIGHT, PLAYLISTS_VIEW, SONGS_VIEW,
@@ -11,13 +12,6 @@ use super::{
     library_consolidation::LibraryConsolidationRequestedCallback,
     library_scan::LibraryScanRequestedCallback, preferences::settings_button,
 };
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MainViewMode {
-    Songs,
-    Albums,
-    Playlists,
-}
 
 pub(crate) type ViewModeChangedCallback = Rc<dyn Fn()>;
 pub(crate) type ShowAlbumsViewCallback = Rc<dyn Fn()>;
@@ -31,6 +25,7 @@ pub(crate) struct ModeBar {
     pub(crate) show_playlists: ShowPlaylistsViewCallback,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_mode_bar(
     window: &gtk::ApplicationWindow,
     sidebar: &gtk::Box,
@@ -38,6 +33,7 @@ pub(crate) fn build_mode_bar(
     command_controller: SharedCommandController,
     scan_requested: LibraryScanRequestedCallback,
     consolidation_requested: LibraryConsolidationRequestedCallback,
+    initial_mode: UiViewMode,
     on_view_mode_changed: ViewModeChangedCallback,
 ) -> ModeBar {
     let mode_bar = gtk::CenterBox::new();
@@ -57,25 +53,31 @@ pub(crate) fn build_mode_bar(
 
     connect_mode_button(
         &songs,
-        MainViewMode::Songs,
+        UiViewMode::Songs,
         sidebar,
         content_stack,
         on_view_mode_changed.clone(),
     );
     connect_mode_button(
         &albums,
-        MainViewMode::Albums,
+        UiViewMode::Albums,
         sidebar,
         content_stack,
         on_view_mode_changed.clone(),
     );
     connect_mode_button(
         &playlists,
-        MainViewMode::Playlists,
+        UiViewMode::Playlists,
         sidebar,
         content_stack,
         on_view_mode_changed,
     );
+
+    match initial_mode {
+        UiViewMode::Songs => songs.set_active(true),
+        UiViewMode::Albums => albums.set_active(true),
+        UiViewMode::Playlists => playlists.set_active(true),
+    }
 
     let mode_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     mode_buttons.set_valign(gtk::Align::Center);
@@ -117,7 +119,7 @@ pub(crate) fn build_mode_bar(
 
 fn connect_mode_button(
     button: &gtk::ToggleButton,
-    mode: MainViewMode,
+    mode: UiViewMode,
     sidebar: &gtk::Box,
     content_stack: &gtk::Stack,
     on_view_mode_changed: ViewModeChangedCallback,
@@ -132,17 +134,17 @@ fn connect_mode_button(
     });
 }
 
-fn apply_view_mode(mode: MainViewMode, sidebar: &gtk::Box, content_stack: &gtk::Stack) {
+fn apply_view_mode(mode: UiViewMode, sidebar: &gtk::Box, content_stack: &gtk::Stack) {
     match mode {
-        MainViewMode::Songs => {
+        UiViewMode::Songs => {
             sidebar.set_visible(false);
             content_stack.set_visible_child_name(SONGS_VIEW);
         }
-        MainViewMode::Albums => {
+        UiViewMode::Albums => {
             sidebar.set_visible(false);
             content_stack.set_visible_child_name(ALBUMS_VIEW);
         }
-        MainViewMode::Playlists => {
+        UiViewMode::Playlists => {
             sidebar.set_visible(true);
             content_stack.set_visible_child_name(PLAYLISTS_VIEW);
         }

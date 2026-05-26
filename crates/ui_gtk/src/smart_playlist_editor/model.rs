@@ -8,7 +8,7 @@ use std::{
 
 use sustain_app_runtime::{
     Rating, SmartPlaylistDateField, SmartPlaylistLimitSelection, SmartPlaylistMatchKind,
-    SmartPlaylistNumberField, SmartPlaylistNumberOperator, SmartPlaylistRule,
+    SmartPlaylistNumberField, SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet,
     SmartPlaylistTextField, SmartPlaylistTextOperator,
 };
 
@@ -544,6 +544,24 @@ pub(super) fn index_of_limit_selection(selection: SmartPlaylistLimitSelection) -
         .unwrap_or(0)
 }
 
+pub(super) fn automatic_name_for_single_text_rule(
+    rule_set: &SmartPlaylistRuleSet,
+) -> Option<String> {
+    let [SmartPlaylistRule::Text { value, .. }] = rule_set.rules.as_slice() else {
+        return None;
+    };
+    let trimmed = value.trim();
+    if is_short_single_line_text(trimmed) {
+        Some(trimmed.to_owned())
+    } else {
+        None
+    }
+}
+
+fn is_short_single_line_text(value: &str) -> bool {
+    !value.is_empty() && value.chars().count() <= 64 && !value.chars().any(char::is_control)
+}
+
 fn format_iso_date(date: SystemTime) -> String {
     let seconds = date
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -772,6 +790,52 @@ mod tests {
                 }
             ),
         }
+    }
+
+    #[test]
+    fn automatic_name_for_single_text_rule_uses_trimmed_text_value() {
+        let rules = SmartPlaylistRuleSet {
+            match_kind: SmartPlaylistMatchKind::All,
+            rules: vec![SmartPlaylistRule::Text {
+                field: SmartPlaylistTextField::Artist,
+                operator: SmartPlaylistTextOperator::Is,
+                value: "  Radiohead  ".to_owned(),
+            }],
+            limit: None,
+        };
+
+        assert_eq!(
+            automatic_name_for_single_text_rule(&rules),
+            Some("Radiohead".to_owned())
+        );
+    }
+
+    #[test]
+    fn automatic_name_for_single_text_rule_ignores_non_text_or_multi_rule_sets() {
+        let multi = SmartPlaylistRuleSet {
+            match_kind: SmartPlaylistMatchKind::All,
+            rules: vec![
+                SmartPlaylistRule::Text {
+                    field: SmartPlaylistTextField::Artist,
+                    operator: SmartPlaylistTextOperator::Is,
+                    value: "Radiohead".to_owned(),
+                },
+                SmartPlaylistRule::TextIsPresent {
+                    field: SmartPlaylistTextField::Album,
+                },
+            ],
+            limit: None,
+        };
+        let non_text = SmartPlaylistRuleSet {
+            match_kind: SmartPlaylistMatchKind::All,
+            rules: vec![SmartPlaylistRule::TextIsPresent {
+                field: SmartPlaylistTextField::Artist,
+            }],
+            limit: None,
+        };
+
+        assert_eq!(automatic_name_for_single_text_rule(&multi), None);
+        assert_eq!(automatic_name_for_single_text_rule(&non_text), None);
     }
 
     #[test]

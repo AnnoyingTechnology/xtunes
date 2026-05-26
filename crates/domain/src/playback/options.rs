@@ -36,6 +36,13 @@ impl PlaybackOptions {
         }
     }
 
+    pub const fn with_shuffle_enabled(self, shuffle_enabled: bool) -> Self {
+        Self {
+            shuffle_enabled,
+            repeat_mode: self.repeat_mode,
+        }
+    }
+
     pub const fn with_repeat_toggled(self) -> Self {
         Self {
             shuffle_enabled: self.shuffle_enabled,
@@ -79,6 +86,22 @@ mod tests {
             options.with_repeat_toggled(),
             PlaybackOptions {
                 shuffle_enabled: true,
+                repeat_mode: RepeatMode::All,
+            }
+        );
+    }
+
+    #[test]
+    fn playback_options_sets_shuffle_without_affecting_repeat() {
+        let options = PlaybackOptions {
+            shuffle_enabled: true,
+            repeat_mode: RepeatMode::All,
+        };
+
+        assert_eq!(
+            options.with_shuffle_enabled(false),
+            PlaybackOptions {
+                shuffle_enabled: false,
                 repeat_mode: RepeatMode::All,
             }
         );

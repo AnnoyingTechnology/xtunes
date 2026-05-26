@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::VolumePercent;
+use crate::{PlaylistItem, VolumePercent};
 
 /// Volume picked the first time the app runs, before any persisted value
 /// exists. 80% matches the previous UI-side constant and is loud enough to
@@ -37,9 +37,25 @@ impl Default for PlaybackSettings {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UiSettings {
+    pub search_text: String,
+    pub view_mode: UiViewMode,
+    pub playlist_selection: Option<PlaylistItem>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum UiViewMode {
+    #[default]
+    Songs,
+    Albums,
+    Playlists,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UserSettings {
     pub library: LibrarySettings,
     pub playback: PlaybackSettings,
+    pub ui: UiSettings,
 }
 
 impl UserSettings {
@@ -50,6 +66,7 @@ impl UserSettings {
                 management_mode: LibraryManagementMode::ReferenceFilesInPlace,
             },
             playback: PlaybackSettings::default(),
+            ui: UiSettings::default(),
         }
     }
 

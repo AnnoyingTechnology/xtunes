@@ -40,7 +40,7 @@ pub use query::{LibraryQuery, SortDirection, TrackSort, TrackSortColumn};
 pub use rating::Rating;
 pub use settings::{
     DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings, PlaybackSettings,
-    UserSettings,
+    UiSettings, UiViewMode, UserSettings,
 };
 pub use smart_playlist::{
     SmartPlaylist, SmartPlaylistDateField, SmartPlaylistLimit, SmartPlaylistLimitSelection,

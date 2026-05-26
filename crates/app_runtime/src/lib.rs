@@ -21,8 +21,8 @@ pub use sustain_domain::{
     SmartPlaylistNumberField, SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet,
     SmartPlaylistTextField, SmartPlaylistTextOperator, SystemClock, Track, TrackAvailability,
     TrackColumnEntry, TrackColumnLayout, TrackColumnLayoutScope, TrackContentHash, TrackId,
-    TrackLocation, TrackMetadata, TrackPlaybackSource, TrackRelativePath, UserSettings,
-    VolumePercent, matching_tracks,
+    TrackLocation, TrackMetadata, TrackPlaybackSource, TrackRelativePath, UiSettings, UiViewMode,
+    UserSettings, VolumePercent, matching_tracks,
 };
 use sustain_library_store::LibraryStore;
 pub use sustain_metadata::MetadataService;
@@ -679,6 +679,10 @@ impl ApplicationRuntime {
         self.playback_queue.current_track_id()
     }
 
+    pub fn playback_queue_next_track_id(&self) -> Option<TrackId> {
+        self.playback_queue.next_track_id()
+    }
+
     pub fn now_playing(&self) -> NowPlaying {
         let state = self.playback_state();
         let track = playback::playback_track_id(&state)
@@ -717,6 +721,19 @@ impl ApplicationRuntime {
             return Ok(());
         }
         self.settings.playback.volume = volume;
+        if let Some(store) = self.settings_store.as_ref() {
+            store
+                .save_settings(self.settings.clone())
+                .map_err(|_| ApplicationRuntimeError::SettingsSaveFailed)?;
+        }
+        Ok(())
+    }
+
+    pub fn save_ui_settings(&mut self, ui: UiSettings) -> ApplicationRuntimeResult<()> {
+        if self.settings.ui == ui {
+            return Ok(());
+        }
+        self.settings.ui = ui;
         if let Some(store) = self.settings_store.as_ref() {
             store
                 .save_settings(self.settings.clone())
@@ -788,8 +805,8 @@ mod tests {
         PlaybackCommand, PlaybackOptions, PlaybackState, Playlist, PlaylistFolderId, PlaylistId,
         PlaylistItem, Rating, RepeatMode, SmartPlaylist, SmartPlaylistDateField, SmartPlaylistId,
         SmartPlaylistMatchKind, SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField,
-        SmartPlaylistTextOperator, Track, TrackId, TrackLocation, TrackMetadata, UserSettings,
-        VolumePercent,
+        SmartPlaylistTextOperator, Track, TrackId, TrackLocation, TrackMetadata, UiSettings,
+        UiViewMode, UserSettings, VolumePercent,
     };
     use sustain_library_store::{InMemoryLibraryStore, LibraryStore, StoreResult};
     use sustain_metadata::{MetadataChange, MetadataError, MetadataResult};
@@ -849,6 +866,10 @@ mod tests {
             ),
             (
                 ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle),
+                Ok(()),
+            ),
+            (
+                ApplicationCommand::Playback(PlaybackCommand::SetShuffleEnabled(false)),
                 Ok(()),
             ),
             (
@@ -1892,6 +1913,22 @@ mod tests {
     }
 
     #[test]
+    fn runtime_saves_ui_settings_with_settings_store() {
+        let store = Box::new(TestSettingsStore::new(UserSettings::default()));
+        let mut runtime =
+            ApplicationRuntime::with_settings_store(store).expect("load settings from test store");
+        let ui = UiSettings {
+            search_text: "jazz".to_owned(),
+            view_mode: UiViewMode::Albums,
+            playlist_selection: None,
+        };
+
+        assert_eq!(runtime.save_ui_settings(ui.clone()), Ok(()));
+
+        assert_eq!(runtime.settings().ui, ui);
+    }
+
+    #[test]
     fn runtime_plays_tracks_through_playback_service() {
         let root = unique_test_directory();
         std::fs::create_dir_all(&root).expect("create test library");
@@ -1957,6 +1994,27 @@ mod tests {
                 repeat_mode: RepeatMode::Off,
             }
         );
+    }
+
+    #[test]
+    fn runtime_sets_shuffle_without_playback_service() {
+        let mut runtime = ApplicationRuntime::new();
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(
+                PlaybackCommand::SetShuffleEnabled(true)
+            )),
+            Ok(())
+        );
+        assert!(runtime.playback_options().shuffle_enabled);
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(
+                PlaybackCommand::SetShuffleEnabled(false)
+            )),
+            Ok(())
+        );
+        assert!(!runtime.playback_options().shuffle_enabled);
     }
 
     #[test]

@@ -12,8 +12,9 @@ use sustain_app_runtime::{Rating, TrackColumnEntry, TrackColumnLayout, TrackId};
 
 use super::track_context::TrackRowContextMenu;
 use cells::{
-    RowDropCellRegistry, RowReorderHooks, StatusBindings, TrackTableContextMenu,
-    build_filler_column, build_rating_cell_factory, build_status_column, build_text_cell_factory,
+    RatingBindings, RowDropCellRegistry, RowReorderHooks, StatusBindings, TextBindings,
+    TrackTableContextMenu, build_filler_column, build_rating_cell_factory, build_status_column,
+    build_text_cell_factory,
 };
 use columns::{TRACK_TABLE_COLUMNS, TrackTableColumn};
 pub(crate) use row::TrackTableRow;
@@ -68,6 +69,8 @@ pub(crate) struct TrackTable {
     selection: gtk::MultiSelection,
     playing_track_id: Rc<Cell<Option<TrackId>>>,
     status_bindings: StatusBindings,
+    text_bindings: TextBindings,
+    rating_bindings: RatingBindings,
     status_column: gtk::ColumnViewColumn,
     managed_columns: Rc<Vec<ManagedColumn>>,
     applying_layout: Rc<Cell<bool>>,
@@ -144,6 +147,10 @@ impl TrackTable {
             // `RefCell` borrow is what we actually need.
             let mut row = row_object.borrow_mut::<TrackTableRow>();
             *row = new_row;
+            drop(row);
+            self.text_bindings.refresh_track(track_id);
+            self.rating_bindings.refresh_track(track_id);
+            self.status_bindings.refresh(self.playing_track_id.get());
             return true;
         }
         false
@@ -401,6 +408,8 @@ pub(crate) fn build_track_table(
 
     let playing_track_id: Rc<Cell<Option<TrackId>>> = Rc::new(Cell::new(None));
     let status_bindings = StatusBindings::default();
+    let text_bindings = TextBindings::default();
+    let rating_bindings = RatingBindings::default();
 
     let sorted_rows = gtk::SortListModel::new(Some(store.clone()), table.sorter());
     let selection = gtk::MultiSelection::new(Some(sorted_rows));
@@ -477,6 +486,8 @@ pub(crate) fn build_track_table(
         let table_column = build_table_column(
             column,
             &header_menu,
+            text_bindings.clone(),
+            rating_bindings.clone(),
             context_menu.clone(),
             rating_changed.clone(),
             row_reorder_hooks.clone(),
@@ -554,6 +565,8 @@ pub(crate) fn build_track_table(
         selection,
         playing_track_id,
         status_bindings,
+        text_bindings,
+        rating_bindings,
         status_column,
         managed_columns,
         applying_layout,
@@ -630,14 +643,16 @@ fn install_layout_change_listeners(
 fn build_table_column(
     column: TrackTableColumn,
     header_menu: &gio::Menu,
+    text_bindings: TextBindings,
+    rating_bindings: RatingBindings,
     context_menu: Option<TrackTableContextMenu>,
     rating_changed: Option<RatingChangedCallback>,
     row_reorder: Option<RowReorderHooks>,
 ) -> gtk::ColumnViewColumn {
     let factory = if column == TrackTableColumn::Rating {
-        build_rating_cell_factory(context_menu, rating_changed, row_reorder)
+        build_rating_cell_factory(rating_bindings, context_menu, rating_changed, row_reorder)
     } else {
-        build_text_cell_factory(column, context_menu, row_reorder)
+        build_text_cell_factory(column, text_bindings, context_menu, row_reorder)
     };
     let table_column = gtk::ColumnViewColumn::new(Some(column.title()), Some(factory));
     table_column.set_resizable(true);

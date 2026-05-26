@@ -121,8 +121,6 @@ impl AlbumsView {
         let selection = gtk::NoSelection::new(Some(row_store.clone()));
         let list_view = gtk::ListView::new(Some(selection), None::<gtk::ListItemFactory>);
         list_view.add_css_class("albums-list");
-        list_view.set_margin_top(ALBUM_GRID_MARGIN);
-        list_view.set_margin_bottom(ALBUM_GRID_MARGIN);
         list_view.set_hexpand(true);
         list_view.set_vexpand(true);
         list_view.set_show_separators(false);
@@ -652,6 +650,7 @@ impl AlbumsView {
         let command_controller_for_play = self.command_controller.clone();
         let playback_changed_for_play = self.playback_changed.clone();
         play_button.connect_clicked(move |_| {
+            ensure_shuffle_disabled(&command_controller_for_play);
             if play_album(&command_controller_for_play, &album_for_play) {
                 playback_changed_for_play();
             }
@@ -667,7 +666,7 @@ impl AlbumsView {
         let command_controller_for_shuffle = self.command_controller.clone();
         let playback_changed_for_shuffle = self.playback_changed.clone();
         shuffle_button.connect_clicked(move |_| {
-            ensure_shuffle_enabled(&command_controller_for_shuffle);
+            set_shuffle_enabled(&command_controller_for_shuffle, true);
             if play_album(&command_controller_for_shuffle, &album_for_shuffle) {
                 playback_changed_for_shuffle();
             }
@@ -1146,18 +1145,14 @@ fn play_album(command_controller: &SharedCommandController, album: &AlbumViewMod
     ))
 }
 
-fn ensure_shuffle_enabled(command_controller: &SharedCommandController) {
-    if command_controller
-        .runtime()
-        .borrow()
-        .playback_options()
-        .shuffle_enabled
-    {
-        return;
-    }
+fn ensure_shuffle_disabled(command_controller: &SharedCommandController) {
+    set_shuffle_enabled(command_controller, false);
+}
 
-    let _result =
-        command_controller.dispatch(ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle));
+fn set_shuffle_enabled(command_controller: &SharedCommandController, enabled: bool) {
+    let _result = command_controller.dispatch(ApplicationCommand::Playback(
+        PlaybackCommand::SetShuffleEnabled(enabled),
+    ));
 }
 
 #[cfg(test)]

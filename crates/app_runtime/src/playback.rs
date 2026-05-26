@@ -22,6 +22,11 @@ impl ApplicationRuntime {
                 self.playback_queue.toggle_shuffle(playback_shuffle_seed());
                 Ok(())
             }
+            PlaybackCommand::SetShuffleEnabled(enabled) => {
+                self.playback_queue
+                    .set_shuffle_enabled(enabled, playback_shuffle_seed());
+                Ok(())
+            }
             PlaybackCommand::ToggleRepeat => {
                 self.playback_queue.toggle_repeat_mode();
                 Ok(())

@@ -32,7 +32,7 @@ use gtk::prelude::*;
 use sustain_app_runtime::{ApplicationCommand, PlaylistId, PlaylistItem};
 
 use super::{
-    LibraryChangedHolder, PLAYLISTS_VIEW, SONGS_VIEW, SharedRuntime,
+    LibraryChangedHolder, PLAYLISTS_VIEW, SONGS_VIEW, SharedRuntime, TrackRowChangedHolder,
     command_controller::SharedCommandController,
     mode_bar::ShowPlaylistsViewCallback,
     sidebar::PlaylistSidebar,
@@ -57,6 +57,7 @@ pub(crate) struct GlobalShortcutContext {
     pub(crate) content_stack: gtk::Stack,
     pub(crate) show_playlists: ShowPlaylistsViewCallback,
     pub(crate) library_changed_holder: LibraryChangedHolder,
+    pub(crate) track_row_changed_holder: TrackRowChangedHolder,
 }
 
 pub(crate) fn install_global_shortcuts(context: GlobalShortcutContext) {
@@ -136,6 +137,7 @@ fn install_get_info(context: &GlobalShortcutContext) {
         &context.runtime,
         &context.command_controller,
         &context.library_changed_holder,
+        &context.track_row_changed_holder,
     );
     let songs_table = context.songs_table.clone();
     let playlists_table = context.playlists_table.clone();

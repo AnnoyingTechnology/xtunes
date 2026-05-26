@@ -9,7 +9,7 @@ use gtk::{FileLauncher, gdk, gio};
 use sustain_app_runtime::{ApplicationCommand, PlaybackCommand, TrackId};
 
 use super::{
-    LibraryChangedHolder, SharedRuntime, ShowAlbumHolder,
+    LibraryChangedHolder, SharedRuntime, ShowAlbumHolder, TrackRowChangedHolder,
     command_controller::SharedCommandController,
     track_context::{TrackActionCallback, TrackActionVisibility},
     track_info::open_track_info_dialog,
@@ -35,11 +35,13 @@ pub(crate) fn get_info_callback(
     runtime: &SharedRuntime,
     command_controller: &SharedCommandController,
     library_changed_holder: &LibraryChangedHolder,
+    track_row_changed_holder: &TrackRowChangedHolder,
 ) -> TrackActionCallback {
     let parent_window = parent_window.clone();
     let runtime = runtime.clone();
     let command_controller = command_controller.clone();
     let library_changed_holder = library_changed_holder.clone();
+    let track_row_changed_holder = track_row_changed_holder.clone();
     Rc::new(move |track_ids: Vec<TrackId>| {
         let Some(&track_id) = track_ids.first() else {
             return;
@@ -49,6 +51,7 @@ pub(crate) fn get_info_callback(
             &runtime,
             &command_controller,
             &library_changed_holder,
+            &track_row_changed_holder,
             track_id,
         );
     })

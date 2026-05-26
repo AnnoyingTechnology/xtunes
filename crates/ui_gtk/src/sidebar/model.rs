@@ -112,7 +112,7 @@ pub(super) fn selected_item(selection: &gtk::SingleSelection) -> Option<Playlist
     Some(sidebar_item.item)
 }
 
-pub(super) fn select_item(selection: &gtk::SingleSelection, target: PlaylistItem) {
+pub(super) fn select_item(selection: &gtk::SingleSelection, target: PlaylistItem) -> bool {
     let n = selection.n_items();
     for index in 0..n {
         let Some(object) = selection.item(index) else {
@@ -132,10 +132,11 @@ pub(super) fn select_item(selection: &gtk::SingleSelection, target: PlaylistItem
         };
         if sidebar_item.item == target {
             selection.set_selected(index);
-            return;
+            return true;
         }
     }
     selection.set_selected(gtk::INVALID_LIST_POSITION);
+    false
 }
 
 pub(super) fn build_tree_model(runtime: &ApplicationRuntime) -> gtk::TreeListModel {

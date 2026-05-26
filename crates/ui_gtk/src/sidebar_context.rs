@@ -70,6 +70,7 @@ impl SidebarContextMenu {
 fn popup_menu(anchor: &gtk::Widget, on_action: SidebarActionCallback, x: f64, y: f64) {
     let popover = gtk::Popover::new();
     popover.set_has_arrow(false);
+    popover.add_css_class("compact-context-menu");
     popover.set_parent(anchor);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);

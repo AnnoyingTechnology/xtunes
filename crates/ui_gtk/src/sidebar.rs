@@ -204,6 +204,23 @@ impl PlaylistSidebar {
         selected_item(&self.selection).map(SidebarSelection::Item)
     }
 
+    pub(crate) fn select_item(&self, item: PlaylistItem) {
+        self.library_selected.set(false);
+        self.library_row.remove_css_class("selected");
+        if !select_item(&self.selection, item) {
+            self.select_library();
+        }
+    }
+
+    fn select_library(&self) {
+        self.library_selected.set(true);
+        self.library_row.add_css_class("selected");
+        self.selection.set_selected(gtk::INVALID_LIST_POSITION);
+        if let Some(callback) = self.on_selection_changed.borrow().as_ref() {
+            callback(Some(SidebarSelection::Library));
+        }
+    }
+
     pub(crate) fn install_context_menu(&self, menu: SidebarContextMenu) {
         menu.install_on(self.root.upcast_ref::<gtk::Widget>());
     }
@@ -225,7 +242,10 @@ impl PlaylistSidebar {
             Some(SidebarSelection::Item(item)) => {
                 self.library_selected.set(false);
                 self.library_row.remove_css_class("selected");
-                select_item(&self.selection, item);
+                if !select_item(&self.selection, item) {
+                    self.library_selected.set(true);
+                    self.library_row.add_css_class("selected");
+                }
             }
             Some(SidebarSelection::Library) | None => {
                 // Library stays selected (its CSS class was unchanged).

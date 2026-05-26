@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 pub use sustain_domain::{
     DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings, PlaybackSettings,
+    PlaylistFolderId, PlaylistId, PlaylistItem, SmartPlaylistId, UiSettings, UiViewMode,
     UserSettings, VolumePercent,
 };
 
@@ -120,6 +121,8 @@ struct SettingsDocument {
     library: LibrarySettingsDocument,
     #[serde(default)]
     playback: PlaybackSettingsDocument,
+    #[serde(default)]
+    ui: UiSettingsDocument,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -136,6 +139,16 @@ struct PlaybackSettingsDocument {
     /// with an out-of-range value can never crash the app at startup.
     #[serde(default = "default_volume_percent")]
     volume_percent: u8,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct UiSettingsDocument {
+    #[serde(default)]
+    search_text: String,
+    #[serde(default)]
+    view_mode: UiViewModeDocument,
+    #[serde(default)]
+    playlist_selection: Option<PlaylistSelectionDocument>,
 }
 
 impl Default for PlaybackSettingsDocument {
@@ -158,6 +171,23 @@ enum LibraryManagementModeDocument {
     CopyAddedFilesIntoLibrary,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum UiViewModeDocument {
+    #[default]
+    Songs,
+    Albums,
+    Playlists,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+enum PlaylistSelectionDocument {
+    Playlist(i64),
+    SmartPlaylist(i64),
+    Folder(i64),
+}
+
 impl SettingsDocument {
     fn from_settings(settings: UserSettings) -> Self {
         Self {
@@ -170,6 +200,14 @@ impl SettingsDocument {
             playback: PlaybackSettingsDocument {
                 volume_percent: settings.playback.volume.get(),
             },
+            ui: UiSettingsDocument {
+                search_text: settings.ui.search_text,
+                view_mode: UiViewModeDocument::from_domain(settings.ui.view_mode),
+                playlist_selection: settings
+                    .ui
+                    .playlist_selection
+                    .map(PlaylistSelectionDocument::from_domain),
+            },
         }
     }
 
@@ -181,6 +219,14 @@ impl SettingsDocument {
             },
             playback: PlaybackSettings {
                 volume: VolumePercent::from_clamped(self.playback.volume_percent),
+            },
+            ui: UiSettings {
+                search_text: self.ui.search_text,
+                view_mode: self.ui.view_mode.into_domain(),
+                playlist_selection: self
+                    .ui
+                    .playlist_selection
+                    .and_then(PlaylistSelectionDocument::into_domain),
             },
         }
     }
@@ -202,13 +248,50 @@ impl LibraryManagementModeDocument {
     }
 }
 
+impl UiViewModeDocument {
+    fn from_domain(mode: UiViewMode) -> Self {
+        match mode {
+            UiViewMode::Songs => Self::Songs,
+            UiViewMode::Albums => Self::Albums,
+            UiViewMode::Playlists => Self::Playlists,
+        }
+    }
+
+    fn into_domain(self) -> UiViewMode {
+        match self {
+            Self::Songs => UiViewMode::Songs,
+            Self::Albums => UiViewMode::Albums,
+            Self::Playlists => UiViewMode::Playlists,
+        }
+    }
+}
+
+impl PlaylistSelectionDocument {
+    fn from_domain(selection: PlaylistItem) -> Self {
+        match selection {
+            PlaylistItem::Playlist(id) => Self::Playlist(id.get()),
+            PlaylistItem::SmartPlaylist(id) => Self::SmartPlaylist(id.get()),
+            PlaylistItem::Folder(id) => Self::Folder(id.get()),
+        }
+    }
+
+    fn into_domain(self) -> Option<PlaylistItem> {
+        match self {
+            Self::Playlist(id) => PlaylistId::new(id).map(PlaylistItem::Playlist),
+            Self::SmartPlaylist(id) => SmartPlaylistId::new(id).map(PlaylistItem::SmartPlaylist),
+            Self::Folder(id) => PlaylistFolderId::new(id).map(PlaylistItem::Folder),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::PathBuf};
 
     use super::{
-        DEFAULT_PLAYBACK_VOLUME_PERCENT, InMemorySettingsStore, LibraryManagementMode,
-        SettingsStore, TomlSettingsStore, UserSettings, VolumePercent,
+        DEFAULT_PLAYBACK_VOLUME_PERCENT, InMemorySettingsStore, LibraryManagementMode, PlaylistId,
+        PlaylistItem, SettingsStore, TomlSettingsStore, UiSettings, UiViewMode, UserSettings,
+        VolumePercent,
     };
 
     #[test]
@@ -259,6 +342,31 @@ mod tests {
         let store = TomlSettingsStore::new(&path);
         let mut settings = UserSettings::default();
         settings.playback.volume = VolumePercent::from_clamped(37);
+
+        assert_eq!(store.save_settings(settings.clone()), Ok(()));
+        assert_eq!(store.load_settings(), Ok(settings));
+
+        let root = path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .expect("test path has two parents");
+        fs::remove_dir_all(root).expect("remove test settings directory");
+    }
+
+    #[test]
+    fn toml_settings_store_round_trips_ui_state() {
+        let path = unique_settings_path();
+        let store = TomlSettingsStore::new(&path);
+        let settings = UserSettings {
+            ui: UiSettings {
+                search_text: "radiohead".to_owned(),
+                view_mode: UiViewMode::Playlists,
+                playlist_selection: Some(PlaylistItem::Playlist(
+                    PlaylistId::new(7).expect("positive playlist id"),
+                )),
+            },
+            ..UserSettings::default()
+        };
 
         assert_eq!(store.save_settings(settings.clone()), Ok(()));
         assert_eq!(store.load_settings(), Ok(settings));

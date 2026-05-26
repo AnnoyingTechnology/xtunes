@@ -47,6 +47,9 @@ pub enum PlaybackCommand {
     /// inserts at the head right after the currently playing track.
     EnqueueLast(Vec<TrackId>),
     ToggleShuffle,
+    /// Explicitly set shuffle without relying on the caller's view of the
+    /// current option state. Used by source-specific Play/Shuffle controls.
+    SetShuffleEnabled(bool),
     ToggleRepeat,
     Pause,
     Resume,

@@ -5,15 +5,15 @@
 .window-frame {
     border-radius: 10px;
     box-shadow:
-        0 14px 36px 0 alpha(black, 0.30),
-        0 2px 10px 0 alpha(black, 0.22);
+        0 6px 18px 0 alpha(black, 0.30),
+        0 1px 6px 0 alpha(black, 0.22);
 }
 
 .preferences-frame {
     border-radius: 10px;
     box-shadow:
-        0 14px 36px 0 alpha(black, 0.30),
-        0 2px 10px 0 alpha(black, 0.22);
+        0 6px 18px 0 alpha(black, 0.30),
+        0 1px 6px 0 alpha(black, 0.22);
 }
 
 .app-shell {
@@ -439,6 +439,11 @@ listview.album-track-table > row:focus-visible {
 .track-context-menu,
 .sidebar-context-menu {
     padding: 2px;
+}
+
+.sidebar-context-menu,
+button.sidebar-context-menu-item label {
+    color: @theme_fg_color;
 }
 
 /* Adwaita's `popover > contents` pads the popover frame by ~6px on every

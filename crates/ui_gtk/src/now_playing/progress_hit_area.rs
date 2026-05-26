@@ -17,6 +17,7 @@ use sustain_app_runtime::{ApplicationCommand, PlaybackCommand};
 const INDICATOR_TICK_WIDTH: f64 = 6.0;
 const INDICATOR_TICK_RADIUS: f64 = 2.0;
 const SCRUB_SEEK_THROTTLE: Duration = Duration::from_millis(125);
+const SCRUB_SEEK_MIN_STEP: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
 pub(super) struct ProgressHitArea {
@@ -76,6 +77,7 @@ impl ProgressHitArea {
             has_track: has_track.clone(),
             dragging: dragging.clone(),
             last_seek_at: Rc::new(Cell::new(None)),
+            last_seek_position: Rc::new(Cell::new(None)),
             command_controller,
             duration,
         });
@@ -227,6 +229,7 @@ struct SeekContext {
     has_track: Rc<Cell<bool>>,
     dragging: Rc<Cell<bool>>,
     last_seek_at: Rc<Cell<Option<Instant>>>,
+    last_seek_position: Rc<Cell<Option<Duration>>>,
     command_controller: SharedCommandController,
     duration: Rc<Cell<Duration>>,
 }
@@ -243,12 +246,22 @@ impl SeekContext {
         )
     }
 
-    fn dispatch_at_current_fraction(&self) {
-        dispatch_seek_from_fraction(
-            &self.command_controller,
-            self.duration.get(),
-            self.position_fraction.get(),
-        );
+    fn dispatch_at_current_fraction(&self, force: bool) {
+        let duration = self.duration.get();
+        let position = position_from_fraction(duration, self.position_fraction.get());
+        if position.is_zero() && duration.is_zero() {
+            return;
+        }
+        if !force
+            && self
+                .last_seek_position
+                .get()
+                .is_some_and(|last| positions_are_too_close(last, position))
+        {
+            return;
+        }
+        dispatch_seek_position(&self.command_controller, position);
+        self.last_seek_position.set(Some(position));
     }
 }
 
@@ -273,6 +286,7 @@ fn install_drag_begin(drag: &gtk::GestureDrag, context: SeekContext) {
         }
         context.dragging.set(true);
         context.last_seek_at.set(None);
+        context.last_seek_position.set(None);
         context.preview(x);
     });
 }
@@ -296,7 +310,7 @@ fn install_drag_update(drag: &gtk::GestureDrag, context: SeekContext) {
             Some(at) => now.saturating_duration_since(at) >= SCRUB_SEEK_THROTTLE,
         };
         if should_dispatch {
-            context.dispatch_at_current_fraction();
+            context.dispatch_at_current_fraction(false);
             context.last_seek_at.set(Some(now));
         }
     });
@@ -315,7 +329,7 @@ fn install_drag_end(drag: &gtk::GestureDrag, context: SeekContext) {
         if context.preview(start_x + offset_x).is_none() {
             return;
         }
-        context.dispatch_at_current_fraction();
+        context.dispatch_at_current_fraction(true);
     });
 }
 
@@ -342,16 +356,15 @@ fn preview_at_x(
     Some(fraction)
 }
 
-fn dispatch_seek_from_fraction(
-    command_controller: &SharedCommandController,
-    duration: Duration,
-    fraction: f64,
-) {
-    if duration.is_zero() {
-        return;
-    }
+fn position_from_fraction(duration: Duration, fraction: f64) -> Duration {
+    duration.mul_f64(fraction.clamp(0.0, 1.0))
+}
 
-    let position = duration.mul_f64(fraction.clamp(0.0, 1.0));
+fn positions_are_too_close(left: Duration, right: Duration) -> bool {
+    left.abs_diff(right) < SCRUB_SEEK_MIN_STEP
+}
+
+fn dispatch_seek_position(command_controller: &SharedCommandController, position: Duration) {
     let _result = command_controller.dispatch(ApplicationCommand::Playback(PlaybackCommand::Seek(
         position,
     )));
