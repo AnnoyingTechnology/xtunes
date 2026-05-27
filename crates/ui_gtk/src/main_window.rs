@@ -34,7 +34,10 @@ use super::{
         LIBRARY_DROP_INDICATOR_CLASS, install_file_drop_target, library_import_requested_callback,
     },
     library_scan::library_scan_requested_callback,
-    mode_bar::{ShowSongsViewCallback, ViewModeChangedCallback, build_mode_bar},
+    mode_bar::{
+        ShowSongsViewCallback, ViewModeChangedCallback, build_mode_bar,
+        stack_child_for_playlists_mode,
+    },
     now_playing::NowPlayingView,
     playlists_header::{PlaylistsHeader, PlaylistsHeaderState},
     preferences::install_preferences_action,
@@ -365,11 +368,22 @@ pub(crate) fn build_main_window(
         playback_changed: playback_changed.clone(),
         track_row_changed_holder: track_row_changed_holder.clone(),
     });
+    // Authoritative record of the user's top-bar view-mode choice.
+    //
+    // The mode used to be inferred from `content_stack.visible_child_name()`
+    // alone, but Playlists mode now multiplexes that stack between
+    // `SONGS_VIEW` (Library/Music selection) and `PLAYLISTS_VIEW` (playlist
+    // selection) depending on the sidebar — so the stack child is no longer
+    // a faithful witness of the mode. This cell is the single source of
+    // truth, written by `mode_bar::apply_view_mode` and read by everything
+    // that needs to persist or branch on the active mode.
+    let current_view_mode: Rc<Cell<UiViewMode>> = Rc::new(Cell::new(UiViewMode::Songs));
     sidebar.set_selection_changed(sidebar_selection_changed_callback(
         &runtime,
         &playlists_table,
         &playlists_header,
         &content_stack,
+        &current_view_mode,
         &playlists_dirty,
         visible_summary_refresh.clone(),
         &current_search_text,
@@ -439,8 +453,9 @@ pub(crate) fn build_main_window(
     let command_controller_for_global_shortcuts = command_controller.clone();
     let mode_bar = build_mode_bar(
         &window,
-        &sidebar_widget,
+        &sidebar,
         &content_stack,
+        &current_view_mode,
         command_controller,
         scan_requested,
         consolidation_requested.clone(),
@@ -513,7 +528,7 @@ pub(crate) fn build_main_window(
     let playlists_table_for_close = playlists_table.clone();
     let titlebar_for_close = titlebar.clone();
     let runtime_for_close = runtime.clone();
-    let content_stack_for_close = content_stack.clone();
+    let current_view_mode_for_close = current_view_mode.clone();
     let sidebar_for_close = sidebar.clone();
     window.connect_close_request(move |_window| {
         songs_table_for_close.flush_pending_layout_save();
@@ -523,7 +538,7 @@ pub(crate) fn build_main_window(
             .borrow_mut()
             .save_ui_settings(ui_settings_from_widgets(
                 &titlebar_for_close,
-                &content_stack_for_close,
+                current_view_mode_for_close.get(),
                 &sidebar_for_close,
             ));
         glib::Propagation::Proceed
@@ -644,24 +659,16 @@ fn install_playlists_view_activator(
 
 fn ui_settings_from_widgets(
     titlebar: &Titlebar,
-    content_stack: &gtk::Stack,
+    view_mode: UiViewMode,
     sidebar: &PlaylistSidebar,
 ) -> UiSettings {
     UiSettings {
         search_text: titlebar.search_text(),
-        view_mode: view_mode_from_stack(content_stack),
+        view_mode,
         playlist_selection: match sidebar.current_selection() {
             Some(SidebarSelection::Item(item)) => Some(item),
             Some(SidebarSelection::Library) | None => None,
         },
-    }
-}
-
-fn view_mode_from_stack(content_stack: &gtk::Stack) -> UiViewMode {
-    match content_stack.visible_child_name().as_deref() {
-        Some(ALBUMS_VIEW) => UiViewMode::Albums,
-        Some(PLAYLISTS_VIEW) => UiViewMode::Playlists,
-        _ => UiViewMode::Songs,
     }
 }
 
@@ -1076,11 +1083,13 @@ fn resolve_move_target(
     Some((target_parent, position))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sidebar_selection_changed_callback(
     runtime: &SharedRuntime,
     playlists_table: &TrackTable,
     playlists_header: &PlaylistsHeader,
     content_stack: &gtk::Stack,
+    current_view_mode: &Rc<Cell<UiViewMode>>,
     playlists_dirty: &Rc<Cell<bool>>,
     visible_summary_refresh: ViewModeChangedCallback,
     current_search_text: &Rc<RefCell<String>>,
@@ -1089,6 +1098,7 @@ fn sidebar_selection_changed_callback(
     let playlists_table = playlists_table.clone();
     let playlists_header = playlists_header.clone();
     let content_stack = content_stack.clone();
+    let current_view_mode = current_view_mode.clone();
     let playlists_dirty = playlists_dirty.clone();
     let current_search_text = current_search_text.clone();
 
@@ -1104,6 +1114,18 @@ fn sidebar_selection_changed_callback(
             Some(SidebarSelection::Item(PlaylistItem::Playlist(_)))
         ) {
             playlists_table.apply_playlist_default_sort();
+        }
+        // In Playlists mode, the sidebar selection chooses which page of
+        // the content stack is visible: Library/Music routes to the
+        // already-populated songs view (no rebuild), a real playlist
+        // routes to the playlist-detail view (header + per-selection
+        // table). Outside Playlists mode the stack child is owned by the
+        // top-bar mode and must not be touched here.
+        if current_view_mode.get() == UiViewMode::Playlists {
+            let target = stack_child_for_playlists_mode(selection);
+            if content_stack.visible_child_name().as_deref() != Some(target) {
+                content_stack.set_visible_child_name(target);
+            }
         }
         let search_text = current_search_text.borrow().clone();
         refresh_playlists_view_if_visible(
@@ -2475,17 +2497,11 @@ fn install_keyboard_shortcuts(window: &gtk::ApplicationWindow, context: Keyboard
 /// ever played (no current `now_playing.track`). Paused tracks still
 /// qualify — they remain the current track until something else loads.
 ///
-/// Ctrl-L reveal currently has one deliberate product ambiguity:
-///
-/// **"Wrong view" intent is ambiguous.** Today this stays in the active
-///    view when its model contains the playing track. In Playlists view
-///    with the "Library" sidebar entry selected, that means the song is
-///    revealed in the Playlists table (since Library mirrors the full
-///    library), which the user has flagged as wrong — they expect a switch
-///    to Songs. A real fix needs the Playlists branch to check whether a
-///    *real* playlist is selected (vs. the Library pseudo-entry), or to
-///    abandon the per-view reveal entirely and always route through Songs.
-///    Not done here because the right product behavior is unclear.
+/// In Playlists mode with the Library/Music entry selected the visible
+/// stack child is `SONGS_VIEW`, so this dispatches to `songs_table` and
+/// behaves identically to a Ctrl-L from Songs mode. The per-playlist
+/// table only receives the reveal when a real playlist or smart
+/// playlist is the current selection.
 fn jump_to_current_track(
     runtime: &SharedRuntime,
     songs_table: &TrackTable,

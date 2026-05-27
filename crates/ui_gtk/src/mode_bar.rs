@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc};
 
 use gtk::prelude::*;
 use sustain_app_runtime::UiViewMode;
@@ -10,7 +10,9 @@ use super::{
     ALBUMS_VIEW, MODE_BAR_HEIGHT, MODE_BUTTON_HEIGHT, PLAYLISTS_VIEW, SONGS_VIEW,
     command_controller::SharedCommandController,
     library_consolidation::LibraryConsolidationRequestedCallback,
-    library_scan::LibraryScanRequestedCallback, preferences::settings_button,
+    library_scan::LibraryScanRequestedCallback,
+    preferences::settings_button,
+    sidebar::{PlaylistSidebar, SidebarSelection},
 };
 
 pub(crate) type ViewModeChangedCallback = Rc<dyn Fn()>;
@@ -28,8 +30,9 @@ pub(crate) struct ModeBar {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_mode_bar(
     window: &gtk::ApplicationWindow,
-    sidebar: &gtk::Box,
+    sidebar: &PlaylistSidebar,
     content_stack: &gtk::Stack,
+    current_view_mode: &Rc<Cell<UiViewMode>>,
     command_controller: SharedCommandController,
     scan_requested: LibraryScanRequestedCallback,
     consolidation_requested: LibraryConsolidationRequestedCallback,
@@ -56,6 +59,7 @@ pub(crate) fn build_mode_bar(
         UiViewMode::Songs,
         sidebar,
         content_stack,
+        current_view_mode,
         on_view_mode_changed.clone(),
     );
     connect_mode_button(
@@ -63,6 +67,7 @@ pub(crate) fn build_mode_bar(
         UiViewMode::Albums,
         sidebar,
         content_stack,
+        current_view_mode,
         on_view_mode_changed.clone(),
     );
     connect_mode_button(
@@ -70,6 +75,7 @@ pub(crate) fn build_mode_bar(
         UiViewMode::Playlists,
         sidebar,
         content_stack,
+        current_view_mode,
         on_view_mode_changed,
     );
 
@@ -120,34 +126,70 @@ pub(crate) fn build_mode_bar(
 fn connect_mode_button(
     button: &gtk::ToggleButton,
     mode: UiViewMode,
-    sidebar: &gtk::Box,
+    sidebar: &PlaylistSidebar,
     content_stack: &gtk::Stack,
+    current_view_mode: &Rc<Cell<UiViewMode>>,
     on_view_mode_changed: ViewModeChangedCallback,
 ) {
     let sidebar = sidebar.clone();
     let content_stack = content_stack.clone();
+    let current_view_mode = current_view_mode.clone();
     button.connect_toggled(move |button| {
         if button.is_active() {
-            apply_view_mode(mode, &sidebar, &content_stack);
+            apply_view_mode(mode, &sidebar, &content_stack, &current_view_mode);
             on_view_mode_changed();
         }
     });
 }
 
-fn apply_view_mode(mode: UiViewMode, sidebar: &gtk::Box, content_stack: &gtk::Stack) {
+/// Apply a top-bar mode change.
+///
+/// The "mode" the user picks (Songs / Albums / Playlists) is one input;
+/// the sidebar's current selection is the other. Together they decide
+/// which page of `content_stack` is visible. In Playlists mode the choice
+/// is split:
+///
+/// - selection is the Library entry (UI label: "Music") → `SONGS_VIEW`.
+///   The Library row is conceptually the whole-library access point, and
+///   we display it via the already-populated songs table rather than
+///   rebuilding the same rows into the playlist-detail table. This keeps
+///   the click cost at zero and avoids showing a playlist-style header
+///   above what is really the songs list.
+/// - selection is a playlist / smart playlist → `PLAYLISTS_VIEW`, which
+///   carries the playlist-detail header and the per-selection table.
+pub(crate) fn apply_view_mode(
+    mode: UiViewMode,
+    sidebar: &PlaylistSidebar,
+    content_stack: &gtk::Stack,
+    current_view_mode: &Rc<Cell<UiViewMode>>,
+) {
+    current_view_mode.set(mode);
     match mode {
         UiViewMode::Songs => {
-            sidebar.set_visible(false);
+            sidebar.widget().set_visible(false);
             content_stack.set_visible_child_name(SONGS_VIEW);
         }
         UiViewMode::Albums => {
-            sidebar.set_visible(false);
+            sidebar.widget().set_visible(false);
             content_stack.set_visible_child_name(ALBUMS_VIEW);
         }
         UiViewMode::Playlists => {
-            sidebar.set_visible(true);
-            content_stack.set_visible_child_name(PLAYLISTS_VIEW);
+            sidebar.widget().set_visible(true);
+            content_stack.set_visible_child_name(stack_child_for_playlists_mode(
+                sidebar.current_selection(),
+            ));
         }
+    }
+}
+
+/// Picks the content-stack child appropriate for the Playlists mode given
+/// the sidebar's current selection. Exposed so the sidebar-selection
+/// callback can resync the stack when the user clicks between Music and
+/// a playlist *without* changing the top-bar mode.
+pub(crate) fn stack_child_for_playlists_mode(selection: Option<SidebarSelection>) -> &'static str {
+    match selection {
+        Some(SidebarSelection::Item(_)) => PLAYLISTS_VIEW,
+        Some(SidebarSelection::Library) | None => SONGS_VIEW,
     }
 }
 

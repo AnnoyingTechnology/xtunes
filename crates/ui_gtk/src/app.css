@@ -513,23 +513,27 @@ popover.compact-context-menu > contents {
     color: #e66100;
 }
 
-.playlist-sidebar-library {
-    padding: 4px 8px;
-    border-radius: 4px;
+/* LIBRARY / PLAYLISTS section headers. Pure typographic markers: small,
+   muted, lightly letter-spaced, no background, no hover, not selectable.
+   Text is set uppercase at the source (GTK4 CSS has no text-transform).
+   Top margin gives breathing room from the row above (or window chrome
+   for the first header); bottom margin separates the header from the
+   first selectable row underneath. */
+.playlist-sidebar-section-header {
+    color: alpha(@theme_fg_color, 0.55);
+    font-size: 0.85em;
+    letter-spacing: 0.06em;
+    margin: 10px 8px 4px 8px;
 }
 
-.playlist-sidebar-library.selected {
-    background-color: alpha(@theme_fg_color, 0.10);
-    font-weight: 600;
-}
-
-.playlist-sidebar-library:hover {
-    background-color: alpha(@theme_fg_color, 0.06);
-}
-
+/* Shared chrome for every selectable sidebar row — the Music entry under
+   LIBRARY and every playlist/folder/smart-playlist row under PLAYLISTS.
+   No border-radius: the accent selection background painted by accent.rs
+   spans the full row width with square edges, matching the GTK default
+   `listview > row:selected` rectangle so the two row populations look
+   uniform. */
 .playlist-sidebar-row {
     padding: 4px 8px;
-    border-radius: 4px;
 }
 
 /* Adwaita gives every `listview > row` ~8px vertical padding and a 32px
@@ -550,18 +554,6 @@ popover.compact-context-menu > contents {
     min-height: 0;
     padding-top: 0;
     padding-bottom: 0;
-}
-
-/* Above/below drop indicators are a 2px horizontal bar drawn via an inset
-   box-shadow; the row's own border-radius would clip the bar's ends into
-   curves, producing the "rounded extremities" look the user saw. Squaring
-   the row only while an above/below indicator is active keeps the bar a
-   clean rectangle without affecting the resting visual. The "into"
-   indicator deliberately keeps the rounded corners — the box-shadow border
-   follows them, giving a tidy outlined drop target. */
-.playlist-sidebar-row.sidebar-drop-above,
-.playlist-sidebar-row.sidebar-drop-below {
-    border-radius: 0;
 }
 
 button.track-context-menu-item,

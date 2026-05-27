@@ -7,7 +7,7 @@ use std::{
 };
 
 use gtk::prelude::*;
-use gtk::{gdk, glib};
+use gtk::{gdk, gio, glib};
 
 use sustain_app_runtime::{PlaylistItem, SmartPlaylistId, TrackId};
 
@@ -34,6 +34,13 @@ pub(crate) type SidebarDeleteCallback = Rc<dyn Fn(PlaylistItem)>;
 pub(crate) type SidebarTracksDropCallback = Rc<dyn Fn(PlaylistItem, Vec<TrackId>)>;
 pub(crate) type SidebarEditSmartPlaylistCallback = Rc<dyn Fn(SmartPlaylistId)>;
 
+/// One of the sidebar's two selection targets.
+///
+/// `Library` is the whole-library access point — the row presented in the
+/// sidebar UI as **"Music"** under the LIBRARY section header. The variant
+/// name stays `Library` because that is what the entry semantically *is*
+/// (the user's full library), independent of how it happens to be labelled
+/// in the chrome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SidebarSelection {
     Library,
@@ -50,7 +57,7 @@ type EditSmartPlaylistCallbackHolder = Rc<RefCell<Option<SidebarEditSmartPlaylis
 pub(crate) struct PlaylistSidebar {
     root: gtk::Box,
     selection: gtk::SingleSelection,
-    library_row: gtk::Box,
+    library_row: gtk::TreeExpander,
     library_selected: Rc<Cell<bool>>,
     runtime: SharedRuntime,
     on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>>,
@@ -69,20 +76,12 @@ impl PlaylistSidebar {
         root.set_vexpand(true);
         root.set_size_request(SIDEBAR_MIN_WIDTH, -1);
 
+        root.append(&build_section_header("LIBRARY"));
+
         let library_row = build_library_row();
         root.append(&library_row);
 
-        root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-
-        let title = gtk::Label::new(Some("Playlists"));
-        title.set_margin_top(8);
-        title.set_margin_end(8);
-        title.set_margin_bottom(4);
-        title.set_margin_start(8);
-        title.set_xalign(0.0);
-        root.append(&title);
-
-        root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        root.append(&build_section_header("PLAYLISTS"));
 
         let tree_model = build_tree_model(&runtime.borrow());
         let selection = gtk::SingleSelection::new(Some(tree_model));
@@ -259,29 +258,72 @@ impl PlaylistSidebar {
     }
 }
 
-fn build_library_row() -> gtk::Box {
+/// Builds the whole-library access row.
+///
+/// Internally this is the [`SidebarSelection::Library`] entry; in the
+/// chrome it is labelled **"Music"** and rendered with the same
+/// `.playlist-sidebar-row` styling as a playlist row, so the LIBRARY and
+/// PLAYLISTS sections present a uniform list of selectable items.
+///
+/// The outer wrapper is a [`gtk::TreeExpander`] so Music sits at the
+/// same horizontal indent as the playlist-row factory's TreeExpanders.
+/// That column is only reserved when the expander has a real
+/// [`gtk::TreeListRow`] attached — without one, TreeExpander renders
+/// its child flush-left and Music ends up several pixels closer to the
+/// sidebar's left edge than the playlist rows. We have no real tree to
+/// mint a row from (Music is the library, not a playlist), so the
+/// helper below builds a one-item stub [`gtk::TreeListModel`] purely to
+/// obtain a depth-0, no-children row whose only job is to convince the
+/// expander to allocate its toggle column. The expander keeps a
+/// reference to the row (which keeps the stub model alive), so the
+/// model does not need to be stored on the sidebar struct.
+fn build_library_row() -> gtk::TreeExpander {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    row.add_css_class("playlist-sidebar-library");
-    row.set_margin_top(6);
-    row.set_margin_end(6);
-    row.set_margin_start(6);
-    row.set_margin_bottom(2);
 
     let icon = gtk::Image::from_icon_name("audio-x-generic-symbolic");
     icon.add_css_class("playlist-sidebar-icon");
 
-    let label = gtk::Label::new(Some("Library"));
+    let label = gtk::Label::new(Some("Music"));
     label.set_xalign(0.0);
     label.set_hexpand(true);
     label.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
     row.append(&icon);
     row.append(&label);
-    row
+
+    let expander = gtk::TreeExpander::new();
+    expander.add_css_class("playlist-sidebar-row");
+    expander.set_child(Some(&row));
+    if let Some(stub_row) = library_row_stub_tree_list_row() {
+        expander.set_list_row(Some(&stub_row));
+    }
+    expander
+}
+
+/// Builds a throwaway one-item [`gtk::TreeListModel`] and returns its
+/// depth-0 [`gtk::TreeListRow`]. See [`build_library_row`] for the
+/// rationale — TreeExpander only allocates indent for its toggle column
+/// when a list row is attached, and there is no natural tree model that
+/// the Music entry belongs to.
+fn library_row_stub_tree_list_row() -> Option<gtk::TreeListRow> {
+    let stub_store = gio::ListStore::new::<glib::BoxedAnyObject>();
+    stub_store.append(&glib::BoxedAnyObject::new(()));
+    let stub_model = gtk::TreeListModel::new(stub_store, false, true, |_| None);
+    stub_model.row(0)
+}
+
+/// Builds a non-interactive section header — the small uppercase labels
+/// that introduce the LIBRARY and PLAYLISTS groups. Headers are pure
+/// typography: no background, no hover, no click target, no focus.
+fn build_section_header(text: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.add_css_class("playlist-sidebar-section-header");
+    label.set_xalign(0.0);
+    label
 }
 
 fn connect_library_row(
-    library_row: &gtk::Box,
+    library_row: &gtk::TreeExpander,
     library_selected: &Rc<Cell<bool>>,
     selection: &gtk::SingleSelection,
     on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>>,
@@ -308,7 +350,7 @@ fn connect_library_row(
 
 fn connect_selection_signal(
     selection: &gtk::SingleSelection,
-    library_row: &gtk::Box,
+    library_row: &gtk::TreeExpander,
     library_selected: &Rc<Cell<bool>>,
     on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>>,
 ) {

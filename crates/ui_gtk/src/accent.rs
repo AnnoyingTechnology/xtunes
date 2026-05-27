@@ -179,6 +179,34 @@ fn accent_css(palette: AccentPalette) -> String {
             color: {foreground};
         }}
 
+        /* Sidebar selection. Two row populations need the accent fill:
+           the standalone "Music" entry under LIBRARY (a `gtk::Box` that
+           carries `.playlist-sidebar-row` and gets a `.selected` class
+           toggled in code), and every row under PLAYLISTS (each lives
+           inside a `gtk::ListView` whose `row:selected` pseudoclass is
+           managed by GTK). Painting both with the same accent keeps the
+           two sections visually uniform and matches the track table's
+           selection colour. */
+        .playlist-sidebar-row.selected {{
+            background-color: {background};
+            color: {foreground};
+        }}
+
+        .playlist-sidebar-row.selected .playlist-sidebar-icon,
+        .playlist-sidebar-row.selected label {{
+            color: {foreground};
+        }}
+
+        listview.playlist-sidebar-list > row:selected {{
+            background-color: {background};
+            color: {foreground};
+        }}
+
+        listview.playlist-sidebar-list > row:selected .playlist-sidebar-icon,
+        listview.playlist-sidebar-list > row:selected label {{
+            color: {foreground};
+        }}
+
         .playlist-sidebar-row:drop(active) {{
             background-color: transparent;
             background-image: none;
@@ -241,6 +269,16 @@ mod tests {
         assert!(css.contains(".track-table-cell.track-table-row-selected"));
         assert!(css.contains(".track-table-status-playing"));
         assert!(css.contains("#3a944a"));
+    }
+
+    #[test]
+    fn accent_css_paints_sidebar_selection() {
+        let css = accent_css(accent_palette("green"));
+
+        assert!(css.contains(".playlist-sidebar-row.selected"));
+        assert!(css.contains("listview.playlist-sidebar-list > row:selected"));
+        assert!(css.contains("#3a944a"));
+        assert!(css.contains("#ffffff"));
     }
 
     #[test]
