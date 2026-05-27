@@ -1,134 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use std::{cell::Cell, path::PathBuf, rc::Rc};
+use std::path::PathBuf;
 
 use gtk::prelude::*;
-use gtk::{gdk, gio, glib};
+use gtk::{gio, glib::Propagation};
 
-use super::{
-    ApplicationCommand, ApplicationRuntimeError, LibraryManagementMode, PREFERENCES_HEIGHT,
-    PREFERENCES_WIDTH, WINDOW_SHADOW_MARGIN, command_controller::SharedCommandController,
+use super::super::{
+    ApplicationCommand, ApplicationRuntimeError, LibraryManagementMode,
+    command_controller::SharedCommandController,
     library_consolidation::LibraryConsolidationRequestedCallback,
     library_scan::LibraryScanRequestedCallback,
 };
+use super::switch_row::build_switch_row;
 
-pub(crate) fn install_preferences_action(
-    app: &gtk::Application,
-    window: &gtk::ApplicationWindow,
+pub(super) fn build(
+    parent_window: &gtk::Window,
     command_controller: SharedCommandController,
     scan_requested: LibraryScanRequestedCallback,
     consolidation_requested: LibraryConsolidationRequestedCallback,
-) {
-    if app.lookup_action("preferences").is_some() {
-        return;
-    }
-
-    let preferences = gio::SimpleAction::new("preferences", None);
-    let window = window.clone();
-    let command_controller = command_controller.clone();
-    let scan_requested = scan_requested.clone();
-    let consolidation_requested = consolidation_requested.clone();
-    preferences.connect_activate(move |_action, _parameter| {
-        open_preferences_window(
-            &window,
-            command_controller.clone(),
-            scan_requested.clone(),
-            consolidation_requested.clone(),
-        );
-    });
-    app.add_action(&preferences);
-    app.set_accels_for_action("app.preferences", &["<Primary>comma"]);
-}
-
-pub(crate) fn settings_button(
-    window: &gtk::ApplicationWindow,
-    command_controller: SharedCommandController,
-    scan_requested: LibraryScanRequestedCallback,
-    consolidation_requested: LibraryConsolidationRequestedCallback,
-) -> gtk::Button {
-    let icon = gtk::Image::from_icon_name("preferences-system-symbolic");
-    icon.set_pixel_size(18);
-
-    let button = gtk::Button::new();
-    button.add_css_class("flat");
-    button.add_css_class("settings-button");
-    button.set_child(Some(&icon));
-    button.set_tooltip_text(Some("Preferences"));
-    button.set_valign(gtk::Align::Center);
-
-    let window = window.clone();
-    let command_controller = command_controller.clone();
-    let scan_requested = scan_requested.clone();
-    let consolidation_requested = consolidation_requested.clone();
-    button.connect_clicked(move |_| {
-        open_preferences_window(
-            &window,
-            command_controller.clone(),
-            scan_requested.clone(),
-            consolidation_requested.clone(),
-        );
-    });
-
-    button
-}
-
-fn open_preferences_window(
-    parent: &gtk::ApplicationWindow,
-    command_controller: SharedCommandController,
-    scan_requested: LibraryScanRequestedCallback,
-    consolidation_requested: LibraryConsolidationRequestedCallback,
-) {
-    let window = gtk::Window::builder()
-        .title("Library Path")
-        .decorated(false)
-        .transient_for(parent)
-        .modal(true)
-        .default_width(PREFERENCES_WIDTH + WINDOW_SHADOW_MARGIN * 2)
-        .default_height(PREFERENCES_HEIGHT + WINDOW_SHADOW_MARGIN * 2)
-        .resizable(false)
-        .build();
-    window.add_css_class("app-window");
-
-    let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    frame.add_css_class("preferences-frame");
-    frame.set_hexpand(true);
-    frame.set_vexpand(true);
-    frame.set_margin_top(WINDOW_SHADOW_MARGIN);
-    frame.set_margin_end(WINDOW_SHADOW_MARGIN);
-    frame.set_margin_bottom(WINDOW_SHADOW_MARGIN);
-    frame.set_margin_start(WINDOW_SHADOW_MARGIN);
-    frame.set_size_request(PREFERENCES_WIDTH, PREFERENCES_HEIGHT);
-
-    let panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    panel.add_css_class("preferences-panel");
-    panel.set_hexpand(true);
-    panel.set_vexpand(true);
-    panel.set_overflow(gtk::Overflow::Hidden);
-
-    let close_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    close_row.set_margin_top(8);
-    close_row.set_margin_end(8);
-    close_row.set_margin_start(8);
-
-    let close_icon = gtk::Image::from_icon_name("window-close-symbolic");
-    close_icon.set_pixel_size(14);
-
-    let close_button = gtk::Button::new();
-    close_button.add_css_class("flat");
-    close_button.add_css_class("preference-close-button");
-    close_button.set_child(Some(&close_icon));
-    close_button.set_tooltip_text(Some("Close"));
-    close_button.set_halign(gtk::Align::End);
-    close_button.set_valign(gtk::Align::Center);
-    close_button.set_hexpand(true);
-
-    let window_for_close = window.clone();
-    close_button.connect_clicked(move |_| {
-        window_for_close.close();
-    });
-    close_row.append(&close_button);
-
+) -> gtk::Widget {
     let content = gtk::Box::new(gtk::Orientation::Vertical, 14);
     content.set_margin_top(24);
     content.set_margin_end(24);
@@ -186,10 +77,6 @@ fn open_preferences_window(
     scan_status.set_xalign(0.0);
     scan_status.set_wrap(true);
 
-    let organization_group = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    organization_group.set_margin_top(4);
-
-    let keep_organized_check = gtk::CheckButton::with_label("Keep my library organized");
     let library_path_is_valid = library_path_entry_is_valid(&path_entry);
     let management_mode = command_controller
         .runtime()
@@ -197,18 +84,15 @@ fn open_preferences_window(
         .settings()
         .library
         .management_mode;
-    keep_organized_check.set_active(
+    let keep_organized_row = build_switch_row(
+        "Keep my library organized",
+        "New tracks are copied into clean artist, album, and track folders. \
+         Existing tracks are organized in the background when this is turned on.",
         library_path_is_valid
             && management_mode == LibraryManagementMode::CopyAddedFilesIntoLibrary,
     );
-    keep_organized_check.set_sensitive(library_path_is_valid);
-
-    let organization_help = gtk::Label::new(Some(
-        "New tracks are copied into clean artist, album, and track folders. Existing tracks are organized in the background when this is turned on.",
-    ));
-    organization_help.add_css_class("preference-helper");
-    organization_help.set_xalign(0.0);
-    organization_help.set_wrap(true);
+    let keep_organized_switch = keep_organized_row.switch.clone();
+    keep_organized_switch.set_sensitive(library_path_is_valid);
 
     let command_controller_for_organization = command_controller.clone();
     let consolidation_requested_for_organization = consolidation_requested.clone();
@@ -217,13 +101,7 @@ fn open_preferences_window(
     let folder_button_for_organization_sensitivity = folder_button.clone();
     let scan_button_for_organization_sensitivity = scan_button.clone();
     let scan_status_for_organization = scan_status.clone();
-    let suppress_organization_toggle = Rc::new(Cell::new(false));
-    let suppress_organization_toggle_for_callback = suppress_organization_toggle.clone();
-    keep_organized_check.connect_toggled(move |check_button| {
-        if suppress_organization_toggle_for_callback.get() {
-            return;
-        }
-
+    keep_organized_switch.connect_state_set(move |_switch, requested_state| {
         // The toggle alters two settings at once: the library path (kept
         // in sync with the entry contents) and the management mode. We
         // build the full target settings and dispatch a single
@@ -237,14 +115,11 @@ fn open_preferences_window(
         };
         let path_is_valid = library_path.as_ref().is_some_and(|path| path.is_dir());
 
-        if check_button.is_active() && !path_is_valid {
+        if requested_state && !path_is_valid {
             scan_status_for_organization.set_text(scan_error_text(
                 ApplicationRuntimeError::LibraryPathUnavailable,
             ));
-            suppress_organization_toggle_for_callback.set(true);
-            check_button.set_active(false);
-            suppress_organization_toggle_for_callback.set(false);
-            return;
+            return Propagation::Stop;
         }
 
         let mut settings = command_controller_for_organization
@@ -253,7 +128,7 @@ fn open_preferences_window(
             .settings()
             .clone();
         settings.library.path = library_path;
-        settings.library.management_mode = if check_button.is_active() {
+        settings.library.management_mode = if requested_state {
             LibraryManagementMode::CopyAddedFilesIntoLibrary
         } else {
             LibraryManagementMode::ReferenceFilesInPlace
@@ -261,33 +136,29 @@ fn open_preferences_window(
         match command_controller_for_organization
             .dispatch(ApplicationCommand::UpdateSettings(settings))
         {
-            Ok(()) if check_button.is_active() => {
-                match consolidation_requested_for_organization() {
-                    Ok(()) => {
-                        path_entry_for_organization_sensitivity.set_sensitive(false);
-                        folder_button_for_organization_sensitivity.set_sensitive(false);
-                        scan_button_for_organization_sensitivity.set_sensitive(false);
-                        scan_status_for_organization.set_text(
-                            "Library organization started. Progress is shown in the status bar.",
-                        );
-                    }
-                    Err(error) => {
-                        scan_status_for_organization.set_text(scan_error_text(error));
-                        let mut settings = command_controller_for_organization
-                            .runtime()
-                            .borrow()
-                            .settings()
-                            .clone();
-                        settings.library.management_mode =
-                            LibraryManagementMode::ReferenceFilesInPlace;
-                        let _result = command_controller_for_organization
-                            .dispatch(ApplicationCommand::UpdateSettings(settings));
-                        suppress_organization_toggle_for_callback.set(true);
-                        check_button.set_active(false);
-                        suppress_organization_toggle_for_callback.set(false);
-                    }
+            Ok(()) if requested_state => match consolidation_requested_for_organization() {
+                Ok(()) => {
+                    path_entry_for_organization_sensitivity.set_sensitive(false);
+                    folder_button_for_organization_sensitivity.set_sensitive(false);
+                    scan_button_for_organization_sensitivity.set_sensitive(false);
+                    scan_status_for_organization.set_text(
+                        "Library organization started. Progress is shown in the status bar.",
+                    );
+                    Propagation::Proceed
                 }
-            }
+                Err(error) => {
+                    scan_status_for_organization.set_text(scan_error_text(error));
+                    let mut settings = command_controller_for_organization
+                        .runtime()
+                        .borrow()
+                        .settings()
+                        .clone();
+                    settings.library.management_mode = LibraryManagementMode::ReferenceFilesInPlace;
+                    let _result = command_controller_for_organization
+                        .dispatch(ApplicationCommand::UpdateSettings(settings));
+                    Propagation::Stop
+                }
+            },
             Ok(()) => {
                 if command_controller_for_organization
                     .runtime()
@@ -300,27 +171,16 @@ fn open_preferences_window(
                 } else {
                     scan_status_for_organization.set_text("");
                 }
+                Propagation::Proceed
             }
             Err(error) => {
                 scan_status_for_organization.set_text(scan_error_text(error));
-                let active = command_controller_for_organization
-                    .runtime()
-                    .borrow()
-                    .settings()
-                    .library
-                    .management_mode
-                    == LibraryManagementMode::CopyAddedFilesIntoLibrary;
-                suppress_organization_toggle_for_callback.set(true);
-                check_button.set_active(active);
-                suppress_organization_toggle_for_callback.set(false);
+                Propagation::Stop
             }
         }
     });
 
-    organization_group.append(&keep_organized_check);
-    organization_group.append(&organization_help);
-
-    let keep_organized_for_path_change = keep_organized_check.clone();
+    let keep_organized_for_path_change = keep_organized_switch.clone();
     let command_controller_for_path_change = command_controller.clone();
     path_entry.connect_changed(move |entry| {
         let path_is_valid = library_path_entry_is_valid(entry);
@@ -341,12 +201,12 @@ fn open_preferences_window(
         let _result = save_library_path_from_entry(&command_controller_for_entry, entry);
     });
 
-    let window_for_folder = window.clone();
+    let parent_for_folder = parent_window.clone();
     let command_controller_for_folder = command_controller.clone();
     let path_entry_for_folder = path_entry.clone();
     folder_button.connect_clicked(move |_| {
         open_library_folder_chooser(
-            &window_for_folder,
+            &parent_for_folder,
             &command_controller_for_folder,
             &path_entry_for_folder,
         );
@@ -384,26 +244,10 @@ fn open_preferences_window(
 
     content.append(&label_group);
     content.append(&path_row);
-    content.append(&organization_group);
+    content.append(&keep_organized_row.container);
     content.append(&scan_status);
-    panel.append(&close_row);
-    panel.append(&content);
-    frame.append(&panel);
-    window.set_child(Some(&frame));
 
-    let key_controller = gtk::EventControllerKey::new();
-    let window_for_escape = window.clone();
-    key_controller.connect_key_pressed(move |_controller, key, _keycode, _state| {
-        if key == gdk::Key::Escape {
-            window_for_escape.close();
-            glib::Propagation::Stop
-        } else {
-            glib::Propagation::Proceed
-        }
-    });
-    window.add_controller(key_controller);
-
-    window.present();
+    content.upcast()
 }
 
 fn open_library_folder_chooser(
@@ -478,7 +322,7 @@ fn request_library_scan_from_entry(
     scan_requested(PathBuf::from(path_text))
 }
 
-fn scan_error_text(error: ApplicationRuntimeError) -> &'static str {
+pub(super) fn scan_error_text(error: ApplicationRuntimeError) -> &'static str {
     match error {
         ApplicationRuntimeError::LibraryScanFailed => "The selected folder could not be scanned.",
         ApplicationRuntimeError::LibraryConsolidationFailed => {

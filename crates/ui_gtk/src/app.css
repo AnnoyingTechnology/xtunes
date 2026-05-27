@@ -184,6 +184,56 @@ button.now-playing-side-button:focus {
     opacity: 0.90;
 }
 
+.preferences-tab-strip {
+    border-bottom: 1px solid alpha(@theme_fg_color, 0.10);
+    min-height: 76px;
+    padding: 4px 4px 0 4px;
+}
+
+.preferences-tab-buttons {
+    padding: 0 8px;
+}
+
+button.preferences-tab-button {
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    box-shadow: none;
+    margin: 4px 6px 0 6px;
+    min-height: 64px;
+    min-width: 80px;
+    padding: 6px 10px 4px 10px;
+    opacity: 0.62;
+}
+
+button.preferences-tab-button:hover {
+    background: alpha(@theme_fg_color, 0.06);
+    opacity: 0.85;
+}
+
+button.preferences-tab-button:checked {
+    background: alpha(@theme_selected_bg_color, 0.18);
+    opacity: 1.0;
+}
+
+button.preferences-tab-button:checked:hover {
+    background: alpha(@theme_selected_bg_color, 0.24);
+}
+
+.preferences-tab-label {
+    font-size: 0.82em;
+}
+
+.preference-switch-row {
+    margin: 2px 0;
+}
+
+.preference-switch-row label {
+    /* Row title sits inline with the switch; the muted helper picks up
+       the existing .preference-helper styling underneath. */
+    font-weight: 500;
+}
+
 .mode-button {
     min-height: 22px;
     border-radius: 999px;
