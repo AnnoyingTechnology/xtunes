@@ -12,8 +12,8 @@ use super::super::{
     library_consolidation::LibraryConsolidationRequestedCallback,
     library_scan::LibraryScanRequestedCallback,
 };
-use super::HELPER_MAX_WIDTH_CHARS;
 use super::switch_row::build_switch_row;
+use super::{HELPER_MAX_WIDTH_CHARS, HELPER_MIN_WIDTH_CHARS, PATH_ENTRY_VISIBLE_CHARS};
 
 pub(super) fn build(
     parent_window: &gtk::Window,
@@ -37,6 +37,8 @@ pub(super) fn build(
     library_path_help.add_css_class("preference-helper");
     library_path_help.set_xalign(0.0);
     library_path_help.set_wrap(true);
+    library_path_help.set_natural_wrap_mode(gtk::NaturalWrapMode::Word);
+    library_path_help.set_width_chars(HELPER_MIN_WIDTH_CHARS);
     library_path_help.set_max_width_chars(HELPER_MAX_WIDTH_CHARS);
 
     label_group.append(&library_path_label);
@@ -46,6 +48,13 @@ pub(super) fn build(
 
     let path_entry = gtk::Entry::new();
     path_entry.set_hexpand(true);
+    path_entry.set_halign(gtk::Align::Fill);
+    // Bound the natural-width request to a semantic visual size; long
+    // paths still display and remain editable — `gtk::Text` scrolls
+    // them internally — but the field does not push the Library page
+    // wider than the panel via `path_row`'s horizontal sum.
+    path_entry.set_width_chars(PATH_ENTRY_VISIBLE_CHARS);
+    path_entry.set_max_width_chars(PATH_ENTRY_VISIBLE_CHARS);
     path_entry.set_placeholder_text(Some("/home/julien/Music"));
     let library_task_is_running = command_controller
         .runtime()
@@ -78,6 +87,8 @@ pub(super) fn build(
     scan_status.add_css_class("preference-helper");
     scan_status.set_xalign(0.0);
     scan_status.set_wrap(true);
+    scan_status.set_natural_wrap_mode(gtk::NaturalWrapMode::Word);
+    scan_status.set_width_chars(HELPER_MIN_WIDTH_CHARS);
     scan_status.set_max_width_chars(HELPER_MAX_WIDTH_CHARS);
 
     let library_path_is_valid = library_path_entry_is_valid(&path_entry);

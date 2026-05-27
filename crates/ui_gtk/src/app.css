@@ -185,9 +185,10 @@ button.now-playing-side-button:focus {
 }
 
 .preferences-tab-strip {
-    border-bottom: 1px solid alpha(@theme_fg_color, 0.10);
-    min-height: 76px;
-    padding: 4px 4px 0 4px;
+    /* Background and bottom separator inherited from the built-in
+       `.titlebar` class added alongside this one. */
+    min-height: 68px;
+    padding: 0 4px;
 }
 
 .preferences-tab-buttons {
@@ -198,10 +199,12 @@ button.preferences-tab-button {
     background: transparent;
     border: none;
     box-shadow: none;
-    margin: 4px 6px 0 6px;
+    /* Asymmetric top margin compensates for the bottom space the
+       built-in `.titlebar` class adds underneath the button. */
+    margin: 10px 0 2px 0;
     min-height: 64px;
-    min-width: 80px;
-    padding: 6px 10px 4px 10px;
+    min-width: 64px;
+    padding: 6px 6px 4px 6px;
     opacity: 0.62;
 }
 
@@ -226,7 +229,9 @@ button.preferences-tab-button:checked {
 }
 
 .preferences-tab-label {
-    font-size: 0.82em;
+    /* +2pt over the GTK default (≈10pt) — large enough to read at a
+       glance under the dominant icon without crowding the strip. */
+    font-size: 1.02em;
 }
 
 .preference-switch-row {

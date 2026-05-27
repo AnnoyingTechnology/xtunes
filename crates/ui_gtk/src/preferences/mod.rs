@@ -29,6 +29,23 @@ const TAB_ICON_SIZE: i32 = 32;
 /// would propagate that to every tab.
 pub(super) const HELPER_MAX_WIDTH_CHARS: i32 = 56;
 
+/// Baseline width-in-characters target for wrapping labels. Required
+/// alongside `max_width_chars`: GTK4's `Label::max-width-chars` only
+/// bounds the *natural* width request once `width-chars` is set,
+/// otherwise it behaves as a ceiling for ellipsize-mode only and the
+/// label requests its full unwrapped single-line width — silently
+/// widening the Stack page and the whole window. A low value (10) lets
+/// the label minimum stay tiny while the ceiling kicks in for wrapping.
+pub(super) const HELPER_MIN_WIDTH_CHARS: i32 = 10;
+
+/// Semantic visual width of the library-path entry, in average character
+/// widths. The entry remains editable for arbitrarily long paths —
+/// `gtk::Text` scrolls horizontally inside the field — but the field's
+/// natural-width request is bounded to this many chars, so a long
+/// path does not push the Library page (and therefore the window)
+/// wider than the panel.
+pub(super) const PATH_ENTRY_VISIBLE_CHARS: i32 = 36;
+
 const TAB_LIBRARY: &str = "library";
 const TAB_ANALYSIS: &str = "analysis";
 const TAB_ONLINE: &str = "online";
@@ -214,6 +231,11 @@ fn build_tab_strip(stack: &gtk::Stack, window: &gtk::Window) -> gtk::Widget {
     });
 
     let strip = gtk::CenterBox::new();
+    // `titlebar` is the same built-in GTK class the main window's top bar
+    // uses (`Titlebar::widget`), so the strip's background follows the
+    // theme's headerbar shade in both light and dark mode without us
+    // hard-coding a colour.
+    strip.add_css_class("titlebar");
     strip.add_css_class("preferences-tab-strip");
     strip.set_center_widget(Some(&tab_box));
     strip.set_end_widget(Some(&close_button));
