@@ -12,6 +12,7 @@ use sustain_domain::{
     SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistNumberField,
     SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistTextField,
     SmartPlaylistTextOperator, TrackContentHash, TrackLocation, TrackMetadata, TrackRelativePath,
+    WaveformSegment,
 };
 
 use crate::{
@@ -624,4 +625,34 @@ fn rule_from_row(row: &Row<'_>) -> StoreResult<SmartPlaylistRule> {
         }),
         other => Err(StoreError::InvalidStoredEnum(other.to_owned())),
     }
+}
+
+/// Serialize a sequence of [`WaveformSegment`]s to the on-disk BLOB
+/// form: each segment becomes exactly four bytes
+/// (amplitude, low, mid, high). No framing — the segment count is
+/// recovered as `blob.len() / 4` on read.
+pub(crate) fn waveform_segments_to_blob(segments: &[WaveformSegment]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(segments.len() * 4);
+    for segment in segments {
+        bytes.push(segment.amplitude);
+        bytes.push(segment.low_band);
+        bytes.push(segment.mid_band);
+        bytes.push(segment.high_band);
+    }
+    bytes
+}
+
+/// Inverse of [`waveform_segments_to_blob`]. Trailing bytes that do
+/// not form a complete 4-byte segment are silently dropped — the
+/// writer only ever produces multiples of four, so anything else is
+/// either a corruption to ignore or schema drift to investigate.
+pub(crate) fn blob_to_waveform_segments(blob: &[u8]) -> Vec<WaveformSegment> {
+    blob.chunks_exact(4)
+        .map(|chunk| WaveformSegment {
+            amplitude: chunk[0],
+            low_band: chunk[1],
+            mid_band: chunk[2],
+            high_band: chunk[3],
+        })
+        .collect()
 }

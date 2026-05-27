@@ -22,6 +22,7 @@ mod smart_playlist_evaluation;
 mod statistics;
 mod track;
 mod track_column_layout;
+mod waveform;
 
 pub use clock::{Clock, SystemClock};
 pub use command::{ApplicationCommand, ApplicationQuery};
@@ -54,3 +55,7 @@ pub use smart_playlist_evaluation::{matching_tracks, track_matches_rule, track_m
 pub use statistics::PlayStatistics;
 pub use track::{Track, TrackAvailability, TrackContentHash, TrackLocation, TrackRelativePath};
 pub use track_column_layout::{TrackColumnEntry, TrackColumnLayout, TrackColumnLayoutScope};
+pub use waveform::{
+    BeatGrid, DETAIL_SEGMENTS_PER_SECOND, PREVIEW_SEGMENT_COUNT, TrackAnalysis, WaveformSegment,
+    WaveformSegments,
+};

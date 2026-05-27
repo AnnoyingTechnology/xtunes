@@ -33,51 +33,15 @@ mod waveform;
 
 use std::path::Path;
 
-use sustain_domain::MusicalKey;
-
-pub use crate::waveform::{
-    DETAIL_SEGMENTS_PER_SECOND, PREVIEW_SEGMENT_COUNT, WaveformSegment, WaveformSegments,
+// Re-exported from sustain_domain so callers can `use sustain_analysis::*`
+// without also pulling sustain_domain into their imports for what is
+// conceptually one cohesive surface. The canonical home for these types
+// is the domain layer — the storage crate needs them but should not
+// pull in symphonia / stratum-dsp.
+pub use sustain_domain::{
+    BeatGrid, DETAIL_SEGMENTS_PER_SECOND, MusicalKey, PREVIEW_SEGMENT_COUNT, TrackAnalysis,
+    WaveformSegment, WaveformSegments,
 };
-
-/// Result of analyzing a single track.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TrackAnalysis {
-    /// Detected tempo in beats per minute, octave-normalized to fall
-    /// within [`AnalysisOptions::min_bpm`]..=[`AnalysisOptions::max_bpm`].
-    /// `None` if BPM detection was disabled, the file is too short, or
-    /// the underlying engine could not produce a confident value.
-    pub bpm: Option<f32>,
-    /// Detected musical key. `None` if key detection was disabled or
-    /// the underlying engine returned a value we could not map onto
-    /// [`MusicalKey`] (rare; only happens for non-standard names).
-    pub key: Option<MusicalKey>,
-    /// Beat positions in milliseconds from the start of the audio,
-    /// derived alongside BPM. The first revision of this crate
-    /// always returns `None`; the field is reserved so the storage
-    /// schema does not have to grow when beat extraction lands.
-    pub beatgrid: Option<BeatGrid>,
-    /// Fixed-resolution overview (PREVIEW_SEGMENT_COUNT segments).
-    /// Suitable for a thumbnail / pre-roll waveform; constant size
-    /// regardless of track length.
-    pub waveform_preview: WaveformSegments,
-    /// Time-resolution detail (DETAIL_SEGMENTS_PER_SECOND segments per
-    /// second of audio). Suitable for the active-track scrubber and
-    /// for re-encoding into hardware-specific formats downstream.
-    pub waveform_detail: WaveformSegments,
-}
-
-/// Beat-grid information. Reserved; not populated yet.
-#[derive(Clone, Debug, PartialEq)]
-pub struct BeatGrid {
-    /// BPM the beats were laid out against. Matches
-    /// [`TrackAnalysis::bpm`] in the common case but is kept on the
-    /// grid itself so renderers do not need to look at two fields.
-    pub bpm: f32,
-    /// Beat positions, in milliseconds from the start of audio.
-    pub beats: Vec<f32>,
-    /// Subset of `beats` marking the first beat of each bar.
-    pub downbeats: Vec<f32>,
-}
 
 /// Tunables exposed to callers. Defaults reflect the values the
 /// rhythmbox-to-pioneer-xdj-exporter author landed on after testing on

@@ -6,10 +6,12 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
+use sustain_domain::TrackAnalysis;
+
 use crate::{
-    LibraryStore, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, SmartPlaylist,
-    SmartPlaylistId, StoreError, StoreResult, Track, TrackColumnLayout, TrackColumnLayoutScope,
-    TrackId,
+    AnalysisAttemptContext, AnalysisCapabilities, AnalysisRunContext, LibraryStore, Playlist,
+    PlaylistFolder, PlaylistFolderId, PlaylistId, SmartPlaylist, SmartPlaylistId, StoreError,
+    StoreResult, StoredWaveform, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
 };
 
 #[derive(Debug, Default)]
@@ -21,6 +23,19 @@ pub struct InMemoryLibraryStore {
     default_layout: Mutex<Option<TrackColumnLayout>>,
     playlist_layouts: Mutex<BTreeMap<PlaylistId, TrackColumnLayout>>,
     smart_playlist_layouts: Mutex<BTreeMap<SmartPlaylistId, TrackColumnLayout>>,
+    analysis_bookkeeping: Mutex<BTreeMap<TrackId, AnalysisBookkeeping>>,
+    waveforms: Mutex<BTreeMap<TrackId, StoredWaveform>>,
+}
+
+/// In-memory mirror of one `track_analysis` row. Mirrors the SQLite
+/// COALESCE semantics: an unsupplied `*_attempted_at_unix` keeps its
+/// previous value rather than reverting to `None`.
+#[derive(Clone, Copy, Debug, Default)]
+struct AnalysisBookkeeping {
+    bpm_attempted_at_unix: Option<i64>,
+    key_attempted_at_unix: Option<i64>,
+    waveform_attempted_at_unix: Option<i64>,
+    analyzer_version: u32,
 }
 
 impl InMemoryLibraryStore {
@@ -297,5 +312,140 @@ impl LibraryStore for InMemoryLibraryStore {
             }
         }
         Ok(())
+    }
+
+    fn record_analysis(
+        &self,
+        track_id: TrackId,
+        analysis: &TrackAnalysis,
+        capabilities: AnalysisCapabilities,
+        context: AnalysisRunContext,
+    ) -> StoreResult<()> {
+        if capabilities.is_empty() {
+            return Ok(());
+        }
+        let mut bookkeeping = self
+            .analysis_bookkeeping
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?;
+        let entry = bookkeeping.entry(track_id).or_default();
+        if capabilities.bpm {
+            entry.bpm_attempted_at_unix = Some(context.now_unix);
+        }
+        if capabilities.key {
+            entry.key_attempted_at_unix = Some(context.now_unix);
+        }
+        if capabilities.waveform {
+            entry.waveform_attempted_at_unix = Some(context.now_unix);
+        }
+        entry.analyzer_version = context.analyzer_version;
+        drop(bookkeeping);
+
+        if capabilities.waveform && !analysis.waveform_detail.segments.is_empty() {
+            self.waveforms
+                .lock()
+                .map_err(|_| StoreError::StoreUnavailable)?
+                .insert(
+                    track_id,
+                    StoredWaveform {
+                        preview: analysis.waveform_preview.clone(),
+                        detail: analysis.waveform_detail.clone(),
+                    },
+                );
+        }
+
+        // Fill tracks.bpm / metadata.key only when currently empty —
+        // mirrors the SQL backend's "fill if NULL" semantic.
+        let mut tracks = self.tracks_guard()?;
+        if let Some(track) = tracks.get_mut(&track_id) {
+            if capabilities.bpm
+                && let Some(bpm) = analysis.bpm
+                && track.metadata.bpm.is_none()
+            {
+                track.metadata.bpm = Some(bpm.round() as u32);
+            }
+            if capabilities.key
+                && let Some(key) = analysis.key
+                && track.metadata.key.is_none()
+            {
+                track.metadata.key = Some(key.short_code().to_string());
+            }
+        }
+        Ok(())
+    }
+
+    fn record_analysis_attempt_failure(
+        &self,
+        track_id: TrackId,
+        capabilities: AnalysisCapabilities,
+        context: AnalysisAttemptContext,
+    ) -> StoreResult<()> {
+        if capabilities.is_empty() {
+            return Ok(());
+        }
+        let mut bookkeeping = self
+            .analysis_bookkeeping
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?;
+        let entry = bookkeeping.entry(track_id).or_default();
+        if capabilities.bpm {
+            entry.bpm_attempted_at_unix = Some(context.now_unix);
+        }
+        if capabilities.key {
+            entry.key_attempted_at_unix = Some(context.now_unix);
+        }
+        if capabilities.waveform {
+            entry.waveform_attempted_at_unix = Some(context.now_unix);
+        }
+        entry.analyzer_version = context.analyzer_version;
+        Ok(())
+    }
+
+    fn tracks_needing_analysis(
+        &self,
+        capabilities: AnalysisCapabilities,
+        analyzer_version: u32,
+        limit: usize,
+    ) -> StoreResult<Vec<TrackId>> {
+        if capabilities.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tracks = self.tracks_guard()?;
+        let bookkeeping = self
+            .analysis_bookkeeping
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?;
+        let mut out = Vec::new();
+        for (track_id, track) in tracks.iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if track.location.is_missing() {
+                continue;
+            }
+            let book = bookkeeping.get(track_id).copied().unwrap_or_default();
+            let needs_bpm = capabilities.bpm
+                && (book.bpm_attempted_at_unix.is_none()
+                    || book.analyzer_version < analyzer_version);
+            let needs_key = capabilities.key
+                && (book.key_attempted_at_unix.is_none()
+                    || book.analyzer_version < analyzer_version);
+            let needs_waveform = capabilities.waveform
+                && (book.waveform_attempted_at_unix.is_none()
+                    || book.analyzer_version < analyzer_version);
+            if needs_bpm || needs_key || needs_waveform {
+                out.push(*track_id);
+            }
+        }
+        Ok(out)
+    }
+
+    fn load_waveform(&self, track_id: TrackId) -> StoreResult<Option<StoredWaveform>> {
+        Ok(self
+            .waveforms
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .get(&track_id)
+            .cloned())
     }
 }

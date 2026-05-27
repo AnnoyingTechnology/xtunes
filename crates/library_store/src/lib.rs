@@ -13,7 +13,8 @@ use rusqlite::{Connection, params};
 use sustain_domain::SmartPlaylistRuleSet;
 pub use sustain_domain::{
     LibraryQuery, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, Rating, SmartPlaylist,
-    SmartPlaylistId, Track, TrackColumnEntry, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
+    SmartPlaylistId, Track, TrackAnalysis, TrackColumnEntry, TrackColumnLayout,
+    TrackColumnLayoutScope, TrackId, WaveformSegments,
 };
 
 mod memory;
@@ -25,14 +26,17 @@ pub use memory::InMemoryLibraryStore;
 
 use query::{sort_tracks, track_matches_search};
 use schema::{
-    SAVE_TRACK_SQL, SCHEMA_SQL, SELECT_ALL_TRACKS_SQL, SELECT_TRACK_BY_CONTENT_HASH_SQL,
-    SELECT_TRACK_BY_ID_SQL,
+    FILL_TRACK_BPM_IF_NULL_SQL, FILL_TRACK_MUSICAL_KEY_IF_NULL_SQL, SAVE_TRACK_SQL, SCHEMA_SQL,
+    SELECT_ALL_TRACKS_SQL, SELECT_TRACK_BY_CONTENT_HASH_SQL, SELECT_TRACK_BY_ID_SQL,
+    SELECT_TRACK_WAVEFORM_SQL, SELECT_TRACKS_NEEDING_ANALYSIS_SQL, UPSERT_TRACK_ANALYSIS_SQL,
+    UPSERT_TRACK_WAVEFORM_SQL,
 };
 use sqlite_rows::{
-    build_limit, duration_to_seconds, limit_selection_name, load_smart_playlist_rules,
-    match_kind_from_name, match_kind_name, optional_i64, optional_playlist_folder_id_from_row,
-    optional_string, playlist_entries, playlist_folder_from_row, playlist_id_from_db,
-    rule_to_columns, smart_playlist_id_from_db, system_time_to_unix, track_from_row, u32_from_row,
+    blob_to_waveform_segments, build_limit, duration_to_seconds, limit_selection_name,
+    load_smart_playlist_rules, match_kind_from_name, match_kind_name, optional_i64,
+    optional_playlist_folder_id_from_row, optional_string, playlist_entries,
+    playlist_folder_from_row, playlist_id_from_db, rule_to_columns, smart_playlist_id_from_db,
+    system_time_to_unix, track_from_row, u32_from_row, waveform_segments_to_blob,
 };
 
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -51,6 +55,79 @@ impl From<rusqlite::Error> for StoreError {
     fn from(error: rusqlite::Error) -> Self {
         Self::Database(error.to_string())
     }
+}
+
+/// Which DSP passes a write or query applies to.
+///
+/// On the write path (`record_analysis`, `record_analysis_attempt_failure`)
+/// only the requested capabilities get their `*_attempted_at_unix`
+/// timestamps stamped; the others preserve whatever value was already
+/// stored. On the read path (`tracks_needing_analysis`) a track
+/// qualifies as needing analysis if **any** of the requested
+/// capabilities is either un-attempted (NULL) or stamped by an older
+/// `analyzer_version`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AnalysisCapabilities {
+    pub bpm: bool,
+    pub key: bool,
+    pub waveform: bool,
+}
+
+impl AnalysisCapabilities {
+    /// No capabilities requested. Useful as a sentinel; passing this
+    /// to a write call is a no-op.
+    pub const fn none() -> Self {
+        Self {
+            bpm: false,
+            key: false,
+            waveform: false,
+        }
+    }
+
+    /// All three capabilities requested.
+    pub const fn all() -> Self {
+        Self {
+            bpm: true,
+            key: true,
+            waveform: true,
+        }
+    }
+
+    pub const fn is_empty(self) -> bool {
+        !(self.bpm || self.key || self.waveform)
+    }
+}
+
+/// Both waveform tiers as returned by [`LibraryStore::load_waveform`].
+/// Cheap to clone (`Vec<u8>` of segment bytes, decoded once into
+/// `WaveformSegment` on read). Renderers typically request this lazily
+/// — only for the active track — so the BLOB pages are touched on
+/// demand rather than during library load.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredWaveform {
+    pub preview: WaveformSegments,
+    pub detail: WaveformSegments,
+}
+
+/// Metadata captured at the time an analysis pass completes. Bundles
+/// the per-run facts so the trait method signature stays manageable
+/// and callers can build the context once and reuse it across a batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AnalysisRunContext {
+    pub analyzer_version: u32,
+    pub sample_rate: u32,
+    pub duration_ms: u32,
+    pub now_unix: i64,
+}
+
+/// Lighter context for failed-attempt bookkeeping where the run never
+/// produced a sample rate or duration. Stamping `analyzer_version` and
+/// the wall-clock time is enough to keep the scheduler from
+/// re-queuing the same track immediately.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AnalysisAttemptContext {
+    pub analyzer_version: u32,
+    pub now_unix: i64,
 }
 
 pub trait LibraryStore: Send + Sync {
@@ -93,6 +170,52 @@ pub trait LibraryStore: Send + Sync {
         layout: &TrackColumnLayout,
     ) -> StoreResult<()>;
     fn delete_track_column_layout(&self, scope: TrackColumnLayoutScope) -> StoreResult<()>;
+
+    /// Persist a successful analysis pass. Stamps each requested
+    /// capability's `*_attempted_at_unix` timestamp regardless of
+    /// whether the corresponding field in `analysis` is `Some`
+    /// (a successful run that produced no result is still an
+    /// attempt, and we want the scheduler to stop retrying it).
+    ///
+    /// Writes the waveform BLOBs only when the waveform capability
+    /// was requested and `analysis.waveform_detail` is non-empty.
+    /// Updates `tracks.bpm` and `tracks.musical_key` **only when
+    /// those columns are currently NULL** — file-tag values from
+    /// import and explicit user edits win, the analyzer fills in
+    /// missing data rather than overriding existing data.
+    fn record_analysis(
+        &self,
+        track_id: TrackId,
+        analysis: &TrackAnalysis,
+        capabilities: AnalysisCapabilities,
+        context: AnalysisRunContext,
+    ) -> StoreResult<()>;
+
+    /// Record a failed analysis attempt. Stamps the requested
+    /// capabilities' `*_attempted_at_unix` so the scheduler does not
+    /// keep retrying every cycle; does not touch
+    /// `tracks.bpm`/`musical_key` or the waveform table.
+    fn record_analysis_attempt_failure(
+        &self,
+        track_id: TrackId,
+        capabilities: AnalysisCapabilities,
+        context: AnalysisAttemptContext,
+    ) -> StoreResult<()>;
+
+    /// Return up to `limit` track IDs that need at least one of the
+    /// requested capabilities re-run. Excludes tracks marked missing.
+    /// Returns an empty list when `capabilities.is_empty()`.
+    fn tracks_needing_analysis(
+        &self,
+        capabilities: AnalysisCapabilities,
+        analyzer_version: u32,
+        limit: usize,
+    ) -> StoreResult<Vec<TrackId>>;
+
+    /// Load the stored waveform for a track, if any. Returns `None`
+    /// when the track has not been waveform-analyzed yet (or analysis
+    /// failed).
+    fn load_waveform(&self, track_id: TrackId) -> StoreResult<Option<StoredWaveform>>;
 
     fn tracks_matching(&self, query: LibraryQuery) -> StoreResult<Vec<Track>> {
         let mut tracks = if let Some(playlist_id) = query.playlist_id {
@@ -825,6 +948,186 @@ impl LibraryStore for SqliteLibraryStore {
                 .map_err(StoreError::from),
         }
     }
+
+    fn record_analysis(
+        &self,
+        track_id: TrackId,
+        analysis: &TrackAnalysis,
+        capabilities: AnalysisCapabilities,
+        context: AnalysisRunContext,
+    ) -> StoreResult<()> {
+        if capabilities.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.connection_guard()?;
+        let transaction = connection.transaction().map_err(StoreError::from)?;
+
+        upsert_track_analysis(
+            &transaction,
+            track_id,
+            capabilities,
+            context.analyzer_version,
+            context.sample_rate,
+            context.duration_ms,
+            context.now_unix,
+        )?;
+
+        if capabilities.waveform && !analysis.waveform_detail.segments.is_empty() {
+            transaction
+                .execute(
+                    UPSERT_TRACK_WAVEFORM_SQL,
+                    params![
+                        track_id.get(),
+                        f64::from(analysis.waveform_preview.segment_duration_ms),
+                        waveform_segments_to_blob(&analysis.waveform_preview.segments),
+                        f64::from(analysis.waveform_detail.segment_duration_ms),
+                        waveform_segments_to_blob(&analysis.waveform_detail.segments),
+                    ],
+                )
+                .map_err(StoreError::from)?;
+        }
+
+        if capabilities.bpm
+            && let Some(bpm) = analysis.bpm
+        {
+            transaction
+                .execute(
+                    FILL_TRACK_BPM_IF_NULL_SQL,
+                    params![bpm.round() as i64, track_id.get()],
+                )
+                .map_err(StoreError::from)?;
+        }
+
+        if capabilities.key
+            && let Some(key) = analysis.key
+        {
+            transaction
+                .execute(
+                    FILL_TRACK_MUSICAL_KEY_IF_NULL_SQL,
+                    params![key.short_code(), track_id.get()],
+                )
+                .map_err(StoreError::from)?;
+        }
+
+        transaction.commit().map_err(StoreError::from)
+    }
+
+    fn record_analysis_attempt_failure(
+        &self,
+        track_id: TrackId,
+        capabilities: AnalysisCapabilities,
+        context: AnalysisAttemptContext,
+    ) -> StoreResult<()> {
+        if capabilities.is_empty() {
+            return Ok(());
+        }
+        let connection = self.connection_guard()?;
+        upsert_track_analysis(
+            &connection,
+            track_id,
+            capabilities,
+            context.analyzer_version,
+            // We do not know sample_rate / duration for a failed
+            // attempt; pass 0 so COALESCE preserves any previously
+            // recorded value rather than clobbering it.
+            0,
+            0,
+            context.now_unix,
+        )
+    }
+
+    fn tracks_needing_analysis(
+        &self,
+        capabilities: AnalysisCapabilities,
+        analyzer_version: u32,
+        limit: usize,
+    ) -> StoreResult<Vec<TrackId>> {
+        if capabilities.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = self.connection_guard()?;
+        let mut statement = connection
+            .prepare(SELECT_TRACKS_NEEDING_ANALYSIS_SQL)
+            .map_err(StoreError::from)?;
+        let mut rows = statement
+            .query(params![
+                i64::from(capabilities.bpm),
+                i64::from(capabilities.key),
+                i64::from(capabilities.waveform),
+                i64::from(analyzer_version),
+                limit as i64,
+            ])
+            .map_err(StoreError::from)?;
+        let mut ids = Vec::new();
+        while let Some(row) = rows.next().map_err(StoreError::from)? {
+            let raw: i64 = row.get(0).map_err(StoreError::from)?;
+            let id = TrackId::new(raw).ok_or(StoreError::InvalidStoredId(raw))?;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    fn load_waveform(&self, track_id: TrackId) -> StoreResult<Option<StoredWaveform>> {
+        let connection = self.connection_guard()?;
+        let mut statement = connection
+            .prepare(SELECT_TRACK_WAVEFORM_SQL)
+            .map_err(StoreError::from)?;
+        let mut rows = statement
+            .query(params![track_id.get()])
+            .map_err(StoreError::from)?;
+        let Some(row) = rows.next().map_err(StoreError::from)? else {
+            return Ok(None);
+        };
+        let preview_duration: f64 = row.get(0).map_err(StoreError::from)?;
+        let preview_bytes: Vec<u8> = row.get(1).map_err(StoreError::from)?;
+        let detail_duration: f64 = row.get(2).map_err(StoreError::from)?;
+        let detail_bytes: Vec<u8> = row.get(3).map_err(StoreError::from)?;
+        Ok(Some(StoredWaveform {
+            preview: WaveformSegments {
+                segment_duration_ms: preview_duration as f32,
+                segments: blob_to_waveform_segments(&preview_bytes),
+            },
+            detail: WaveformSegments {
+                segment_duration_ms: detail_duration as f32,
+                segments: blob_to_waveform_segments(&detail_bytes),
+            },
+        }))
+    }
+}
+
+/// Shared upsert helper for [`SqliteLibraryStore::record_analysis`] and
+/// [`SqliteLibraryStore::record_analysis_attempt_failure`]. NULL is
+/// passed for any `*_attempted_at_unix` column the caller did not
+/// request, so the SQL's `COALESCE` preserves the existing value.
+fn upsert_track_analysis(
+    connection: &Connection,
+    track_id: TrackId,
+    capabilities: AnalysisCapabilities,
+    analyzer_version: u32,
+    sample_rate: u32,
+    duration_ms: u32,
+    now_unix: i64,
+) -> StoreResult<()> {
+    let bpm_at = capabilities.bpm.then_some(now_unix);
+    let key_at = capabilities.key.then_some(now_unix);
+    let waveform_at = capabilities.waveform.then_some(now_unix);
+    let sample_rate_param = (sample_rate > 0).then_some(i64::from(sample_rate));
+    let duration_ms_param = (duration_ms > 0).then_some(i64::from(duration_ms));
+    connection
+        .execute(
+            UPSERT_TRACK_ANALYSIS_SQL,
+            params![
+                track_id.get(),
+                bpm_at,
+                key_at,
+                waveform_at,
+                i64::from(analyzer_version),
+                sample_rate_param,
+                duration_ms_param,
+            ],
+        )
+        .map(|_| ())
+        .map_err(StoreError::from)
 }
 
 fn load_layout_rows(
@@ -862,10 +1165,16 @@ mod tests {
         TrackLocation, TrackMetadata, TrackRelativePath, TrackSort, TrackSortColumn,
     };
 
+    use sustain_domain::{
+        DETAIL_SEGMENTS_PER_SECOND, MusicalKey, PREVIEW_SEGMENT_COUNT, TrackAnalysis,
+        WaveformSegment, WaveformSegments,
+    };
+
     use super::{
-        InMemoryLibraryStore, LibraryQuery, LibraryStore, Playlist, PlaylistFolder,
-        PlaylistFolderId, SmartPlaylist, SmartPlaylistId, SqliteLibraryStore, Track,
-        TrackColumnEntry, TrackColumnLayout, TrackColumnLayoutScope,
+        AnalysisAttemptContext, AnalysisCapabilities, AnalysisRunContext, InMemoryLibraryStore,
+        LibraryQuery, LibraryStore, Playlist, PlaylistFolder, PlaylistFolderId, SmartPlaylist,
+        SmartPlaylistId, SqliteLibraryStore, StoredWaveform, Track, TrackColumnEntry,
+        TrackColumnLayout, TrackColumnLayoutScope,
     };
     use crate::{PlaylistId, StoreResult, TrackId};
 
@@ -1425,6 +1734,407 @@ mod tests {
             .expect("exists");
         assert_eq!(loaded.rules.rules.len(), resaved.rules.rules.len());
     }
+
+    // -------- analysis storage --------
+
+    /// Build a non-trivial `TrackAnalysis` with a handful of segments
+    /// in each tier so blob round-trip and "fill if NULL" semantics
+    /// both have real data to act on.
+    fn sample_analysis(bpm: Option<f32>, key: Option<MusicalKey>) -> TrackAnalysis {
+        let preview = WaveformSegments {
+            segment_duration_ms: 25.0,
+            segments: (0..PREVIEW_SEGMENT_COUNT)
+                .map(|i| WaveformSegment {
+                    amplitude: (i % 256) as u8,
+                    low_band: ((i * 3) % 256) as u8,
+                    mid_band: ((i * 5) % 256) as u8,
+                    high_band: ((i * 7) % 256) as u8,
+                })
+                .collect(),
+        };
+        let detail = WaveformSegments {
+            segment_duration_ms: 1_000.0 / DETAIL_SEGMENTS_PER_SECOND as f32,
+            segments: (0..512)
+                .map(|i| WaveformSegment {
+                    amplitude: (i % 256) as u8,
+                    low_band: ((i + 1) % 256) as u8,
+                    mid_band: ((i + 2) % 256) as u8,
+                    high_band: ((i + 3) % 256) as u8,
+                })
+                .collect(),
+        };
+        TrackAnalysis {
+            bpm,
+            key,
+            beatgrid: None,
+            waveform_preview: preview,
+            waveform_detail: detail,
+        }
+    }
+
+    /// Standard run context used by analysis tests: analyzer_version
+    /// 1 at 44.1 kHz / 4 min, with caller-supplied wall-clock.
+    fn run_ctx(now_unix: i64) -> AnalysisRunContext {
+        AnalysisRunContext {
+            analyzer_version: 1,
+            sample_rate: 44_100,
+            duration_ms: 240_000,
+            now_unix,
+        }
+    }
+
+    /// Standard attempt context: analyzer_version 1 plus a wall-clock.
+    fn attempt_ctx(now_unix: i64) -> AnalysisAttemptContext {
+        AnalysisAttemptContext {
+            analyzer_version: 1,
+            now_unix,
+        }
+    }
+
+    fn run_record_analysis_round_trips_waveform_bytes(store: &dyn LibraryStore) {
+        let track = track(1, "a.flac");
+        store.save_track(track.clone()).expect("save track");
+
+        let analysis = sample_analysis(Some(126.0), Some(MusicalKey::DMinor));
+        store
+            .record_analysis(
+                track.id,
+                &analysis,
+                AnalysisCapabilities::all(),
+                run_ctx(1_700_000_000),
+            )
+            .expect("record analysis");
+
+        let stored = store
+            .load_waveform(track.id)
+            .expect("load")
+            .expect("waveform exists");
+        assert_eq!(stored.preview.segments, analysis.waveform_preview.segments);
+        assert_eq!(stored.detail.segments, analysis.waveform_detail.segments);
+        assert!(
+            (stored.preview.segment_duration_ms - analysis.waveform_preview.segment_duration_ms)
+                .abs()
+                < 1e-3
+        );
+    }
+
+    #[test]
+    fn sqlite_record_analysis_round_trips_waveform_bytes() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory");
+        run_record_analysis_round_trips_waveform_bytes(&store);
+    }
+
+    #[test]
+    fn in_memory_record_analysis_round_trips_waveform_bytes() {
+        run_record_analysis_round_trips_waveform_bytes(&InMemoryLibraryStore::new());
+    }
+
+    fn run_record_analysis_fills_tracks_columns_only_when_null(store: &dyn LibraryStore) {
+        // First track: no pre-existing BPM/key — analyzer fills both.
+        let blank = track(1, "blank.flac");
+        store.save_track(blank.clone()).expect("save blank");
+
+        // Second track: user-set BPM/key — analyzer must not clobber.
+        let mut taken = track(2, "taken.flac");
+        taken.metadata.bpm = Some(95);
+        taken.metadata.key = Some("Am".to_string());
+        store.save_track(taken.clone()).expect("save taken");
+
+        let analysis = sample_analysis(Some(126.0), Some(MusicalKey::DMinor));
+        for id in [blank.id, taken.id] {
+            store
+                .record_analysis(
+                    id,
+                    &analysis,
+                    AnalysisCapabilities::all(),
+                    run_ctx(1_700_000_000),
+                )
+                .expect("record");
+        }
+
+        let loaded_blank = store.track(blank.id).expect("load blank").expect("exists");
+        assert_eq!(loaded_blank.metadata.bpm, Some(126));
+        assert_eq!(loaded_blank.metadata.key.as_deref(), Some("Dm"));
+
+        let loaded_taken = store.track(taken.id).expect("load taken").expect("exists");
+        assert_eq!(loaded_taken.metadata.bpm, Some(95));
+        assert_eq!(loaded_taken.metadata.key.as_deref(), Some("Am"));
+    }
+
+    #[test]
+    fn sqlite_record_analysis_fills_tracks_columns_only_when_null() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory");
+        run_record_analysis_fills_tracks_columns_only_when_null(&store);
+    }
+
+    #[test]
+    fn in_memory_record_analysis_fills_tracks_columns_only_when_null() {
+        run_record_analysis_fills_tracks_columns_only_when_null(&InMemoryLibraryStore::new());
+    }
+
+    fn run_tracks_needing_analysis_lists_only_un_attempted(store: &dyn LibraryStore) {
+        // 3 tracks, 1 missing, 1 already waveform-analyzed.
+        let alpha = track(1, "alpha.flac");
+        let mut beta = track(2, "beta.flac");
+        beta.location = beta
+            .location
+            .with_availability(sustain_domain::TrackAvailability::Missing);
+        let gamma = track(3, "gamma.flac");
+        for t in [&alpha, &beta, &gamma] {
+            store.save_track(t.clone()).expect("save");
+        }
+
+        // Mark gamma's waveform as attempted.
+        store
+            .record_analysis(
+                gamma.id,
+                &sample_analysis(None, None),
+                AnalysisCapabilities {
+                    bpm: false,
+                    key: false,
+                    waveform: true,
+                },
+                run_ctx(1_700_000_000),
+            )
+            .expect("record waveform for gamma");
+
+        let needs = store
+            .tracks_needing_analysis(
+                AnalysisCapabilities {
+                    bpm: false,
+                    key: false,
+                    waveform: true,
+                },
+                1,
+                100,
+            )
+            .expect("query");
+        // Only alpha qualifies: beta is missing, gamma is attempted at version 1.
+        assert_eq!(needs, vec![alpha.id]);
+    }
+
+    #[test]
+    fn sqlite_tracks_needing_analysis_lists_only_un_attempted() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory");
+        run_tracks_needing_analysis_lists_only_un_attempted(&store);
+    }
+
+    #[test]
+    fn in_memory_tracks_needing_analysis_lists_only_un_attempted() {
+        run_tracks_needing_analysis_lists_only_un_attempted(&InMemoryLibraryStore::new());
+    }
+
+    fn run_failed_attempt_prevents_immediate_retry(store: &dyn LibraryStore) {
+        let track = track(1, "a.flac");
+        store.save_track(track.clone()).expect("save");
+
+        store
+            .record_analysis_attempt_failure(
+                track.id,
+                AnalysisCapabilities {
+                    bpm: true,
+                    key: false,
+                    waveform: false,
+                },
+                attempt_ctx(1_700_000_000),
+            )
+            .expect("record failure");
+
+        let needs = store
+            .tracks_needing_analysis(
+                AnalysisCapabilities {
+                    bpm: true,
+                    key: false,
+                    waveform: false,
+                },
+                1,
+                100,
+            )
+            .expect("query");
+        assert!(
+            needs.is_empty(),
+            "failed attempts should not requeue at same analyzer_version"
+        );
+
+        // But a version bump re-enrolls the track.
+        let needs_v2 = store
+            .tracks_needing_analysis(
+                AnalysisCapabilities {
+                    bpm: true,
+                    key: false,
+                    waveform: false,
+                },
+                2,
+                100,
+            )
+            .expect("query v2");
+        assert_eq!(needs_v2, vec![track.id]);
+    }
+
+    #[test]
+    fn sqlite_failed_attempt_prevents_immediate_retry() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory");
+        run_failed_attempt_prevents_immediate_retry(&store);
+    }
+
+    #[test]
+    fn in_memory_failed_attempt_prevents_immediate_retry() {
+        run_failed_attempt_prevents_immediate_retry(&InMemoryLibraryStore::new());
+    }
+
+    #[test]
+    fn sqlite_cascade_delete_clears_analysis_rows() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory");
+        let t = track(1, "a.flac");
+        store.save_track(t.clone()).expect("save");
+        store
+            .record_analysis(
+                t.id,
+                &sample_analysis(Some(120.0), Some(MusicalKey::CMajor)),
+                AnalysisCapabilities::all(),
+                run_ctx(1_700_000_000),
+            )
+            .expect("record");
+        assert!(matches!(store.load_waveform(t.id), Ok(Some(_))));
+
+        store.delete_track(t.id).expect("delete");
+        assert_eq!(store.load_waveform(t.id), Ok(None));
+        // Re-saving the same id should not trip a unique-violation
+        // because the cascade dropped the analysis/waveform rows too.
+        store.save_track(t.clone()).expect("re-save");
+        store
+            .record_analysis(
+                t.id,
+                &sample_analysis(Some(130.0), Some(MusicalKey::EMinor)),
+                AnalysisCapabilities::all(),
+                run_ctx(1_700_000_000),
+            )
+            .expect("record again");
+        assert!(matches!(store.load_waveform(t.id), Ok(Some(_))));
+    }
+
+    fn run_partial_capability_record_preserves_other_attempts(store: &dyn LibraryStore) {
+        let t = track(1, "a.flac");
+        store.save_track(t.clone()).expect("save");
+
+        // First, record only BPM.
+        store
+            .record_analysis_attempt_failure(
+                t.id,
+                AnalysisCapabilities {
+                    bpm: true,
+                    key: false,
+                    waveform: false,
+                },
+                attempt_ctx(1_000),
+            )
+            .expect("record bpm");
+
+        // Then, separately, record only waveform.
+        store
+            .record_analysis(
+                t.id,
+                &sample_analysis(None, None),
+                AnalysisCapabilities {
+                    bpm: false,
+                    key: false,
+                    waveform: true,
+                },
+                run_ctx(2_000),
+            )
+            .expect("record waveform");
+
+        // Both capabilities should now be marked attempted; only key
+        // remains pending.
+        let needs_bpm = store
+            .tracks_needing_analysis(
+                AnalysisCapabilities {
+                    bpm: true,
+                    key: false,
+                    waveform: false,
+                },
+                1,
+                10,
+            )
+            .expect("q bpm");
+        let needs_wave = store
+            .tracks_needing_analysis(
+                AnalysisCapabilities {
+                    bpm: false,
+                    key: false,
+                    waveform: true,
+                },
+                1,
+                10,
+            )
+            .expect("q wave");
+        let needs_key = store
+            .tracks_needing_analysis(
+                AnalysisCapabilities {
+                    bpm: false,
+                    key: true,
+                    waveform: false,
+                },
+                1,
+                10,
+            )
+            .expect("q key");
+        assert!(needs_bpm.is_empty(), "bpm should be marked attempted");
+        assert!(needs_wave.is_empty(), "waveform should be marked attempted");
+        assert_eq!(needs_key, vec![t.id], "key still pending");
+    }
+
+    #[test]
+    fn sqlite_partial_capability_record_preserves_other_attempts() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory");
+        run_partial_capability_record_preserves_other_attempts(&store);
+    }
+
+    #[test]
+    fn in_memory_partial_capability_record_preserves_other_attempts() {
+        run_partial_capability_record_preserves_other_attempts(&InMemoryLibraryStore::new());
+    }
+
+    #[test]
+    fn empty_capabilities_record_is_no_op() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open");
+        let t = track(1, "a.flac");
+        store.save_track(t.clone()).expect("save");
+
+        store
+            .record_analysis(
+                t.id,
+                &sample_analysis(Some(120.0), Some(MusicalKey::CMajor)),
+                AnalysisCapabilities::none(),
+                run_ctx(1_000),
+            )
+            .expect("no-op");
+        // No bookkeeping row → track is still listed as needing analysis.
+        let needs = store
+            .tracks_needing_analysis(AnalysisCapabilities::all(), 1, 10)
+            .expect("query");
+        assert_eq!(needs, vec![t.id]);
+        assert_eq!(store.load_waveform(t.id), Ok(None));
+    }
+
+    #[test]
+    fn stored_waveform_equality_is_well_defined() {
+        // Sanity check that the public StoredWaveform exposes PartialEq
+        // so call sites can do simple assertions in tests.
+        let stored = StoredWaveform {
+            preview: WaveformSegments {
+                segment_duration_ms: 25.0,
+                segments: vec![WaveformSegment::silent()],
+            },
+            detail: WaveformSegments {
+                segment_duration_ms: 6.0,
+                segments: vec![WaveformSegment::silent()],
+            },
+        };
+        assert_eq!(stored.clone(), stored);
+    }
+
+    // -------- end analysis storage --------
 
     fn track(id: i64, path: &str) -> Track {
         Track {

@@ -19,56 +19,11 @@
 
 use std::path::Path;
 
+use sustain_domain::{
+    DETAIL_SEGMENTS_PER_SECOND, PREVIEW_SEGMENT_COUNT, WaveformSegment, WaveformSegments,
+};
+
 use crate::{AnalysisError, bands::ThreeBandSplitter, decode::decode_full};
-
-/// Fixed segment count for the preview waveform. Matches Pioneer's
-/// PWAV column count, which keeps the export crate downstream from
-/// needing to resample; 400 is also a comfortable width for a
-/// thumbnail in the GTK UI.
-pub const PREVIEW_SEGMENT_COUNT: usize = 400;
-
-/// Detail-waveform time resolution. Matches Pioneer's PWV3/PWV5
-/// entries-per-second figure so a future export crate can serialize
-/// our detail segments directly. Also covers any sensible UI zoom on
-/// a desktop scrubber.
-pub const DETAIL_SEGMENTS_PER_SECOND: u32 = 150;
-
-/// A single waveform segment. Four bytes; SQLite-friendly when many
-/// segments are packed into a BLOB.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WaveformSegment {
-    /// Peak amplitude during the segment window, normalized to the
-    /// loudest segment in the track (0 = silence, 255 = track peak).
-    pub amplitude: u8,
-    /// RMS energy in the low band (≤ ~250 Hz), 0–255.
-    pub low_band: u8,
-    /// RMS energy in the mid band (~250 Hz – 4 kHz), 0–255.
-    pub mid_band: u8,
-    /// RMS energy in the high band (≥ ~4 kHz), 0–255.
-    pub high_band: u8,
-}
-
-impl WaveformSegment {
-    pub const fn silent() -> Self {
-        Self {
-            amplitude: 0,
-            low_band: 0,
-            mid_band: 0,
-            high_band: 0,
-        }
-    }
-}
-
-/// A waveform tier (preview or detail). The renderer multiplies its
-/// horizontal pixel position by `segment_duration_ms` to map a screen
-/// column back to a time offset within the track.
-#[derive(Clone, Debug, PartialEq)]
-pub struct WaveformSegments {
-    /// How many milliseconds of audio each segment covers.
-    pub segment_duration_ms: f32,
-    /// The segments themselves, in time order.
-    pub segments: Vec<WaveformSegment>,
-}
 
 pub(crate) struct WaveformTiers {
     pub(crate) preview: WaveformSegments,

@@ -127,6 +127,38 @@ CREATE TABLE IF NOT EXISTS track_column_layout_smart_playlist_override (
     PRIMARY KEY (smart_playlist_id, column_id),
     FOREIGN KEY (smart_playlist_id) REFERENCES smart_playlists(id) ON DELETE CASCADE
 );
+
+-- Per-track analysis bookkeeping. Tiny row; never carries BLOB data.
+-- The scheduler's "find tracks needing analysis" query LEFT JOINs against
+-- this table and tests the *_attempted_at_unix columns to decide whether
+-- a capability has been tried yet — distinguishing "not yet attempted"
+-- (NULL) from "tried, no result" (timestamp set, tracks.bpm still NULL).
+-- analyzer_version is bumped centrally when the DSP changes meaningfully,
+-- so older rows are excluded from "fresh enough" checks without any
+-- migration step.
+CREATE TABLE IF NOT EXISTS track_analysis (
+    track_id                    INTEGER PRIMARY KEY
+                                  REFERENCES tracks(id) ON DELETE CASCADE,
+    bpm_attempted_at_unix       INTEGER,
+    key_attempted_at_unix       INTEGER,
+    waveform_attempted_at_unix  INTEGER,
+    analyzer_version            INTEGER NOT NULL,
+    sample_rate_at_analysis     INTEGER,
+    duration_ms_at_analysis     INTEGER
+);
+
+-- Waveform BLOBs only. Split from track_analysis so a future
+-- ATTACH-based relocation of the bulk data to a sidecar database is
+-- a schema edit, not a refactor. Each segments BLOB is `n * 4` bytes;
+-- segment count is recovered as `blob.len() / 4`.
+CREATE TABLE IF NOT EXISTS track_waveform (
+    track_id                    INTEGER PRIMARY KEY
+                                  REFERENCES tracks(id) ON DELETE CASCADE,
+    preview_segment_duration_ms REAL    NOT NULL,
+    preview_segments            BLOB    NOT NULL,
+    detail_segment_duration_ms  REAL    NOT NULL,
+    detail_segments             BLOB    NOT NULL
+);
 "#;
 
 #[derive(Clone, Copy)]
@@ -276,6 +308,89 @@ ORDER BY id
         indented_track_column_names("    "),
     )
 });
+
+/// Upsert into `track_analysis`. Each `*_attempted_at_unix` parameter
+/// is either the analysis timestamp (if the capability ran this pass)
+/// or `NULL` (if it did not) — `COALESCE` preserves whatever value
+/// was already stored in that column, so a BPM-only re-analysis does
+/// not clobber the waveform's "attempted" timestamp.
+pub(super) const UPSERT_TRACK_ANALYSIS_SQL: &str = r#"
+INSERT INTO track_analysis (
+    track_id,
+    bpm_attempted_at_unix,
+    key_attempted_at_unix,
+    waveform_attempted_at_unix,
+    analyzer_version,
+    sample_rate_at_analysis,
+    duration_ms_at_analysis
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+ON CONFLICT(track_id) DO UPDATE SET
+    bpm_attempted_at_unix = COALESCE(excluded.bpm_attempted_at_unix, bpm_attempted_at_unix),
+    key_attempted_at_unix = COALESCE(excluded.key_attempted_at_unix, key_attempted_at_unix),
+    waveform_attempted_at_unix = COALESCE(excluded.waveform_attempted_at_unix, waveform_attempted_at_unix),
+    analyzer_version = excluded.analyzer_version,
+    sample_rate_at_analysis = COALESCE(excluded.sample_rate_at_analysis, sample_rate_at_analysis),
+    duration_ms_at_analysis = COALESCE(excluded.duration_ms_at_analysis, duration_ms_at_analysis)
+"#;
+
+pub(super) const UPSERT_TRACK_WAVEFORM_SQL: &str = r#"
+INSERT INTO track_waveform (
+    track_id,
+    preview_segment_duration_ms,
+    preview_segments,
+    detail_segment_duration_ms,
+    detail_segments
+)
+VALUES (?1, ?2, ?3, ?4, ?5)
+ON CONFLICT(track_id) DO UPDATE SET
+    preview_segment_duration_ms = excluded.preview_segment_duration_ms,
+    preview_segments = excluded.preview_segments,
+    detail_segment_duration_ms = excluded.detail_segment_duration_ms,
+    detail_segments = excluded.detail_segments
+"#;
+
+/// "Fill in `tracks.bpm` only if it is currently NULL." Honors the
+/// rule that user-edited or tag-imported values win — the analyzer
+/// supplies missing data, it never overrides existing data.
+pub(super) const FILL_TRACK_BPM_IF_NULL_SQL: &str =
+    r#"UPDATE tracks SET bpm = ?1 WHERE id = ?2 AND bpm IS NULL"#;
+
+pub(super) const FILL_TRACK_MUSICAL_KEY_IF_NULL_SQL: &str =
+    r#"UPDATE tracks SET musical_key = ?1 WHERE id = ?2 AND musical_key IS NULL"#;
+
+pub(super) const SELECT_TRACK_WAVEFORM_SQL: &str = r#"
+SELECT
+    preview_segment_duration_ms,
+    preview_segments,
+    detail_segment_duration_ms,
+    detail_segments
+FROM track_waveform
+WHERE track_id = ?1
+"#;
+
+/// "Find tracks needing analysis." Returns track IDs that are not
+/// marked missing AND have at least one of the requested capabilities
+/// either un-attempted (NULL timestamp) or stamped by an older
+/// analyzer_version. Bound parameters in order:
+///   ?1 = include_bpm        (1 or 0)
+///   ?2 = include_key        (1 or 0)
+///   ?3 = include_waveform   (1 or 0)
+///   ?4 = current analyzer_version
+///   ?5 = LIMIT
+pub(super) const SELECT_TRACKS_NEEDING_ANALYSIS_SQL: &str = r#"
+SELECT t.id
+FROM tracks t
+LEFT JOIN track_analysis ta ON ta.track_id = t.id
+WHERE t.is_missing = 0
+  AND (
+        (?1 = 1 AND (ta.bpm_attempted_at_unix      IS NULL OR ta.analyzer_version < ?4))
+     OR (?2 = 1 AND (ta.key_attempted_at_unix      IS NULL OR ta.analyzer_version < ?4))
+     OR (?3 = 1 AND (ta.waveform_attempted_at_unix IS NULL OR ta.analyzer_version < ?4))
+      )
+ORDER BY t.id
+LIMIT ?5
+"#;
 
 fn indented_track_column_names(indent: &str) -> String {
     TRACK_COLUMNS
