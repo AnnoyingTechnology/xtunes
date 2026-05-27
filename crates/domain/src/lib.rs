@@ -8,6 +8,7 @@ mod command;
 mod id;
 mod managed_library;
 mod metadata;
+mod musical_key;
 mod playback;
 mod playback_session;
 mod playlist;
@@ -29,6 +30,7 @@ pub use managed_library::{
     ManagedTrackPathError, ManagedTrackPathInput, ManagedTrackPathPlan, ManagedTrackPathPlanner,
 };
 pub use metadata::{FieldChange, MetadataChange, TrackMetadata};
+pub use musical_key::MusicalKey;
 pub use playback::{
     PlaybackCommand, PlaybackOptions, PlaybackQueue, PlaybackQueueRequest, PlaybackQueueSource,
     PlaybackState, RepeatMode, TrackPlaybackSource, VolumePercent,

@@ -11,3 +11,7 @@
 # Maintainer-local working files (rhythmbox/iTunes import scratch space)
 /SELF_MIGRATION.md
 /iTunes Music Library.xml
+
+# Local clone of the upstream Pioneer/Rhythmbox exporter the analysis
+# crate cherry-picks DSP from. Not part of Sustain; kept out of the repo.
+/rhythmbox-to-pioneer-xdj-exporter/

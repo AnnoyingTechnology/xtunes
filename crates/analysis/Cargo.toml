@@ -1,0 +1,30 @@
+[package]
+name = "sustain-analysis"
+version = "0.1.0-alpha.2"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sustain_analysis"
+path = "src/lib.rs"
+
+[dependencies]
+# Audio decoding. Format features cover the spread Sustain claims to
+# import — MP3, M4A/AAC, FLAC, Ogg/Vorbis, WAV. We do not enable
+# `isomp4` features that would bring in additional non-music codecs.
+symphonia = { version = "0.5", features = ["mp3", "aac", "flac", "wav", "ogg", "vorbis"] }
+# BPM + key detection. Chroma-based; takes mono f32 samples and a
+# sample rate; returns BPM + a key string we map onto sustain_domain::MusicalKey.
+stratum-dsp = "1.0"
+# Digital biquad IIR filters for the 3-band split (low/mid/high) used
+# to produce per-segment frequency-band energies for the waveform.
+biquad = "0.6"
+# Error chaining for the public AnalysisError surface.
+thiserror = "2.0"
+# Domain-layer types (MusicalKey).
+sustain-domain = { path = "../domain" }
+
+[lints]
+workspace = true
