@@ -59,6 +59,11 @@ pub enum NotificationCategory {
     ArtworkFetch,
     MetadataWrite,
     Command,
+    /// Background DSP analysis (BPM / key / waveform) driven by the
+    /// `AnalysisScheduler`. Pushed as a persistent notification while
+    /// tracks are being analyzed and as an ephemeral summary once the
+    /// queue drains.
+    AnalysisBackground,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -184,6 +189,31 @@ impl NotificationCenter {
         id
     }
 
+    /// Update the body text of an existing notification in place,
+    /// preserving its slot in the persistent stack or ephemeral queue
+    /// so the lane does not flicker through a dismiss+repush. Returns
+    /// `true` when a matching id was found, `false` otherwise (the
+    /// notification was already dismissed or has expired).
+    pub fn update_body(&mut self, id: NotificationId, body: String) -> bool {
+        if let Some(slot) = self
+            .persistent_stack
+            .iter_mut()
+            .find(|notification| notification.id == id)
+        {
+            slot.body = body;
+            return true;
+        }
+        if let Some(slot) = self
+            .ephemeral_queue
+            .iter_mut()
+            .find(|notification| notification.id == id)
+        {
+            slot.body = body;
+            return true;
+        }
+        false
+    }
+
     /// Remove the notification matching `id` from wherever it lives.
     /// No-op if the id is no longer present (already expired, already
     /// dismissed, never existed).
@@ -251,6 +281,37 @@ pub fn library_import_running_text() -> String {
 
 pub fn library_consolidation_running_text() -> String {
     "Organizing library...".to_owned()
+}
+
+pub fn analysis_background_running_text(completed: u32, remaining: u32) -> String {
+    if remaining == 0 {
+        format!(
+            "Analyzing tracks ({} {} done)...",
+            completed,
+            pluralize(completed as usize, "track", "tracks"),
+        )
+    } else {
+        let total = completed.saturating_add(remaining);
+        format!("Analyzing tracks ({completed}/{total})...")
+    }
+}
+
+pub fn analysis_background_outcome_text(completed: u32, failed: u32) -> String {
+    if failed == 0 {
+        format!(
+            "Analyzed {} {}.",
+            completed,
+            pluralize(completed as usize, "track", "tracks"),
+        )
+    } else {
+        format!(
+            "Analyzed {} {}, {} {} skipped.",
+            completed,
+            pluralize(completed as usize, "track", "tracks"),
+            failed,
+            pluralize(failed as usize, "track", "tracks"),
+        )
+    }
 }
 
 pub fn library_scan_outcome_text(summary: &LibraryScanSummary) -> String {

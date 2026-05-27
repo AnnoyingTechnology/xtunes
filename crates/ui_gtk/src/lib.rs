@@ -108,6 +108,8 @@ pub(crate) type MetadataWriteResultReceiver =
     async_channel::Receiver<sustain_app_runtime::MetadataWriteResult>;
 pub(crate) type ArtworkFetchResultReceiver =
     async_channel::Receiver<sustain_app_runtime::ArtworkFetchResult>;
+pub(crate) type AnalysisProgressReceiver =
+    async_channel::Receiver<sustain_app_runtime::AnalysisProgress>;
 
 pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     let trun = std::time::Instant::now();
@@ -163,6 +165,26 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     }
 
     tlog!("artwork fetcher started");
+
+    // Start the paced background analysis scheduler. The progress sink
+    // is installed before `start_analysis_scheduler` so the worker's
+    // first Idle/Tick has somewhere to land. As with the metadata
+    // writer and artwork fetcher, the scheduler only runs when the
+    // user has toggled at least one analysis capability on in
+    // Preferences — at startup with all tickboxes off, the worker
+    // emits one Idle and blocks until a settings change.
+    let (analysis_progress_tx, analysis_progress_rx) =
+        async_channel::unbounded::<sustain_app_runtime::AnalysisProgress>();
+    runtime.set_analysis_progress_sink(analysis_progress_tx);
+    if let Err(error) = runtime.start_analysis_scheduler() {
+        // The only legitimate failure here is "no library store
+        // installed", which would be an internal misconfiguration —
+        // the runtime is set up upstream of this call. Log and
+        // continue; analysis simply does not run.
+        eprintln!("Sustain: analysis scheduler could not start ({error:?}).");
+    }
+    tlog!("analysis scheduler started");
+
     let runtime = Rc::new(RefCell::new(runtime));
 
     // Start the MPRIS server before any window is built so the bus name
@@ -190,6 +212,8 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
         Rc::new(RefCell::new(Some(write_result_rx)));
     let fetch_result_rx_holder: Rc<RefCell<Option<ArtworkFetchResultReceiver>>> =
         Rc::new(RefCell::new(Some(fetch_result_rx)));
+    let analysis_progress_rx_holder: Rc<RefCell<Option<AnalysisProgressReceiver>>> =
+        Rc::new(RefCell::new(Some(analysis_progress_rx)));
 
     tlog!("mpris done; about to connect_activate");
     app.connect_activate({
@@ -203,6 +227,7 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
             let mpris_command_rx = mpris_command_rx_holder.borrow_mut().take();
             let write_result_rx = write_result_rx_holder.borrow_mut().take();
             let fetch_result_rx = fetch_result_rx_holder.borrow_mut().take();
+            let analysis_progress_rx = analysis_progress_rx_holder.borrow_mut().take();
             let main_window = build_main_window(
                 app,
                 runtime.clone(),
@@ -210,6 +235,7 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
                 mpris_command_rx,
                 write_result_rx,
                 fetch_result_rx,
+                analysis_progress_rx,
             );
             eprintln!(
                 "[TIMING]   activate: build_main_window returned at {:.1}ms",
@@ -243,6 +269,7 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     let mut runtime_guard = runtime.borrow_mut();
     runtime_guard.shutdown_metadata_writer();
     runtime_guard.shutdown_artwork_fetcher();
+    runtime_guard.shutdown_analysis_scheduler();
 }
 
 /// Activate the already-running Sustain primary instance that owns

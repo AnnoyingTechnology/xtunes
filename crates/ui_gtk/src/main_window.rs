@@ -16,11 +16,11 @@ use sustain_app_runtime::{
 };
 
 use super::{
-    ALBUMS_VIEW, APP_ID, ApplicationCommand, ApplicationRuntime, ArtworkFetchResultReceiver,
-    AvailabilityChangedCallback, LibraryChangedCallback, LibraryChangedHolder,
-    MetadataWriteResultReceiver, MprisCommandReceiver, PLAYLISTS_VIEW, PlaybackChangedCallback,
-    SONGS_VIEW, SharedMprisService, SharedRuntime, ShowAlbumAction, ShowAlbumHolder,
-    TrackRowChangedCallback, TrackRowChangedHolder,
+    ALBUMS_VIEW, APP_ID, AnalysisProgressReceiver, ApplicationCommand, ApplicationRuntime,
+    ArtworkFetchResultReceiver, AvailabilityChangedCallback, LibraryChangedCallback,
+    LibraryChangedHolder, MetadataWriteResultReceiver, MprisCommandReceiver, PLAYLISTS_VIEW,
+    PlaybackChangedCallback, SONGS_VIEW, SharedMprisService, SharedRuntime, ShowAlbumAction,
+    ShowAlbumHolder, TrackRowChangedCallback, TrackRowChangedHolder,
     accent::install_accent_css,
     albums::AlbumsView,
     app_css::install_app_css,
@@ -79,6 +79,7 @@ pub(crate) fn build_main_window(
     mpris_command_rx: Option<MprisCommandReceiver>,
     metadata_write_result_rx: Option<MetadataWriteResultReceiver>,
     artwork_fetch_result_rx: Option<ArtworkFetchResultReceiver>,
+    analysis_progress_rx: Option<AnalysisProgressReceiver>,
 ) -> BuiltMainWindow {
     let tbw = std::time::Instant::now();
     macro_rules! tlog {
@@ -368,6 +369,7 @@ pub(crate) fn build_main_window(
         playback_changed: playback_changed.clone(),
         track_row_changed_holder: track_row_changed_holder.clone(),
     });
+    install_analysis_progress_consumer(analysis_progress_rx, runtime.clone());
     // Authoritative record of the user's top-bar view-mode choice.
     //
     // The mode used to be inferred from `content_stack.visible_child_name()`
@@ -1625,6 +1627,27 @@ fn install_metadata_write_result_consumer(
             if let Some(callback) = track_row_changed_holder.borrow().as_ref() {
                 callback(result.track_id);
             }
+        }
+    });
+}
+
+/// Drains [`AnalysisProgress`](sustain_app_runtime::AnalysisProgress)
+/// events posted by the background analysis scheduler. Each event is
+/// applied to the runtime's notification center on the GTK main thread
+/// via [`ApplicationRuntime::apply_analysis_progress`] — that's where
+/// the persistent "Analyzing N/total..." notification is created,
+/// updated in place per tick, and dismissed on Idle (with an
+/// ephemeral summary toast when work actually happened).
+fn install_analysis_progress_consumer(
+    receiver: Option<AnalysisProgressReceiver>,
+    runtime: SharedRuntime,
+) {
+    let Some(receiver) = receiver else {
+        return;
+    };
+    glib::MainContext::default().spawn_local(async move {
+        while let Ok(progress) = receiver.recv().await {
+            runtime.borrow_mut().apply_analysis_progress(progress);
         }
     });
 }

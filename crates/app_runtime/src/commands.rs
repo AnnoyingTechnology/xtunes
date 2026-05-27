@@ -44,6 +44,7 @@ impl ApplicationRuntime {
                     }
                 }
                 let previous_library_path = self.settings.library.path.clone();
+                let previous_analysis = self.settings.analysis;
                 if let Some(settings_store) = &self.settings_store {
                     settings_store
                         .save_settings(settings.clone())
@@ -64,6 +65,22 @@ impl ApplicationRuntime {
                     && previous != new
                 {
                     self.reconcile_track_availability_after_library_path_change(new.clone())?;
+                }
+                // Propagate analysis-tickbox changes to the background
+                // scheduler so toggling a capability off stops the
+                // worker between tracks (matching the managed-library
+                // cancellation precedent). Library-path changes also
+                // propagate so the worker resolves paths against the
+                // new root.
+                if self.settings.analysis != previous_analysis
+                    && let Some(scheduler) = self.analysis_scheduler()
+                {
+                    scheduler.update_settings(self.settings.analysis);
+                }
+                if self.settings.library.path != previous_library_path
+                    && let Some(scheduler) = self.analysis_scheduler()
+                {
+                    scheduler.set_library_path(self.settings.library.path.clone());
                 }
             }
             ApplicationCommand::ScanLibrary { library_path } => {

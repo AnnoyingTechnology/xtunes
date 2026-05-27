@@ -1998,6 +1998,7 @@ name = "sustain-app-runtime"
 version = "0.1.0-alpha.2"
 dependencies = [
  "async-channel",
+ "sustain-analysis",
  "sustain-domain",
  "sustain-library-store",
  "sustain-metadata",
@@ -2005,6 +2006,7 @@ dependencies = [
  "sustain-playback",
  "sustain-search",
  "sustain-settings",
+ "tempfile",
  "trash",
 ]
 

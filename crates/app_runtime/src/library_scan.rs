@@ -90,6 +90,12 @@ impl ApplicationRuntime {
             NotificationSeverity::Info,
             notifications::library_scan_outcome_text(&summary),
         );
+        // New tracks may have landed; nudge the analysis scheduler so
+        // it polls for fresh work without waiting for the next idle
+        // cycle. No-op when no scheduler has been started.
+        if let Some(scheduler) = self.analysis_scheduler() {
+            scheduler.wake();
+        }
     }
 
     pub fn fail_library_scan(&mut self, error: ApplicationRuntimeError) {

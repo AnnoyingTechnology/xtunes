@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 async-channel = "2"
 trash = "5"
+sustain-analysis = { path = "../analysis" }
 sustain-settings = { path = "../settings" }
 sustain-domain = { path = "../domain" }
 sustain-library-store = { path = "../library_store" }
@@ -20,6 +21,9 @@ sustain-metadata = { path = "../metadata" }
 sustain-metadata-remote = { path = "../metadata_remote" }
 sustain-playback = { path = "../playback" }
 sustain-search = { path = "../search" }
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

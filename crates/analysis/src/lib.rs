@@ -43,6 +43,15 @@ pub use sustain_domain::{
     WaveformSegment, WaveformSegments,
 };
 
+/// Monotonically-increasing identifier for the DSP algorithms in this
+/// crate. Bumped centrally when a change to the band split, BPM/key
+/// engine, or waveform encoding would invalidate previously-stored
+/// `track_analysis` rows. The storage layer compares stored rows
+/// against this value to decide whether a track should be re-queued
+/// by the runtime scheduler — no migration code, just a version
+/// bump that the scheduler walks past in the background.
+pub const ANALYZER_VERSION: u32 = 1;
+
 /// Tunables exposed to callers. Defaults reflect the values the
 /// rhythmbox-to-pioneer-xdj-exporter author landed on after testing on
 /// a large DJ-style library, with one Sustain-specific deviation:

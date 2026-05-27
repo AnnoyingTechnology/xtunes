@@ -37,6 +37,9 @@ pub use sustain_search::{
 };
 use sustain_settings::SettingsStore;
 
+pub mod analysis_scheduler;
+pub use analysis_scheduler::SchedulerProgress as AnalysisProgress;
+
 pub(crate) mod artwork_fetcher;
 mod commands;
 mod library_mutation;
@@ -57,7 +60,8 @@ pub use metadata_writer::{MetadataWriteKind, MetadataWriteOutcome, MetadataWrite
 pub use notifications::{
     EPHEMERAL_NOTIFICATION_DURATION, NOTIFICATION_QUEUE_HARD_CAP, NOTIFICATION_TRANSITION,
     Notification, NotificationCategory, NotificationCenter, NotificationId, NotificationKind,
-    NotificationSeverity, library_consolidation_outcome_text, library_consolidation_running_text,
+    NotificationSeverity, analysis_background_outcome_text, analysis_background_running_text,
+    library_consolidation_outcome_text, library_consolidation_running_text,
     library_import_outcome_text, library_import_running_text, library_path_change_outcome_text,
     library_scan_outcome_text, library_scan_running_text, runtime_error_text,
 };
@@ -232,6 +236,9 @@ pub struct ApplicationRuntime {
     remote_metadata_service: Option<Arc<dyn RemoteMetadataService>>,
     artwork_fetcher: Option<artwork_fetcher::ArtworkFetcher>,
     artwork_fetch_result_sink: Option<async_channel::Sender<ArtworkFetchResult>>,
+    analysis_scheduler: Option<analysis_scheduler::AnalysisScheduler>,
+    analysis_progress_sink: Option<async_channel::Sender<analysis_scheduler::SchedulerProgress>>,
+    analysis_notification_id: Option<NotificationId>,
     clock: Arc<dyn Clock>,
     notifications: NotificationCenter,
     // Fires after every push/dismiss/expire on `notifications`. Set by
@@ -293,6 +300,9 @@ impl ApplicationRuntime {
             remote_metadata_service: None,
             artwork_fetcher: None,
             artwork_fetch_result_sink: None,
+            analysis_scheduler: None,
+            analysis_progress_sink: None,
+            analysis_notification_id: None,
             clock: Arc::new(SystemClock),
             notifications: NotificationCenter::new(),
             notification_observer: None,
@@ -335,6 +345,9 @@ impl ApplicationRuntime {
             remote_metadata_service: None,
             artwork_fetcher: None,
             artwork_fetch_result_sink: None,
+            analysis_scheduler: None,
+            analysis_progress_sink: None,
+            analysis_notification_id: None,
             clock: Arc::new(SystemClock),
             notifications: NotificationCenter::new(),
             notification_observer: None,
@@ -469,6 +482,129 @@ impl ApplicationRuntime {
         if let Some(fetcher) = self.artwork_fetcher.take() {
             fetcher.shutdown();
         }
+    }
+
+    /// Spin up the background analysis scheduler against the previously
+    /// installed [`LibraryStore`]. The scheduler observes the current
+    /// `AnalysisSettings` (`bpm` / `key` / `waveform` tickboxes) and
+    /// the library root; toggling either through the settings command
+    /// path automatically propagates to the worker. Returns
+    /// [`ApplicationRuntimeError::LibraryServicesUnavailable`] if no
+    /// library store has been set yet.
+    pub fn start_analysis_scheduler(&mut self) -> ApplicationRuntimeResult<()> {
+        let library_store = self
+            .library_store
+            .clone()
+            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
+
+        // Production analyzer: the real DSP. Tests substitute a stub via
+        // analysis_scheduler::AnalysisScheduler::start directly.
+        let analyzer: analysis_scheduler::AnalyzerFn = Arc::new(sustain_analysis::analyze);
+        let clock: analysis_scheduler::UnixClockFn = Arc::new(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+        });
+
+        // Marshal progress events from the worker thread onto whatever
+        // sink the UI installed via `set_analysis_progress_sink`. If no
+        // sink is installed, drop silently — the worker keeps doing
+        // useful work even if the UI does not surface its progress.
+        let progress_sink = self.analysis_progress_sink.clone();
+        let progress: analysis_scheduler::ProgressSink = Arc::new(move |progress| {
+            if let Some(sender) = &progress_sink {
+                // try_send so a slow consumer cannot back-pressure the
+                // worker thread. Dropping a Tick is fine — the next
+                // Tick or Idle carries the same running totals.
+                let _ = sender.try_send(progress);
+            }
+        });
+
+        let scheduler = analysis_scheduler::AnalysisScheduler::start(
+            analysis_scheduler::AnalysisSchedulerConfig {
+                analyzer,
+                progress,
+                clock,
+                library_store,
+                initial_settings: self.settings.analysis,
+                library_path: self.settings.library.path.clone(),
+                analyzer_version: sustain_analysis::ANALYZER_VERSION,
+                analysis_options: sustain_analysis::AnalysisOptions::default(),
+            },
+        );
+        self.analysis_scheduler = Some(scheduler);
+        Ok(())
+    }
+
+    /// Register the async-channel sink that receives
+    /// [`AnalysisProgress`] events. The UI typically holds the
+    /// matching receiver and forwards each event into
+    /// [`Self::apply_analysis_progress`] from the GTK main loop.
+    pub fn set_analysis_progress_sink(
+        &mut self,
+        sink: async_channel::Sender<analysis_scheduler::SchedulerProgress>,
+    ) {
+        self.analysis_progress_sink = Some(sink);
+    }
+
+    /// Drop the scheduler's sender and join its worker. Safe at app
+    /// shutdown; idempotent across calls.
+    pub fn shutdown_analysis_scheduler(&mut self) {
+        if let Some(id) = self.analysis_notification_id.take() {
+            self.dismiss_notification(id);
+        }
+        if let Some(scheduler) = self.analysis_scheduler.take() {
+            scheduler.shutdown();
+        }
+    }
+
+    /// Apply an [`AnalysisProgress`] event to the notification center.
+    /// Called from the UI loop after receiving an event from the sink
+    /// installed by [`Self::set_analysis_progress_sink`] — the
+    /// scheduler runs on its own thread, so the runtime cannot push
+    /// notifications synchronously from inside the worker.
+    pub fn apply_analysis_progress(&mut self, progress: analysis_scheduler::SchedulerProgress) {
+        match progress {
+            analysis_scheduler::SchedulerProgress::Tick {
+                completed,
+                failed: _,
+                remaining,
+            } => {
+                let body = notifications::analysis_background_running_text(completed, remaining);
+                if let Some(existing) = self.analysis_notification_id {
+                    self.update_notification_body(existing, body);
+                } else {
+                    let id = self.push_persistent_notification(
+                        NotificationCategory::AnalysisBackground,
+                        NotificationSeverity::Info,
+                        body,
+                        false,
+                    );
+                    self.analysis_notification_id = Some(id);
+                }
+            }
+            analysis_scheduler::SchedulerProgress::Idle { completed, failed } => {
+                if let Some(id) = self.analysis_notification_id.take() {
+                    self.dismiss_notification(id);
+                }
+                // Emit an ephemeral summary only when there is something
+                // to summarise — Idle also fires on initial start-up
+                // with capabilities disabled, and we do not want a
+                // ghost "Analyzed 0 tracks" toast every launch.
+                if completed > 0 || failed > 0 {
+                    self.push_ephemeral_notification(
+                        NotificationCategory::AnalysisBackground,
+                        NotificationSeverity::Info,
+                        notifications::analysis_background_outcome_text(completed, failed),
+                    );
+                }
+            }
+        }
+    }
+
+    pub(crate) fn analysis_scheduler(&self) -> Option<&analysis_scheduler::AnalysisScheduler> {
+        self.analysis_scheduler.as_ref()
     }
 
     pub(crate) fn artwork_fetcher(&self) -> Option<&artwork_fetcher::ArtworkFetcher> {
@@ -625,6 +761,15 @@ impl ApplicationRuntime {
     pub fn dismiss_notification(&mut self, id: NotificationId) {
         self.notifications.dismiss(id);
         self.notify_notification_observer();
+    }
+
+    /// Replace the body text of an existing notification in place,
+    /// firing the observer so the lane re-renders without animating
+    /// through a dismiss+repush.
+    pub fn update_notification_body(&mut self, id: NotificationId, body: String) {
+        if self.notifications.update_body(id, body) {
+            self.notify_notification_observer();
+        }
     }
 
     /// Pop the currently-displayed ephemeral. Called by the widget
