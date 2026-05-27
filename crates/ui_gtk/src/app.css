@@ -197,7 +197,6 @@ button.now-playing-side-button:focus {
 button.preferences-tab-button {
     background: transparent;
     border: none;
-    border-radius: 6px;
     box-shadow: none;
     margin: 4px 6px 0 6px;
     min-height: 64px;
@@ -206,18 +205,24 @@ button.preferences-tab-button {
     opacity: 0.62;
 }
 
+/* No hover or checked background — state is communicated by opacity
+   only, per the maintainer's preference for a quiet, chrome-free strip. */
+button.preferences-tab-button:hover,
+button.preferences-tab-button:active,
+button.preferences-tab-button:focus,
+button.preferences-tab-button:checked,
+button.preferences-tab-button:checked:hover {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+
 button.preferences-tab-button:hover {
-    background: alpha(@theme_fg_color, 0.06);
     opacity: 0.85;
 }
 
 button.preferences-tab-button:checked {
-    background: alpha(@theme_selected_bg_color, 0.18);
     opacity: 1.0;
-}
-
-button.preferences-tab-button:checked:hover {
-    background: alpha(@theme_selected_bg_color, 0.24);
 }
 
 .preferences-tab-label {

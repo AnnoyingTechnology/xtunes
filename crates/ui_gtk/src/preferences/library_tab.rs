@@ -12,6 +12,7 @@ use super::super::{
     library_consolidation::LibraryConsolidationRequestedCallback,
     library_scan::LibraryScanRequestedCallback,
 };
+use super::HELPER_MAX_WIDTH_CHARS;
 use super::switch_row::build_switch_row;
 
 pub(super) fn build(
@@ -36,6 +37,7 @@ pub(super) fn build(
     library_path_help.add_css_class("preference-helper");
     library_path_help.set_xalign(0.0);
     library_path_help.set_wrap(true);
+    library_path_help.set_max_width_chars(HELPER_MAX_WIDTH_CHARS);
 
     label_group.append(&library_path_label);
     label_group.append(&library_path_help);
@@ -76,6 +78,7 @@ pub(super) fn build(
     scan_status.add_css_class("preference-helper");
     scan_status.set_xalign(0.0);
     scan_status.set_wrap(true);
+    scan_status.set_max_width_chars(HELPER_MAX_WIDTH_CHARS);
 
     let library_path_is_valid = library_path_entry_is_valid(&path_entry);
     let management_mode = command_controller
@@ -85,7 +88,7 @@ pub(super) fn build(
         .library
         .management_mode;
     let keep_organized_row = build_switch_row(
-        "Keep my library organized",
+        "Organize my library",
         "New tracks are copied into clean artist, album, and track folders. \
          Existing tracks are organized in the background when this is turned on.",
         library_path_is_valid

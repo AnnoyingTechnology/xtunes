@@ -21,6 +21,14 @@ mod switch_row;
 /// dominant icon room to breathe.
 const TAB_ICON_SIZE: i32 = 32;
 
+/// Wrap-width budget (in average character widths) for muted helper text
+/// and any wrapping label inside the Preferences window. Picked so the
+/// helper text wraps within the pinned `PREFERENCES_WIDTH` panel rather
+/// than pushing the window wider — labels with `wrap = true` request
+/// their natural width otherwise, and the stack's `hhomogeneous = true`
+/// would propagate that to every tab.
+pub(super) const HELPER_MAX_WIDTH_CHARS: i32 = 56;
+
 const TAB_LIBRARY: &str = "library";
 const TAB_ANALYSIS: &str = "analysis";
 const TAB_ONLINE: &str = "online";

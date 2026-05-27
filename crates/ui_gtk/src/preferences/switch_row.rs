@@ -3,6 +3,8 @@
 
 use gtk::prelude::*;
 
+use super::HELPER_MAX_WIDTH_CHARS;
+
 /// A label-on-the-left, switch-on-the-right row with a muted helper line
 /// underneath. Shared layout for every capability toggle in the Preferences
 /// window — keeping it in one place means the Library, Analysis, and Online
@@ -33,6 +35,7 @@ pub(super) fn build_switch_row(label_text: &str, helper_text: &str, initial: boo
     helper.add_css_class("preference-helper");
     helper.set_xalign(0.0);
     helper.set_wrap(true);
+    helper.set_max_width_chars(HELPER_MAX_WIDTH_CHARS);
 
     container.append(&header);
     container.append(&helper);
