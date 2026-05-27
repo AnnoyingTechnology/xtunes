@@ -286,19 +286,25 @@ fn worker_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisSched
             };
             let absolute_path = track.location.absolute_path(&library_path);
             let now_unix = (clock)();
+            // sample_rate_hz and duration are populated by the metadata
+            // scan and live on TrackMetadata already — recording them
+            // here lets the storage row carry the audio-stream facts
+            // that were in effect when this DSP pass ran, useful for
+            // future renderers cross-checking the waveform's time
+            // mapping against the file the user is now seeing.
             let run_context = AnalysisRunContext {
                 analyzer_version,
-                sample_rate: 0,
-                duration_ms: 0,
+                sample_rate: track.metadata.sample_rate_hz.unwrap_or(0),
+                duration_ms: track
+                    .metadata
+                    .duration
+                    .and_then(|duration| u32::try_from(duration.as_millis()).ok())
+                    .unwrap_or(0),
                 now_unix,
             };
 
             match (analyzer)(&absolute_path, analysis_options) {
                 Ok(analysis) => {
-                    // The analyzer does not carry sample_rate/duration
-                    // out of the DSP layer directly today, but recording
-                    // 0 is fine — the upsert helper translates 0 to
-                    // NULL and COALESCE preserves any prior value.
                     let _ = library_store.record_analysis(
                         track_id,
                         &analysis,
