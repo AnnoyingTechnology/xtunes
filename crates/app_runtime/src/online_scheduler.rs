@@ -38,7 +38,8 @@ use sustain_domain::{FieldChange, MetadataChange, OnlineSettings, SyncedLyrics, 
 use sustain_library_store::{LibraryStore, OnlineCapabilities, OnlineContext};
 use sustain_metadata::MetadataService;
 use sustain_metadata_remote::{
-    FetchedArtwork, FetchedLyrics, RemoteError, RemoteMetadataService, TrackMatch, TrackQuery,
+    FetchedArtwork, FetchedLyrics, GenreCandidate, RemoteError, RemoteMetadataService, TrackMatch,
+    TrackMatchRelease, TrackQuery,
 };
 
 use crate::artwork_fetcher::query_from_metadata;
@@ -679,6 +680,33 @@ fn effective_capabilities(settings: &OnlineSettings) -> OnlineCapabilities {
 /// from external sources. Successful identifications are cached into
 /// `cached_match` so the artwork attempt that runs next does not
 /// need to re-identify the same track.
+///
+/// Field-by-field policy:
+///
+/// * **title / artist** — recording-level facts; safe to fill from
+///   any match.
+/// * **year** — taken from the recording's first-release-date, not
+///   from any particular release. Compilations and reissues all
+///   share the same first-release year, which is what users mean by
+///   "year" of a song.
+/// * **genre** — picked from the recording's community-voted genre
+///   tags with a library-aware bias: if any candidate is already a
+///   genre the user has in their library, that candidate wins over a
+///   higher-voted one not yet present, and the library's existing
+///   spelling is preserved. Otherwise the top-voted candidate wins.
+///   This stops the enrichment path from sprawling the library into
+///   dozens of near-duplicate genres ("electronica" vs "house" when
+///   the library already has "House").
+/// * **album** — release-level. Filled from MusicBrainz's first
+///   release only when the user has no album value yet (the same
+///   recording appears on many releases; "first" is a guess).
+/// * **track_number / track_total / disc_number** — release-specific
+///   *and* the most damaging to get wrong (same recording can be
+///   #3/12 on one album and #1/4 on another). Only filled when the
+///   user already has an album value that matches one of the
+///   matched releases' titles — otherwise the values are skipped
+///   entirely. Leaving them empty is strictly better than writing
+///   a guess.
 #[allow(clippy::too_many_arguments)]
 fn attempt_tags(
     track: &Track,
@@ -689,26 +717,24 @@ fn attempt_tags(
     library_store: &dyn LibraryStore,
     cached_match: &mut Option<TrackMatch>,
 ) -> AttemptOutcome {
-    // Build the non-destructive change up front. If every field the
-    // identifier could fill is already populated, we can skip the
-    // remote call entirely.
-    let mut change = MetadataChange::default();
-    let mut change_releasable_fields = false;
-    if track.metadata.title.is_none() {
-        change_releasable_fields = true;
-    }
-    if track.metadata.artist.is_none() {
-        change_releasable_fields = true;
-    }
-    if track.metadata.album.is_none()
-        || track.metadata.year.is_none()
-        || track.metadata.track_number.is_none()
-        || track.metadata.track_total.is_none()
-        || track.metadata.disc_number.is_none()
-    {
-        change_releasable_fields = true;
-    }
-    if !change_releasable_fields {
+    // Gate-shaped check: don't talk to the network if there is
+    // nothing we are allowed to fill. The positional fields require
+    // an existing album to align against, so they only count toward
+    // "we have work to do" when the album is already set.
+    let need_title = track.metadata.title.is_none();
+    let need_artist = track.metadata.artist.is_none();
+    let need_album = track.metadata.album.is_none();
+    let need_year = track.metadata.year.is_none();
+    let need_genre = track
+        .metadata
+        .genre
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty());
+    let need_positional = track.metadata.album.is_some()
+        && (track.metadata.track_number.is_none()
+            || track.metadata.track_total.is_none()
+            || track.metadata.disc_number.is_none());
+    if !(need_title || need_artist || need_album || need_year || need_genre || need_positional) {
         return AttemptOutcome::NoMatch;
     }
 
@@ -721,30 +747,44 @@ fn attempt_tags(
         }
     };
 
-    if track.metadata.title.is_none()
+    let mut change = MetadataChange::default();
+
+    if need_title
         && let Some(value) = matched.title.as_deref()
         && !value.trim().is_empty()
     {
         change.title = FieldChange::Set(value.to_owned());
     }
-    if track.metadata.artist.is_none()
+    if need_artist
         && let Some(value) = matched.artist.as_deref()
         && !value.trim().is_empty()
     {
         change.artist = FieldChange::Set(value.to_owned());
     }
-    if let Some(release) = matched.releases.first() {
-        if track.metadata.album.is_none()
-            && let Some(value) = release.title.as_deref()
-            && !value.trim().is_empty()
-        {
-            change.album = FieldChange::Set(value.to_owned());
+    if need_year && let Some(year) = matched.first_release_year {
+        change.year = FieldChange::Set(year);
+    }
+    if need_genre {
+        // Library-aware genre selection. A failed distinct_genres()
+        // query degrades gracefully to "no library bias": the worker
+        // still gets to pick a genre based on votes alone, rather
+        // than silently skipping the whole track.
+        let library_genres = library_store.distinct_genres().unwrap_or_default();
+        if let Some(name) = select_genre(&matched.genres, &library_genres) {
+            change.genre = FieldChange::Set(name);
         }
-        if track.metadata.year.is_none()
-            && let Some(year) = release.year
-        {
-            change.year = FieldChange::Set(year);
-        }
+    }
+    if need_album
+        && let Some(release) = matched.releases.first()
+        && let Some(title) = release.title.as_deref()
+        && !title.trim().is_empty()
+    {
+        change.album = FieldChange::Set(title.to_owned());
+    }
+    if need_positional
+        && let Some(existing_album) = track.metadata.album.as_deref()
+        && let Some(release) = find_release_matching_album(&matched.releases, existing_album)
+    {
         if track.metadata.track_number.is_none()
             && let Some(value) = release.track_number
         {
@@ -768,14 +808,15 @@ fn attempt_tags(
         && matches!(change.artist, FieldChange::Unchanged)
         && matches!(change.album, FieldChange::Unchanged)
         && matches!(change.year, FieldChange::Unchanged)
+        && matches!(change.genre, FieldChange::Unchanged)
         && matches!(change.track_number, FieldChange::Unchanged)
         && matches!(change.track_total, FieldChange::Unchanged)
         && matches!(change.disc_number, FieldChange::Unchanged)
     {
         // Identification succeeded but every field it could fill was
-        // already present (e.g. user-supplied gaps that the match's
-        // release happens not to cover). No write, but still
-        // "attempted" — the SQL stamp keeps us from re-trying.
+        // already present (or the match carried no data for it).
+        // No write, but still "attempted" — the SQL stamp keeps us
+        // from re-trying.
         return AttemptOutcome::NoMatch;
     }
 
@@ -801,6 +842,69 @@ fn attempt_tags(
     }
 
     AttemptOutcome::Succeeded
+}
+
+/// Choose the best single genre to write back, given the recording's
+/// candidate list (sorted by community vote count, descending) and
+/// the set of genre values the user already has in their library.
+///
+/// A candidate that already exists in the library wins outright over
+/// higher-voted candidates that don't, because the alternative is
+/// genre sprawl: silently adding a near-duplicate ("Electronica") to
+/// a library that already organizes around "House" means the user's
+/// existing genre-based smart playlists stop catching new arrivals.
+/// When multiple candidates are in the library, the one with the
+/// highest vote count among them wins (the `matched_genres` list is
+/// sorted descending, so the first hit wins by iteration order). The
+/// library's existing spelling is preserved so casing stays
+/// consistent across the library.
+///
+/// Falls back to the top-voted candidate if none of them are in the
+/// library yet — better to seed the library with a community-curated
+/// genre than to leave the field blank forever.
+fn select_genre(matched_genres: &[GenreCandidate], library_genres: &[String]) -> Option<String> {
+    let library_by_normalized: std::collections::HashMap<String, &String> = library_genres
+        .iter()
+        .map(|name| (normalize_genre(name), name))
+        .collect();
+    for candidate in matched_genres {
+        if let Some(library_spelling) = library_by_normalized.get(&normalize_genre(&candidate.name))
+        {
+            return Some((*library_spelling).clone());
+        }
+    }
+    matched_genres
+        .first()
+        .map(|candidate| candidate.name.clone())
+}
+
+fn normalize_genre(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+/// Find the release in `releases` whose title matches `album`
+/// (case- and whitespace-normalized). Returns `None` when no match
+/// exists; callers treat that as "we can't trust the positional
+/// fields on any of these releases".
+fn find_release_matching_album<'a>(
+    releases: &'a [TrackMatchRelease],
+    album: &str,
+) -> Option<&'a TrackMatchRelease> {
+    let needle = normalize_album(album);
+    if needle.is_empty() {
+        return None;
+    }
+    releases.iter().find(|release| {
+        release
+            .title
+            .as_deref()
+            .map(|title| normalize_album(title) == needle)
+            .unwrap_or(false)
+    })
+}
+
+fn normalize_album(value: &str) -> String {
+    value.trim().to_lowercase()
 }
 
 #[cfg(test)]
@@ -1378,12 +1482,18 @@ mod tests {
     }
 
     #[test]
-    fn tags_capability_fills_only_missing_fields_and_caches_match_for_artwork() {
-        use sustain_metadata_remote::{TrackMatchRelease, TrackMatchSource};
+    fn tags_fill_recording_level_fields_when_album_is_missing_but_skip_positional() {
+        // When the user has no album yet, MusicBrainz's "first
+        // release" is just a guess: filling track/disc positional
+        // fields from it would frequently write the wrong values
+        // (the same recording lives on multiple releases). Album
+        // does get the first-release guess because there is no
+        // useful alternative. Year is sourced from the recording's
+        // first-release-date, not from a particular release.
+        use sustain_metadata_remote::{GenreCandidate, TrackMatchRelease, TrackMatchSource};
 
         let temp = TempDir::new().expect("temp");
         let store: Arc<dyn LibraryStore> = Arc::new(InMemoryLibraryStore::new());
-        // Seed a track that already has artist/title but no album/year.
         let mut track = track_with_metadata(temp.path(), "alpha.flac");
         track.metadata.artist = Some("Existing Artist".to_owned());
         track.metadata.title = Some("Existing Title".to_owned());
@@ -1393,11 +1503,16 @@ mod tests {
             recording_mbid: "rec-mbid".to_owned(),
             title: Some("Other Title".to_owned()),
             artist: Some("Other Artist".to_owned()),
+            first_release_year: Some(2014),
+            genres: vec![GenreCandidate {
+                name: "trip-hop".to_owned(),
+                vote_count: 9,
+            }],
             releases: vec![TrackMatchRelease {
                 release_mbid: "rel-mbid".to_owned(),
                 release_group_mbid: None,
                 title: Some("Filled Album".to_owned()),
-                year: Some(2014),
+                year: Some(2018),
                 track_number: Some(3),
                 track_total: Some(12),
                 disc_number: Some(1),
@@ -1436,22 +1551,177 @@ mod tests {
         });
 
         let stored = store.track(track.id).expect("load").expect("present");
-        // Existing values were NOT overwritten.
         assert_eq!(stored.metadata.artist.as_deref(), Some("Existing Artist"));
         assert_eq!(stored.metadata.title.as_deref(), Some("Existing Title"));
-        // Missing values were filled from the release.
         assert_eq!(stored.metadata.album.as_deref(), Some("Filled Album"));
+        // Year comes from recording's first-release-date, NOT the
+        // release's date — even though both are populated in the
+        // match, the recording-level value is what got written.
         assert_eq!(stored.metadata.year, Some(2014));
-        assert_eq!(stored.metadata.track_number, Some(3));
-        assert_eq!(stored.metadata.track_total, Some(12));
-        assert_eq!(stored.metadata.disc_number, Some(1));
+        assert_eq!(stored.metadata.genre.as_deref(), Some("trip-hop"));
+        // Positional fields stay None: we had no album to align the
+        // matched release against. The release's positional fields
+        // are ignored entirely.
+        assert_eq!(stored.metadata.track_number, None);
+        assert_eq!(stored.metadata.track_total, None);
+        assert_eq!(stored.metadata.disc_number, None);
 
-        // Identification fires once, and the cached match drives the
-        // artwork attempt — fetch_artwork (the unidentified path) is
-        // never called.
         assert_eq!(remote.identify_calls.load(Ordering::SeqCst), 1);
         assert_eq!(remote.artwork_for_match_calls.load(Ordering::SeqCst), 1);
         assert_eq!(remote.artwork_calls.load(Ordering::SeqCst), 0);
+
+        scheduler.shutdown();
+    }
+
+    #[test]
+    fn tags_fill_positional_fields_only_when_album_matches_a_matched_release() {
+        // With an album already set, the matched release with the
+        // same title is used for track_number / track_total /
+        // disc_number. Other matched releases (different
+        // compilations) are ignored.
+        use sustain_metadata_remote::{GenreCandidate, TrackMatchRelease, TrackMatchSource};
+
+        let temp = TempDir::new().expect("temp");
+        let store: Arc<dyn LibraryStore> = Arc::new(InMemoryLibraryStore::new());
+        let mut track = track_with_metadata(temp.path(), "alpha.flac");
+        track.metadata.album = Some("Mezzanine".to_owned());
+        store.save_track(track.clone()).expect("save");
+
+        let track_match = TrackMatch {
+            recording_mbid: "rec-mbid".to_owned(),
+            title: Some("Angel".to_owned()),
+            artist: Some("Massive Attack".to_owned()),
+            first_release_year: Some(1998),
+            genres: vec![GenreCandidate {
+                name: "trip-hop".to_owned(),
+                vote_count: 9,
+            }],
+            releases: vec![
+                TrackMatchRelease {
+                    release_mbid: "comp-mbid".to_owned(),
+                    release_group_mbid: None,
+                    title: Some("Greatest Hits".to_owned()),
+                    year: Some(2006),
+                    track_number: Some(7),
+                    track_total: Some(18),
+                    disc_number: Some(1),
+                },
+                TrackMatchRelease {
+                    release_mbid: "rel-mbid".to_owned(),
+                    release_group_mbid: None,
+                    // Casing/whitespace differs from the user's
+                    // stored value to verify normalized matching.
+                    title: Some(" mezzanine ".to_owned()),
+                    year: Some(1998),
+                    track_number: Some(1),
+                    track_total: Some(11),
+                    disc_number: Some(1),
+                },
+            ],
+            source: TrackMatchSource::MusicBrainzTags,
+        };
+        let remote = Arc::new(StubRemote::default().with_identify(Ok(Some(track_match))));
+        let metadata = Arc::new(StubMetadata::default());
+        let (sink, rx) = capturing_sink();
+
+        let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
+            remote_service: remote.clone(),
+            metadata_service: metadata.clone(),
+            library_store: store.clone(),
+            progress: sink,
+            track_updated: None,
+            clock: fixed_clock(1),
+            initial_settings: OnlineSettings {
+                artwork: false,
+                tags: true,
+                lyrics: false,
+            },
+            library_path: Some(temp.path().to_path_buf()),
+            provider_version: 1,
+        });
+
+        let _tick = wait_for(&rx, Duration::from_secs(2), |progress| {
+            matches!(progress, SchedulerProgress::Tick { completed: 1, .. })
+        });
+
+        let stored = store.track(track.id).expect("load").expect("present");
+        assert_eq!(stored.metadata.album.as_deref(), Some("Mezzanine"));
+        // Positional fields come from the *matching* release, not
+        // the first release.
+        assert_eq!(stored.metadata.track_number, Some(1));
+        assert_eq!(stored.metadata.track_total, Some(11));
+        assert_eq!(stored.metadata.disc_number, Some(1));
+
+        scheduler.shutdown();
+    }
+
+    #[test]
+    fn genre_prefers_a_candidate_already_present_in_the_library() {
+        // Library already has House. A match returns Electronica (top
+        // voted) and House (lower voted). Electronica must NOT win —
+        // we must converge on the library's existing genre.
+        use sustain_metadata_remote::{GenreCandidate, TrackMatchSource};
+
+        let temp = TempDir::new().expect("temp");
+        let store: Arc<dyn LibraryStore> = Arc::new(InMemoryLibraryStore::new());
+        // Seed an unrelated track carrying "House" so the library
+        // exposes it through distinct_genres().
+        let mut seed = track_with_metadata(temp.path(), "seed.flac");
+        seed.id = TrackId::new(99).expect("non-zero");
+        seed.metadata.genre = Some("House".to_owned());
+        store.save_track(seed).expect("save seed");
+
+        let mut track = track_with_metadata(temp.path(), "alpha.flac");
+        track.metadata.album = Some("Album".to_owned());
+        store.save_track(track.clone()).expect("save");
+
+        let track_match = TrackMatch {
+            recording_mbid: "rec-mbid".to_owned(),
+            title: None,
+            artist: None,
+            first_release_year: None,
+            genres: vec![
+                GenreCandidate {
+                    name: "electronica".to_owned(),
+                    vote_count: 9,
+                },
+                GenreCandidate {
+                    name: "house".to_owned(),
+                    vote_count: 3,
+                },
+            ],
+            releases: vec![],
+            source: TrackMatchSource::MusicBrainzTags,
+        };
+        let remote = Arc::new(StubRemote::default().with_identify(Ok(Some(track_match))));
+        let metadata = Arc::new(StubMetadata::default());
+        let (sink, rx) = capturing_sink();
+
+        let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
+            remote_service: remote.clone(),
+            metadata_service: metadata.clone(),
+            library_store: store.clone(),
+            progress: sink,
+            track_updated: None,
+            clock: fixed_clock(1),
+            initial_settings: OnlineSettings {
+                artwork: false,
+                tags: true,
+                lyrics: false,
+            },
+            library_path: Some(temp.path().to_path_buf()),
+            provider_version: 1,
+        });
+
+        // Two ticks may fire (one per track in pending). Wait for the
+        // alpha.flac track to settle.
+        let _tick = wait_for(&rx, Duration::from_secs(2), |progress| {
+            matches!(progress, SchedulerProgress::Tick { .. })
+        });
+
+        let stored = store.track(track.id).expect("load").expect("present");
+        // Library spelling preserved ("House"), not MB's lowercase.
+        assert_eq!(stored.metadata.genre.as_deref(), Some("House"));
 
         scheduler.shutdown();
     }

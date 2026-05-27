@@ -105,6 +105,18 @@ pub struct TrackMatch {
     pub recording_mbid: String,
     pub title: Option<String>,
     pub artist: Option<String>,
+    /// Year of the recording's first release per MusicBrainz. This
+    /// is the song's "year" in the iTunes-ish sense — not the year
+    /// of any one release, so compilations and reissues do not skew
+    /// it. `None` when MB has no first-release-date for the
+    /// recording.
+    pub first_release_year: Option<i32>,
+    /// Community-voted genre tags, sorted by vote count descending.
+    /// Empty when MB has no curated genres on the recording. The
+    /// caller picks which (if any) to surface — for example,
+    /// preferring genres already present in the user's library to
+    /// avoid genre sprawl.
+    pub genres: Vec<GenreCandidate>,
     /// Releases the recording appears on, ordered as MusicBrainz
     /// returned them. The first entry is the service's best guess
     /// for the "primary" release; artwork lookup walks the list in
@@ -113,6 +125,16 @@ pub struct TrackMatch {
     /// Identification provenance. Useful at the UI layer for
     /// explaining *how* a match was made.
     pub source: TrackMatchSource,
+}
+
+/// One curated genre tag offered as a candidate for the recording.
+/// `vote_count` is MusicBrainz's community tally; higher means more
+/// users agreed the tag applies. Callers may use the count to break
+/// ties or as a confidence signal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenreCandidate {
+    pub name: String,
+    pub vote_count: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -243,8 +265,24 @@ impl ComposedRemoteMetadataService {
         let results = self
             .musicbrainz
             .search_recordings(&query.to_search_terms())?;
-        Ok(pick_best_musicbrainz(results, MUSICBRAINZ_CONFIDENT_SCORE)
-            .map(|recording| recording_to_match(recording, TrackMatchSource::MusicBrainzTags)))
+        let Some(best) = pick_best_musicbrainz(results, MUSICBRAINZ_CONFIDENT_SCORE) else {
+            return Ok(None);
+        };
+        // Search hits ship a partial record: no genres, no
+        // first-release-date. Promote the winner to a full lookup so
+        // tag enrichment sees the same complete entity it would have
+        // gotten through the AcoustID path. If the lookup happens to
+        // 404 (race against an MB merge/delete) we fall back to the
+        // search hit; the caller still gets identification, just
+        // without the lookup-only fields.
+        let detailed = self
+            .musicbrainz
+            .lookup_recording(&best.recording_mbid)?
+            .unwrap_or(best);
+        Ok(Some(recording_to_match(
+            detailed,
+            TrackMatchSource::MusicBrainzTags,
+        )))
     }
 
     fn identify_via_acoustid(&self, query: &TrackQuery) -> RemoteResult<Option<TrackMatch>> {
@@ -357,10 +395,20 @@ fn recording_to_match(recording: RecordingMatch, source: TrackMatchSource) -> Tr
             disc_number: release.disc_number,
         })
         .collect();
+    let genres = recording
+        .genres
+        .into_iter()
+        .map(|vote| GenreCandidate {
+            name: vote.name,
+            vote_count: vote.vote_count,
+        })
+        .collect();
     TrackMatch {
         recording_mbid: recording.recording_mbid,
         title: recording.title,
         artist: recording.artist,
+        first_release_year: recording.first_release_year,
+        genres,
         releases,
         source,
     }
@@ -378,6 +426,8 @@ mod tests {
             artist: Some("Artist".to_owned()),
             duration_ms: Some(200_000),
             score,
+            first_release_year: None,
+            genres: Vec::new(),
             releases: vec![RecordingRelease {
                 release_mbid: release_mbid.to_owned(),
                 release_group_mbid: None,

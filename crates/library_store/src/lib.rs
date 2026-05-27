@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Mutex, MutexGuard},
 };
@@ -193,6 +193,27 @@ pub trait LibraryStore: Send + Sync {
         content_hash: &sustain_domain::TrackContentHash,
     ) -> StoreResult<Option<Track>>;
     fn tracks(&self) -> StoreResult<Vec<Track>>;
+
+    /// Return the set of distinct, non-empty genre values currently
+    /// stored on tracks in the library. Order is not specified; the
+    /// caller normalizes for whatever comparison it needs. Used by
+    /// the online tag-enrichment path to bias its genre choice
+    /// toward genres the user already curates, avoiding genre
+    /// sprawl (e.g. picking "House" over "Electronica" when the
+    /// library already has House tracks). Default implementation
+    /// scans `tracks()` for crates that don't have a cheaper
+    /// projection.
+    fn distinct_genres(&self) -> StoreResult<Vec<String>> {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for track in self.tracks()? {
+            if let Some(genre) = track.metadata.genre
+                && !genre.trim().is_empty()
+            {
+                seen.insert(genre);
+            }
+        }
+        Ok(seen.into_iter().collect())
+    }
     fn save_playlist(&self, playlist: Playlist) -> StoreResult<()>;
     fn playlist(&self, playlist_id: PlaylistId) -> StoreResult<Option<Playlist>>;
     fn playlists(&self) -> StoreResult<Vec<Playlist>>;
@@ -549,6 +570,26 @@ impl LibraryStore for SqliteLibraryStore {
         }
 
         Ok(tracks)
+    }
+
+    fn distinct_genres(&self) -> StoreResult<Vec<String>> {
+        let connection = self.connection_guard()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT DISTINCT genre FROM tracks \
+                 WHERE genre IS NOT NULL AND TRIM(genre) <> '' \
+                 ORDER BY genre",
+            )
+            .map_err(StoreError::from)?;
+        let mut rows = statement.query([]).map_err(StoreError::from)?;
+        let mut genres = Vec::new();
+        while let Some(row) = rows.next().map_err(StoreError::from)? {
+            let value: String = row.get(0).map_err(StoreError::from)?;
+            if !value.trim().is_empty() {
+                genres.push(value);
+            }
+        }
+        Ok(genres)
     }
 
     fn save_playlist(&self, playlist: Playlist) -> StoreResult<()> {

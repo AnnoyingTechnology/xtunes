@@ -53,10 +53,12 @@ pub use client::{HttpClient, HttpClientConfig};
 pub use cover_art_archive::CoverArtArchiveClient;
 pub use error::{RemoteError, RemoteResult};
 pub use lrclib::LrcLibClient;
-pub use musicbrainz::{MusicBrainzClient, RecordingMatch, RecordingRelease, RecordingSearchTerms};
+pub use musicbrainz::{
+    GenreVote, MusicBrainzClient, RecordingMatch, RecordingRelease, RecordingSearchTerms,
+};
 pub use service::{
-    ComposedRemoteMetadataService, FetchedArtwork, FetchedLyrics, RemoteMetadataService,
-    TrackMatch, TrackMatchRelease, TrackMatchSource, TrackQuery,
+    ComposedRemoteMetadataService, FetchedArtwork, FetchedLyrics, GenreCandidate,
+    RemoteMetadataService, TrackMatch, TrackMatchRelease, TrackMatchSource, TrackQuery,
 };
 
 /// Read the compile-time AcoustID API key from the build environment.

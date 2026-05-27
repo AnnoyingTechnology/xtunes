@@ -33,10 +33,14 @@ use crate::mbid::is_well_formed;
 
 const SEARCH_BASE: &str = "https://musicbrainz.org/ws/2/recording/";
 const LOOKUP_BASE: &str = "https://musicbrainz.org/ws/2/recording";
-/// Includes for the lookup-by-id endpoint. We need release-level
-/// details (and the release-group MBID) to drive Cover Art Archive
-/// fallbacks; artist credit comes along for the read-back display.
-const LOOKUP_INCLUDES: &str = "releases+release-groups+artist-credits+media";
+/// Includes for the lookup-by-id endpoint. Release-level details
+/// (and the release-group MBID) drive Cover Art Archive fallbacks;
+/// artist credit comes along for the read-back display; `genres`
+/// carries community-voted genre tags so tag enrichment can surface
+/// a primary genre. Search hits don't carry these extra fields, so
+/// the composed service is expected to promote any text-search winner
+/// to a follow-up lookup before handing the match to callers.
+const LOOKUP_INCLUDES: &str = "releases+release-groups+artist-credits+media+genres";
 
 /// Number of recordings the search asks MusicBrainz for. Five is
 /// enough to disambiguate noisy tags (a track with no album, several
@@ -74,11 +78,32 @@ pub struct RecordingMatch {
     /// Server-assigned score, 0..=100. Used to drop low-confidence
     /// matches before they reach the UI.
     pub score: u8,
+    /// Year extracted from the recording's `first-release-date`. This
+    /// is the song's year (when it was first recorded/released), not
+    /// any one release's year — compilations, reissues, and remasters
+    /// all share the same `first_release_year`. `None` when MB has
+    /// no first-release-date for the recording, or when only the
+    /// search endpoint was hit (search hits omit this field).
+    pub first_release_year: Option<i32>,
+    /// Community-voted genre tags, sorted by vote count descending.
+    /// Empty for recordings with no curated genre tags or when only
+    /// the search endpoint was hit (search hits don't include genres).
+    pub genres: Vec<GenreVote>,
     /// Releases the recording appears on, in MusicBrainz order. Empty
     /// for recordings that exist in the database but are not
     /// associated with any release — those are skipped by Cover Art
     /// Archive lookup.
     pub releases: Vec<RecordingRelease>,
+}
+
+/// One community-voted genre tag attached to a recording.
+/// `vote_count` is MusicBrainz's tally of users who agreed the tag
+/// applies; the same tag can appear with different counts on
+/// different recordings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenreVote {
+    pub name: String,
+    pub vote_count: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -237,6 +262,8 @@ fn into_recording_match(raw: RawRecording) -> Option<RecordingMatch> {
         .into_iter()
         .filter_map(into_recording_release)
         .collect();
+    let first_release_year = raw.first_release_date.as_deref().and_then(parse_year);
+    let genres = sort_genres(raw.genres.unwrap_or_default());
     Some(RecordingMatch {
         recording_mbid: raw.id,
         title: raw.title.filter(|value| is_non_blank(value)),
@@ -247,8 +274,39 @@ fn into_recording_match(raw: RawRecording) -> Option<RecordingMatch> {
             .filter(|value| is_non_blank(value)),
         duration_ms: raw.length,
         score: raw.score.unwrap_or(0).min(100),
+        first_release_year,
+        genres,
         releases,
     })
+}
+
+/// Convert MB's raw genre list into the public, sorted-by-vote
+/// representation. Drops entries with blank names and tags with zero
+/// votes (MB sometimes returns a tag with `count: 0` when the genre
+/// exists on the recording but no one has voted for it — these are
+/// indistinguishable from spurious additions and shouldn't drive
+/// automatic tag enrichment).
+fn sort_genres(raw: Vec<RawGenre>) -> Vec<GenreVote> {
+    let mut votes: Vec<GenreVote> = raw
+        .into_iter()
+        .filter_map(|entry| {
+            let name = entry.name.unwrap_or_default();
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let vote_count = entry.count.unwrap_or(0);
+            if vote_count == 0 {
+                return None;
+            }
+            Some(GenreVote {
+                name: trimmed.to_owned(),
+                vote_count,
+            })
+        })
+        .collect();
+    votes.sort_by_key(|vote| std::cmp::Reverse(vote.vote_count));
+    votes
 }
 
 fn into_recording_release(raw: RawRelease) -> Option<RecordingRelease> {
@@ -351,10 +409,22 @@ struct RawRecording {
     length: Option<u64>,
     #[serde(default)]
     score: Option<u8>,
+    #[serde(rename = "first-release-date", default)]
+    first_release_date: Option<String>,
     #[serde(rename = "artist-credit", default)]
     artist_credit: Option<Vec<RawArtistCredit>>,
     #[serde(default)]
     releases: Option<Vec<RawRelease>>,
+    #[serde(default)]
+    genres: Option<Vec<RawGenre>>,
+}
+
+#[derive(Deserialize)]
+struct RawGenre {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    count: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -488,6 +558,35 @@ mod tests {
             .search_recordings(&empty)
             .expect("blank terms must not error");
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn sort_genres_drops_zero_votes_and_orders_by_count_descending() {
+        let raw = vec![
+            RawGenre {
+                name: Some("house".to_owned()),
+                count: Some(3),
+            },
+            RawGenre {
+                name: Some("electronica".to_owned()),
+                count: Some(7),
+            },
+            RawGenre {
+                name: Some("noise".to_owned()),
+                count: Some(0),
+            },
+            RawGenre {
+                name: Some("  ".to_owned()),
+                count: Some(2),
+            },
+            RawGenre {
+                name: Some("ambient".to_owned()),
+                count: Some(3),
+            },
+        ];
+        let sorted = sort_genres(raw);
+        let names: Vec<&str> = sorted.iter().map(|vote| vote.name.as_str()).collect();
+        assert_eq!(names, vec!["electronica", "house", "ambient"]);
     }
 
     #[test]

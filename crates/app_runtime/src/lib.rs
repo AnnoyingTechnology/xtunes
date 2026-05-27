@@ -46,7 +46,16 @@ pub use analysis_scheduler::SchedulerProgress as AnalysisProgress;
 /// previously-attempted rows without a migration. Bumped centrally,
 /// not per-provider; the scheduler doesn't read it for anything other
 /// than the bookkeeping write.
-pub const ONLINE_PROVIDER_VERSION: u32 = 1;
+///
+/// Version 2: tag enrichment now fetches and writes the recording's
+/// primary genre and uses the recording's `first-release-date` for
+/// year (instead of an arbitrary release's date). Track/disc
+/// positional fields are now only filled when an existing album
+/// matches one of MusicBrainz's release titles. Version 1 attempts
+/// recorded "tags = attempted" against a pipeline that could not
+/// produce genres at all; the bump re-opens every previously-
+/// stamped track for the corrected pipeline.
+pub const ONLINE_PROVIDER_VERSION: u32 = 2;
 
 pub(crate) mod artwork_fetcher;
 mod commands;
