@@ -51,11 +51,36 @@ pub enum UiViewMode {
     Playlists,
 }
 
+/// Background-capability toggles for local audio analysis. Each flag enables
+/// a paced background worker that fills the matching value on tracks that
+/// are missing it. Flags never gate manual right-click runs — those are
+/// always available and intentionally overwrite existing values.
+///
+/// The `waveform` flag covers beatgrid plus the preview and detail
+/// waveforms with color — they share a single DSP pass.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AnalysisSettings {
+    pub bpm: bool,
+    pub key: bool,
+    pub waveform: bool,
+}
+
+/// Background-capability toggles for network-bound retrieval. Same
+/// missing-only, paced-background semantics as [`AnalysisSettings`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OnlineSettings {
+    pub artwork: bool,
+    pub tags: bool,
+    pub lyrics: bool,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UserSettings {
     pub library: LibrarySettings,
     pub playback: PlaybackSettings,
     pub ui: UiSettings,
+    pub analysis: AnalysisSettings,
+    pub online: OnlineSettings,
 }
 
 impl UserSettings {
@@ -67,6 +92,8 @@ impl UserSettings {
             },
             playback: PlaybackSettings::default(),
             ui: UiSettings::default(),
+            analysis: AnalysisSettings::default(),
+            online: OnlineSettings::default(),
         }
     }
 
@@ -79,7 +106,7 @@ impl UserSettings {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{LibraryManagementMode, UserSettings};
+    use super::{AnalysisSettings, LibraryManagementMode, OnlineSettings, UserSettings};
 
     #[test]
     fn library_path_is_unset_by_default() {
@@ -99,5 +126,19 @@ mod tests {
             settings.library.management_mode,
             LibraryManagementMode::ReferenceFilesInPlace
         );
+    }
+
+    #[test]
+    fn background_capability_toggles_are_off_by_default() {
+        let settings = UserSettings::default();
+
+        assert_eq!(settings.analysis, AnalysisSettings::default());
+        assert_eq!(settings.online, OnlineSettings::default());
+        assert!(!settings.analysis.bpm);
+        assert!(!settings.analysis.key);
+        assert!(!settings.analysis.waveform);
+        assert!(!settings.online.artwork);
+        assert!(!settings.online.tags);
+        assert!(!settings.online.lyrics);
     }
 }

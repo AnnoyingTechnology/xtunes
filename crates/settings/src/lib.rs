@@ -13,9 +13,9 @@ use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
 pub use sustain_domain::{
-    DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings, PlaybackSettings,
-    PlaylistFolderId, PlaylistId, PlaylistItem, SmartPlaylistId, UiSettings, UiViewMode,
-    UserSettings, VolumePercent,
+    AnalysisSettings, DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings,
+    OnlineSettings, PlaybackSettings, PlaylistFolderId, PlaylistId, PlaylistItem, SmartPlaylistId,
+    UiSettings, UiViewMode, UserSettings, VolumePercent,
 };
 
 pub type SettingsResult<T> = Result<T, SettingsError>;
@@ -123,6 +123,10 @@ struct SettingsDocument {
     playback: PlaybackSettingsDocument,
     #[serde(default)]
     ui: UiSettingsDocument,
+    #[serde(default)]
+    analysis: AnalysisSettingsDocument,
+    #[serde(default)]
+    online: OnlineSettingsDocument,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -149,6 +153,26 @@ struct UiSettingsDocument {
     view_mode: UiViewModeDocument,
     #[serde(default)]
     playlist_selection: Option<PlaylistSelectionDocument>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct AnalysisSettingsDocument {
+    #[serde(default)]
+    bpm: bool,
+    #[serde(default)]
+    key: bool,
+    #[serde(default)]
+    waveform: bool,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct OnlineSettingsDocument {
+    #[serde(default)]
+    artwork: bool,
+    #[serde(default)]
+    tags: bool,
+    #[serde(default)]
+    lyrics: bool,
 }
 
 impl Default for PlaybackSettingsDocument {
@@ -208,6 +232,16 @@ impl SettingsDocument {
                     .playlist_selection
                     .map(PlaylistSelectionDocument::from_domain),
             },
+            analysis: AnalysisSettingsDocument {
+                bpm: settings.analysis.bpm,
+                key: settings.analysis.key,
+                waveform: settings.analysis.waveform,
+            },
+            online: OnlineSettingsDocument {
+                artwork: settings.online.artwork,
+                tags: settings.online.tags,
+                lyrics: settings.online.lyrics,
+            },
         }
     }
 
@@ -227,6 +261,16 @@ impl SettingsDocument {
                     .ui
                     .playlist_selection
                     .and_then(PlaylistSelectionDocument::into_domain),
+            },
+            analysis: AnalysisSettings {
+                bpm: self.analysis.bpm,
+                key: self.analysis.key,
+                waveform: self.analysis.waveform,
+            },
+            online: OnlineSettings {
+                artwork: self.online.artwork,
+                tags: self.online.tags,
+                lyrics: self.online.lyrics,
             },
         }
     }
@@ -289,9 +333,9 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     use super::{
-        DEFAULT_PLAYBACK_VOLUME_PERCENT, InMemorySettingsStore, LibraryManagementMode, PlaylistId,
-        PlaylistItem, SettingsStore, TomlSettingsStore, UiSettings, UiViewMode, UserSettings,
-        VolumePercent,
+        AnalysisSettings, DEFAULT_PLAYBACK_VOLUME_PERCENT, InMemorySettingsStore,
+        LibraryManagementMode, OnlineSettings, PlaylistId, PlaylistItem, SettingsStore,
+        TomlSettingsStore, UiSettings, UiViewMode, UserSettings, VolumePercent,
     };
 
     #[test]
@@ -433,6 +477,54 @@ mod tests {
             settings.library.management_mode,
             LibraryManagementMode::ReferenceFilesInPlace
         );
+
+        let root = path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .expect("test path has two parents");
+        fs::remove_dir_all(root).expect("remove test settings directory");
+    }
+
+    #[test]
+    fn toml_settings_store_round_trips_analysis_and_online_toggles() {
+        let path = unique_settings_path();
+        let store = TomlSettingsStore::new(&path);
+        let settings = UserSettings {
+            analysis: AnalysisSettings {
+                bpm: true,
+                key: false,
+                waveform: true,
+            },
+            online: OnlineSettings {
+                artwork: true,
+                tags: true,
+                lyrics: false,
+            },
+            ..UserSettings::default()
+        };
+
+        assert_eq!(store.save_settings(settings.clone()), Ok(()));
+        assert_eq!(store.load_settings(), Ok(settings));
+
+        let root = path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .expect("test path has two parents");
+        fs::remove_dir_all(root).expect("remove test settings directory");
+    }
+
+    #[test]
+    fn toml_settings_store_defaults_analysis_and_online_when_sections_missing() {
+        let path = unique_settings_path();
+        let store = TomlSettingsStore::new(&path);
+        fs::create_dir_all(path.parent().expect("settings path has parent"))
+            .expect("create settings dir");
+        fs::write(&path, "[library]\npath = \"/music\"\n").expect("write settings");
+
+        let settings = store.load_settings().expect("settings load");
+
+        assert_eq!(settings.analysis, AnalysisSettings::default());
+        assert_eq!(settings.online, OnlineSettings::default());
 
         let root = path
             .parent()

@@ -39,8 +39,8 @@ pub use playlist_folder::{PlaylistFolder, PlaylistItem};
 pub use query::{LibraryQuery, SortDirection, TrackSort, TrackSortColumn};
 pub use rating::Rating;
 pub use settings::{
-    DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings, PlaybackSettings,
-    UiSettings, UiViewMode, UserSettings,
+    AnalysisSettings, DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings,
+    OnlineSettings, PlaybackSettings, UiSettings, UiViewMode, UserSettings,
 };
 pub use smart_playlist::{
     SmartPlaylist, SmartPlaylistDateField, SmartPlaylistLimit, SmartPlaylistLimitSelection,
