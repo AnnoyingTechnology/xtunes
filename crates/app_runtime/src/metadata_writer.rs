@@ -179,11 +179,6 @@ impl MetadataWriteHandle {
         self.submit_blocking(MetadataWriteJob::Artwork { path, artwork })
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn write_rating(&self, path: PathBuf, rating: Rating) -> bool {
-        self.submit_blocking(MetadataWriteJob::Rating { path, rating })
-    }
-
     fn submit_blocking(&self, job: MetadataWriteJob) -> bool {
         // sync_channel(1) gives the worker a slot to drop the outcome
         // into without blocking, even though we are guaranteed to be
