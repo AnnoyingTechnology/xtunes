@@ -147,9 +147,11 @@ moves entries between folders.
 ### Smart playlists — *iso-iTunes*
 Rule-based saved queries with iTunes-style operators: `is`,
 `contains`, `starts with`, `is in the last N days`, numeric comparisons,
-rating comparisons. Match mode is `Match all` / `Match any`. An
-optional limit picks the top N by `Most Often Played`, `Random`, etc.
-Smart playlists are re-evaluated live on every query.
+rating comparisons. Fields cover the usual tag/metadata set plus BPM
+and Music Key for tempo- and harmony-aware rules. Match mode is
+`Match all` / `Match any`. An optional limit picks the top N by
+`Most Often Played`, `Random`, etc. Smart playlists are re-evaluated
+live on every query.
 
 ### Default smart playlists — *iso-iTunes*
 A freshly created library is seeded with five iTunes-style starter
@@ -310,7 +312,7 @@ not sort by columns.
 ### Column customization — *iso-iTunes*
 Column visibility, order, and width are user-customizable via the
 column header menu and the resize handles. Layout is persisted in
-SQLite. Skips and Last Skipped ship hidden by default.
+SQLite. Skips, Last Skipped, and Music Key ship hidden by default.
 
 ### Context-sensitive search scope — *iso-iTunes*
 The search bar filters whatever is currently visible: full library in

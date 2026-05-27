@@ -116,6 +116,7 @@ fn text_field_value(track: &Track, field: SmartPlaylistTextField) -> Option<Stri
             .file_name()
             .and_then(|os_str| os_str.to_str())
             .map(str::to_owned),
+        SmartPlaylistTextField::MusicalKey => track.metadata.key.clone(),
     }
 }
 
@@ -131,6 +132,7 @@ fn number_field_value(track: &Track, field: SmartPlaylistNumberField) -> Option<
             .duration
             .map(|duration| duration.as_secs() as i64),
         SmartPlaylistNumberField::BitrateKbps => track.metadata.bitrate_kbps.map(i64::from),
+        SmartPlaylistNumberField::Bpm => track.metadata.bpm.map(i64::from),
     }
 }
 

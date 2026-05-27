@@ -37,6 +37,10 @@ pub(super) const EDITOR_FIELDS: &[(EditorField, &str)] = &[
         EditorField::Text(SmartPlaylistTextField::FileName),
         "File Name",
     ),
+    (
+        EditorField::Text(SmartPlaylistTextField::MusicalKey),
+        "Music Key",
+    ),
     (EditorField::Rating, "Rating"),
     (EditorField::Number(SmartPlaylistNumberField::Year), "Year"),
     (
@@ -63,6 +67,7 @@ pub(super) const EDITOR_FIELDS: &[(EditorField, &str)] = &[
         EditorField::Number(SmartPlaylistNumberField::BitrateKbps),
         "Bitrate (kbps)",
     ),
+    (EditorField::Number(SmartPlaylistNumberField::Bpm), "BPM"),
     (
         EditorField::Date(SmartPlaylistDateField::DateAdded),
         "Date Added",

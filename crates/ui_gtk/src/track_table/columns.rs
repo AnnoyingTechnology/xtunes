@@ -15,6 +15,7 @@ pub(super) enum TrackTableColumn {
     Genre,
     Year,
     Bpm,
+    MusicKey,
     Bitrate,
     FileType,
     Duration,
@@ -34,6 +35,7 @@ pub(super) const TRACK_TABLE_COLUMNS: &[TrackTableColumn] = &[
     TrackTableColumn::Genre,
     TrackTableColumn::Year,
     TrackTableColumn::Bpm,
+    TrackTableColumn::MusicKey,
     TrackTableColumn::Bitrate,
     TrackTableColumn::FileType,
     TrackTableColumn::Duration,
@@ -55,6 +57,7 @@ impl TrackTableColumn {
             Self::Genre => "Genre",
             Self::Year => "Year",
             Self::Bpm => "BPM",
+            Self::MusicKey => "Key",
             Self::Bitrate => "Bitrate",
             Self::FileType => "Type",
             Self::Duration => "Duration",
@@ -76,6 +79,7 @@ impl TrackTableColumn {
             Self::Genre => "genre",
             Self::Year => "year",
             Self::Bpm => "bpm",
+            Self::MusicKey => "music_key",
             Self::Bitrate => "bitrate",
             Self::FileType => "file_type",
             Self::Duration => "duration",
@@ -97,6 +101,7 @@ impl TrackTableColumn {
             Self::Genre => 120,
             Self::Year => 72,
             Self::Bpm => 72,
+            Self::MusicKey => 64,
             Self::Bitrate => 90,
             Self::FileType => 72,
             Self::Duration => 86,
@@ -118,8 +123,10 @@ impl TrackTableColumn {
         // Skips and Last Skipped exist for users who care about the
         // signal but are noisier than most tracks need, so they ship
         // off by default. The user surfaces them through the column
-        // selector menu like any other optional column.
-        !matches!(self, Self::Skips | Self::LastSkipped)
+        // selector menu like any other optional column. Music Key is
+        // a niche analysis output most listeners don't think in terms
+        // of, so it ships off by default too.
+        !matches!(self, Self::Skips | Self::LastSkipped | Self::MusicKey)
     }
 
     pub(super) fn xalign(self) -> f32 {
@@ -132,6 +139,7 @@ impl TrackTableColumn {
             | Self::LastPlayed
             | Self::LastSkipped
             | Self::DateAdded => 0.0,
+            Self::MusicKey => 0.5,
             Self::Year
             | Self::Bpm
             | Self::Bitrate
@@ -151,6 +159,7 @@ impl TrackTableColumn {
             Self::Genre => row.genre.clone(),
             Self::Year => optional_number_text(row.year),
             Self::Bpm => optional_number_text(row.bpm),
+            Self::MusicKey => row.music_key.clone().unwrap_or_default(),
             Self::Bitrate => row
                 .bitrate_kbps
                 .map(|bitrate| format!("{bitrate} kbps"))
@@ -175,6 +184,9 @@ impl TrackTableColumn {
             Self::Genre => compare_text(&left.genre, &right.genre),
             Self::Year => left.year.cmp(&right.year),
             Self::Bpm => left.bpm.cmp(&right.bpm),
+            Self::MusicKey => {
+                compare_optional_text(left.music_key.as_deref(), right.music_key.as_deref())
+            }
             Self::Bitrate => left.bitrate_kbps.cmp(&right.bitrate_kbps),
             Self::FileType => left.file_type.label().cmp(right.file_type.label()),
             Self::Duration => left.duration_seconds.cmp(&right.duration_seconds),
@@ -191,6 +203,15 @@ impl TrackTableColumn {
 
 fn compare_text(left: &str, right: &str) -> CmpOrdering {
     left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase())
+}
+
+fn compare_optional_text(left: Option<&str>, right: Option<&str>) -> CmpOrdering {
+    match (left, right) {
+        (Some(left), Some(right)) => compare_text(left, right),
+        (Some(_), None) => CmpOrdering::Greater,
+        (None, Some(_)) => CmpOrdering::Less,
+        (None, None) => CmpOrdering::Equal,
+    }
 }
 
 fn optional_number_text<T: std::fmt::Display>(value: Option<T>) -> String {
@@ -233,6 +254,7 @@ mod tests {
                 "Genre",
                 "Year",
                 "BPM",
+                "Key",
                 "Bitrate",
                 "Type",
                 "Duration",
@@ -263,6 +285,7 @@ mod tests {
                 "genre",
                 "year",
                 "bpm",
+                "music_key",
                 "bitrate",
                 "file_type",
                 "duration",

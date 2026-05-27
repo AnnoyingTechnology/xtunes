@@ -121,6 +121,7 @@ pub enum SmartPlaylistTextField {
     Composer,
     Genre,
     FileName,
+    MusicalKey,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -142,6 +143,7 @@ pub enum SmartPlaylistNumberField {
     Year,
     DurationSeconds,
     BitrateKbps,
+    Bpm,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

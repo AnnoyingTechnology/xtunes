@@ -295,6 +295,7 @@ fn text_field_name(field: SmartPlaylistTextField) -> &'static str {
         SmartPlaylistTextField::Composer => "Composer",
         SmartPlaylistTextField::Genre => "Genre",
         SmartPlaylistTextField::FileName => "FileName",
+        SmartPlaylistTextField::MusicalKey => "MusicalKey",
     }
 }
 
@@ -307,6 +308,7 @@ fn text_field_from_name(name: &str) -> StoreResult<SmartPlaylistTextField> {
         "Composer" => Ok(SmartPlaylistTextField::Composer),
         "Genre" => Ok(SmartPlaylistTextField::Genre),
         "FileName" => Ok(SmartPlaylistTextField::FileName),
+        "MusicalKey" => Ok(SmartPlaylistTextField::MusicalKey),
         other => Err(StoreError::InvalidStoredEnum(other.to_owned())),
     }
 }
@@ -343,6 +345,7 @@ fn number_field_name(field: SmartPlaylistNumberField) -> &'static str {
         SmartPlaylistNumberField::Year => "Year",
         SmartPlaylistNumberField::DurationSeconds => "DurationSeconds",
         SmartPlaylistNumberField::BitrateKbps => "BitrateKbps",
+        SmartPlaylistNumberField::Bpm => "Bpm",
     }
 }
 
@@ -355,6 +358,7 @@ fn number_field_from_name(name: &str) -> StoreResult<SmartPlaylistNumberField> {
         "Year" => Ok(SmartPlaylistNumberField::Year),
         "DurationSeconds" => Ok(SmartPlaylistNumberField::DurationSeconds),
         "BitrateKbps" => Ok(SmartPlaylistNumberField::BitrateKbps),
+        "Bpm" => Ok(SmartPlaylistNumberField::Bpm),
         other => Err(StoreError::InvalidStoredEnum(other.to_owned())),
     }
 }

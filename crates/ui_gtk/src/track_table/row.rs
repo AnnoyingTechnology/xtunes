@@ -53,6 +53,7 @@ pub(crate) struct TrackTableRow {
     pub(crate) genre: String,
     pub(crate) year: Option<i32>,
     pub(crate) bpm: Option<u32>,
+    pub(crate) music_key: Option<String>,
     pub(crate) bitrate_kbps: Option<u32>,
     pub(super) file_type: AudioFileType,
     pub(crate) duration_seconds: u64,
@@ -87,6 +88,7 @@ impl TrackTableRow {
             genre: non_empty_text(&track.metadata.genre).unwrap_or_default(),
             year: track.metadata.year,
             bpm: track.metadata.bpm,
+            music_key: non_empty_text(&track.metadata.key),
             bitrate_kbps: track.metadata.bitrate_kbps,
             file_type: AudioFileType::from_path(track.location.path()),
             duration_seconds: track
