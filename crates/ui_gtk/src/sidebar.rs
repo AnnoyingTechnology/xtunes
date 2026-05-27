@@ -10,7 +10,8 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 
 use sustain_app_runtime::{
-    AnalysisCapability, OnlineCapability, PlaylistItem, SmartPlaylistId, TrackId,
+    AnalysisCapability, AnalysisRunRequest, OnlineCapability, OnlineRunRequest, PlaylistItem,
+    SmartPlaylistId, TrackId,
 };
 
 use super::{
@@ -35,12 +36,20 @@ pub(crate) type SidebarRenameCallback = Rc<dyn Fn(PlaylistItem, String)>;
 pub(crate) type SidebarDeleteCallback = Rc<dyn Fn(PlaylistItem)>;
 pub(crate) type SidebarTracksDropCallback = Rc<dyn Fn(PlaylistItem, Vec<TrackId>)>;
 pub(crate) type SidebarEditSmartPlaylistCallback = Rc<dyn Fn(SmartPlaylistId)>;
-/// Invoked when the user picks an "Analyze BPM/Key/Waveform" menu
-/// item on a playlist or smart playlist sidebar row.
-pub(crate) type SidebarAnalysisRunCallback = Rc<dyn Fn(PlaylistItem, AnalysisCapability)>;
-/// Invoked when the user picks a "Fetch Lyrics/Artwork/Tags" menu
-/// item on a playlist or smart playlist sidebar row.
-pub(crate) type SidebarOnlineRunCallback = Rc<dyn Fn(PlaylistItem, OnlineCapability)>;
+/// Invoked when the user picks any item inside the "Analyze"
+/// submenu on a playlist or smart playlist sidebar row. The
+/// `AnalysisRunRequest` carries either a single capability or the
+/// `All` bundle, matching exactly which menu entry was clicked.
+pub(crate) type SidebarAnalysisRunCallback = Rc<dyn Fn(PlaylistItem, AnalysisRunRequest)>;
+/// Invoked when the user picks any item inside the "Retrieve"
+/// submenu on a playlist or smart playlist sidebar row.
+pub(crate) type SidebarOnlineRunCallback = Rc<dyn Fn(PlaylistItem, OnlineRunRequest)>;
+/// Queries whether a given analysis capability is enabled globally
+/// (i.e. covered by the background sweep). The sidebar renders the
+/// matching submenu item insensitive whenever this returns `true`.
+pub(crate) type SidebarAnalysisEnabledQuery = Rc<dyn Fn(AnalysisCapability) -> bool>;
+/// Queries whether a given online capability is enabled globally.
+pub(crate) type SidebarOnlineEnabledQuery = Rc<dyn Fn(OnlineCapability) -> bool>;
 
 /// One of the sidebar's two selection targets.
 ///
@@ -62,6 +71,8 @@ type TracksDropCallbackHolder = Rc<RefCell<Option<SidebarTracksDropCallback>>>;
 type EditSmartPlaylistCallbackHolder = Rc<RefCell<Option<SidebarEditSmartPlaylistCallback>>>;
 type AnalysisRunCallbackHolder = Rc<RefCell<Option<SidebarAnalysisRunCallback>>>;
 type OnlineRunCallbackHolder = Rc<RefCell<Option<SidebarOnlineRunCallback>>>;
+type AnalysisEnabledQueryHolder = Rc<RefCell<Option<SidebarAnalysisEnabledQuery>>>;
+type OnlineEnabledQueryHolder = Rc<RefCell<Option<SidebarOnlineEnabledQuery>>>;
 
 #[derive(Clone)]
 pub(crate) struct PlaylistSidebar {
@@ -78,6 +89,8 @@ pub(crate) struct PlaylistSidebar {
     on_edit_smart_playlist: EditSmartPlaylistCallbackHolder,
     on_analysis_run: AnalysisRunCallbackHolder,
     on_online_run: OnlineRunCallbackHolder,
+    analysis_enabled_query: AnalysisEnabledQueryHolder,
+    online_enabled_query: OnlineEnabledQueryHolder,
     pending_rename: Rc<RefCell<Option<PlaylistItem>>>,
 }
 
@@ -107,6 +120,8 @@ impl PlaylistSidebar {
         let on_edit_smart_playlist: EditSmartPlaylistCallbackHolder = Rc::new(RefCell::new(None));
         let on_analysis_run: AnalysisRunCallbackHolder = Rc::new(RefCell::new(None));
         let on_online_run: OnlineRunCallbackHolder = Rc::new(RefCell::new(None));
+        let analysis_enabled_query: AnalysisEnabledQueryHolder = Rc::new(RefCell::new(None));
+        let online_enabled_query: OnlineEnabledQueryHolder = Rc::new(RefCell::new(None));
         let pending_rename: Rc<RefCell<Option<PlaylistItem>>> = Rc::new(RefCell::new(None));
         let list_view = gtk::ListView::new(
             Some(selection.clone()),
@@ -118,6 +133,8 @@ impl PlaylistSidebar {
                 on_edit_smart_playlist.clone(),
                 on_analysis_run.clone(),
                 on_online_run.clone(),
+                analysis_enabled_query.clone(),
+                online_enabled_query.clone(),
                 pending_rename.clone(),
             )),
         );
@@ -169,6 +186,8 @@ impl PlaylistSidebar {
             on_edit_smart_playlist,
             on_analysis_run,
             on_online_run,
+            analysis_enabled_query,
+            online_enabled_query,
             pending_rename,
         }
     }
@@ -212,6 +231,14 @@ impl PlaylistSidebar {
 
     pub(crate) fn set_online_run_callback(&self, callback: SidebarOnlineRunCallback) {
         self.on_online_run.replace(Some(callback));
+    }
+
+    pub(crate) fn set_analysis_enabled_query(&self, query: SidebarAnalysisEnabledQuery) {
+        self.analysis_enabled_query.replace(Some(query));
+    }
+
+    pub(crate) fn set_online_enabled_query(&self, query: SidebarOnlineEnabledQuery) {
+        self.online_enabled_query.replace(Some(query));
     }
 
     /// Arm an inline rename for `item` on the next bind that matches it.
@@ -411,6 +438,8 @@ fn build_row_factory(
     on_edit_smart_playlist: EditSmartPlaylistCallbackHolder,
     on_analysis_run: AnalysisRunCallbackHolder,
     on_online_run: OnlineRunCallbackHolder,
+    analysis_enabled_query: AnalysisEnabledQueryHolder,
+    online_enabled_query: OnlineEnabledQueryHolder,
     pending_rename: Rc<RefCell<Option<PlaylistItem>>>,
 ) -> gtk::SignalListItemFactory {
     let current_indicator: SharedDropIndicator = Rc::new(RefCell::new(None));
@@ -546,6 +575,8 @@ fn build_row_factory(
                 on_edit_smart_playlist: on_edit_smart_playlist.clone(),
                 on_analysis_run: on_analysis_run.clone(),
                 on_online_run: on_online_run.clone(),
+                analysis_enabled_query: analysis_enabled_query.clone(),
+                online_enabled_query: online_enabled_query.clone(),
             },
         );
         attach_rename_entry_signals(

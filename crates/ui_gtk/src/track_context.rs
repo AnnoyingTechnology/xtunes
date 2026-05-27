@@ -6,12 +6,27 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
-use sustain_app_runtime::{PlaylistId, TrackId};
+use sustain_app_runtime::{
+    AnalysisCapability, AnalysisRunRequest, OnlineCapability, OnlineRunRequest, PlaylistId, TrackId,
+};
 
 pub(crate) type TrackActionCallback = Rc<dyn Fn(Vec<TrackId>)>;
 pub(crate) type TrackActionVisibility = Rc<dyn Fn(&[TrackId]) -> bool>;
 pub(crate) type AddToPlaylistProvider = Rc<dyn Fn() -> Vec<AddToPlaylistEntry>>;
 pub(crate) type AddToPlaylistCallback = Rc<dyn Fn(PlaylistId, Vec<TrackId>)>;
+/// Invoked when the user picks any entry inside the "Analyze"
+/// submenu of the track context menu. The request carries either
+/// a single capability or the `All` bundle.
+pub(crate) type TrackAnalyzeRunCallback = Rc<dyn Fn(Vec<TrackId>, AnalysisRunRequest)>;
+/// Invoked when the user picks any entry inside the "Retrieve"
+/// submenu of the track context menu.
+pub(crate) type TrackRetrieveRunCallback = Rc<dyn Fn(Vec<TrackId>, OnlineRunRequest)>;
+/// Queries whether an analysis capability is globally enabled (i.e.
+/// covered by the background sweep). Submenu entries whose
+/// capability returns `true` here are rendered insensitive.
+pub(crate) type TrackAnalyzeEnabledQuery = Rc<dyn Fn(AnalysisCapability) -> bool>;
+/// Queries whether an online capability is globally enabled.
+pub(crate) type TrackRetrieveEnabledQuery = Rc<dyn Fn(OnlineCapability) -> bool>;
 type PendingConfirmCallback = Rc<RefCell<Option<Box<dyn FnOnce(Vec<TrackId>)>>>>;
 const ADD_TO_PLAYLIST_MAX_VISIBLE_HEIGHT: i32 = 360;
 const ADD_TO_PLAYLIST_MAX_LABEL_CHARS: i32 = 48;
@@ -26,6 +41,18 @@ pub(crate) struct AddToPlaylistEntry {
 struct AddToPlaylistAction {
     provider: AddToPlaylistProvider,
     callback: AddToPlaylistCallback,
+}
+
+#[derive(Clone)]
+struct AnalyzeMenu {
+    run: TrackAnalyzeRunCallback,
+    enabled: TrackAnalyzeEnabledQuery,
+}
+
+#[derive(Clone)]
+struct RetrieveMenu {
+    run: TrackRetrieveRunCallback,
+    enabled: TrackRetrieveEnabledQuery,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -290,6 +317,8 @@ pub(crate) struct TrackRowContextMenu {
     actions: TrackContextActionSet,
     parent_window: gtk::Window,
     add_to_playlist: Option<AddToPlaylistAction>,
+    analyze: Option<AnalyzeMenu>,
+    retrieve: Option<RetrieveMenu>,
 }
 
 impl TrackRowContextMenu {
@@ -298,6 +327,8 @@ impl TrackRowContextMenu {
             actions,
             parent_window,
             add_to_playlist: None,
+            analyze: None,
+            retrieve: None,
         }
     }
 
@@ -307,6 +338,31 @@ impl TrackRowContextMenu {
         callback: AddToPlaylistCallback,
     ) -> Self {
         self.add_to_playlist = Some(AddToPlaylistAction { provider, callback });
+        self
+    }
+
+    /// Install the "Analyze\u{2026}" submenu. The submenu exposes
+    /// BPM / Key / Waveform / All; each per-capability entry is
+    /// rendered insensitive whenever the `enabled` query returns
+    /// `true` for it (i.e. the background sweep is already covering
+    /// that capability). `All` is always sensitive.
+    pub(crate) fn with_analyze_menu(
+        mut self,
+        run: TrackAnalyzeRunCallback,
+        enabled: TrackAnalyzeEnabledQuery,
+    ) -> Self {
+        self.analyze = Some(AnalyzeMenu { run, enabled });
+        self
+    }
+
+    /// Install the "Retrieve\u{2026}" submenu. Counterpart of
+    /// [`Self::with_analyze_menu`] for the online scheduler.
+    pub(crate) fn with_retrieve_menu(
+        mut self,
+        run: TrackRetrieveRunCallback,
+        enabled: TrackRetrieveEnabledQuery,
+    ) -> Self {
+        self.retrieve = Some(RetrieveMenu { run, enabled });
         self
     }
 
@@ -366,7 +422,7 @@ impl TrackRowContextMenu {
 
     fn menu_content(&self, popover: &gtk::Popover, track_ids: Vec<TrackId>) -> gtk::Box {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let (main_page, add_button) = self.build_main_page(popover, &track_ids);
+        let (main_page, triggers) = self.build_main_page(popover, &track_ids);
         root.append(&main_page);
 
         if let Some(add) = &self.add_to_playlist {
@@ -374,30 +430,27 @@ impl TrackRowContextMenu {
                 build_add_to_playlist_page(add, popover, track_ids.clone());
             playlist_page.set_visible(false);
             root.append(&playlist_page);
+            wire_submenu(
+                &main_page,
+                triggers.add_to_playlist,
+                &playlist_page,
+                back_button,
+            );
+        }
 
-            if let Some(add_button) = add_button {
-                let main_page = main_page.downgrade();
-                let playlist_page = playlist_page.downgrade();
-                add_button.connect_clicked(move |_| {
-                    if let Some(main_page) = main_page.upgrade() {
-                        main_page.set_visible(false);
-                    }
-                    if let Some(playlist_page) = playlist_page.upgrade() {
-                        playlist_page.set_visible(true);
-                    }
-                });
-            }
+        if let Some(analyze) = &self.analyze {
+            let (page, back_button) =
+                build_analyze_submenu_page(analyze, popover, track_ids.clone());
+            page.set_visible(false);
+            root.append(&page);
+            wire_submenu(&main_page, triggers.analyze, &page, back_button);
+        }
 
-            let main_page = main_page.downgrade();
-            let playlist_page = playlist_page.downgrade();
-            back_button.connect_clicked(move |_| {
-                if let Some(playlist_page) = playlist_page.upgrade() {
-                    playlist_page.set_visible(false);
-                }
-                if let Some(main_page) = main_page.upgrade() {
-                    main_page.set_visible(true);
-                }
-            });
+        if let Some(retrieve) = &self.retrieve {
+            let (page, back_button) = build_retrieve_submenu_page(retrieve, popover, track_ids);
+            page.set_visible(false);
+            root.append(&page);
+            wire_submenu(&main_page, triggers.retrieve, &page, back_button);
         }
 
         root
@@ -407,16 +460,16 @@ impl TrackRowContextMenu {
         &self,
         popover: &gtk::Popover,
         track_ids: &[TrackId],
-    ) -> (gtk::Box, Option<gtk::Button>) {
+    ) -> (gtk::Box, MainPageTriggers) {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.add_css_class("track-context-menu");
 
-        let mut add_button = None;
+        let mut triggers = MainPageTriggers::default();
         let mut prior_group_rendered = false;
         if self.add_to_playlist.is_some() {
             let button = submenu_button("Add to Playlist\u{2026}");
             content.append(&button);
-            add_button = Some(button);
+            triggers.add_to_playlist = Some(button);
             prior_group_rendered = true;
         }
 
@@ -424,6 +477,33 @@ impl TrackRowContextMenu {
             self.actions.available_actions(track_ids).collect();
 
         for &section in TRACK_CONTEXT_SECTION_ORDER {
+            // The Analyze / Retrieve submenu triggers sit between the
+            // last non-destructive section and the destructive one.
+            // Injecting them here keeps the visual order
+            // (queue → info → navigate → files → background ops →
+            // destructive) and respects the existing inter-group
+            // separator rule.
+            if section == TrackContextActionSection::Destructive
+                && (self.analyze.is_some() || self.retrieve.is_some())
+            {
+                if prior_group_rendered {
+                    let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+                    separator.add_css_class("track-context-menu-separator");
+                    content.append(&separator);
+                }
+                if self.analyze.is_some() {
+                    let button = submenu_button("Analyze\u{2026}");
+                    content.append(&button);
+                    triggers.analyze = Some(button);
+                }
+                if self.retrieve.is_some() {
+                    let button = submenu_button("Retrieve\u{2026}");
+                    content.append(&button);
+                    triggers.retrieve = Some(button);
+                }
+                prior_group_rendered = true;
+            }
+
             let mut group_iter = available
                 .iter()
                 .copied()
@@ -445,7 +525,7 @@ impl TrackRowContextMenu {
             prior_group_rendered = true;
         }
 
-        (content, add_button)
+        (content, triggers)
     }
 
     fn append_action_button(
@@ -466,6 +546,142 @@ impl TrackRowContextMenu {
         });
         content.append(&button);
     }
+}
+
+/// Buttons on the main page that, when clicked, switch the popover
+/// to a submenu page. `None` means the matching submenu was never
+/// installed.
+#[derive(Default)]
+struct MainPageTriggers {
+    add_to_playlist: Option<gtk::Button>,
+    analyze: Option<gtk::Button>,
+    retrieve: Option<gtk::Button>,
+}
+
+/// Connect a submenu trigger to its page: clicking the trigger hides
+/// the main page and shows the submenu; clicking the submenu's back
+/// button reverses the swap. No-op if `trigger` is `None` (the
+/// submenu was not installed).
+fn wire_submenu(
+    main_page: &gtk::Box,
+    trigger: Option<gtk::Button>,
+    submenu: &gtk::Box,
+    back: gtk::Button,
+) {
+    if let Some(trigger) = trigger {
+        let main_weak = main_page.downgrade();
+        let submenu_weak = submenu.downgrade();
+        trigger.connect_clicked(move |_| {
+            if let Some(main) = main_weak.upgrade() {
+                main.set_visible(false);
+            }
+            if let Some(submenu) = submenu_weak.upgrade() {
+                submenu.set_visible(true);
+            }
+        });
+    }
+    let main_weak = main_page.downgrade();
+    let submenu_weak = submenu.downgrade();
+    back.connect_clicked(move |_| {
+        if let Some(submenu) = submenu_weak.upgrade() {
+            submenu.set_visible(false);
+        }
+        if let Some(main) = main_weak.upgrade() {
+            main.set_visible(true);
+        }
+    });
+}
+
+fn build_analyze_submenu_page(
+    menu: &AnalyzeMenu,
+    popover: &gtk::Popover,
+    track_ids: Vec<TrackId>,
+) -> (gtk::Box, gtk::Button) {
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.add_css_class("track-context-menu");
+    content.add_css_class("track-context-submenu");
+
+    let back_button = submenu_back_button("Analyze");
+    content.append(&back_button);
+
+    for (label_text, capability) in [
+        ("BPM", AnalysisCapability::Bpm),
+        ("Key", AnalysisCapability::Key),
+        ("Waveform", AnalysisCapability::Waveform),
+    ] {
+        let button = context_menu_button_with_label(label_text);
+        button.set_sensitive(!(menu.enabled)(capability));
+        let popover = popover.clone();
+        let run = menu.run.clone();
+        let track_ids = track_ids.clone();
+        button.connect_clicked(move |_| {
+            popover.popdown();
+            run(track_ids.clone(), AnalysisRunRequest::Single(capability));
+        });
+        content.append(&button);
+    }
+
+    let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+    separator.add_css_class("track-context-menu-separator");
+    content.append(&separator);
+
+    let all_button = context_menu_button_with_label("All");
+    let popover_for_all = popover.clone();
+    let run_for_all = menu.run.clone();
+    let track_ids_for_all = track_ids;
+    all_button.connect_clicked(move |_| {
+        popover_for_all.popdown();
+        run_for_all(track_ids_for_all.clone(), AnalysisRunRequest::All);
+    });
+    content.append(&all_button);
+
+    (content, back_button)
+}
+
+fn build_retrieve_submenu_page(
+    menu: &RetrieveMenu,
+    popover: &gtk::Popover,
+    track_ids: Vec<TrackId>,
+) -> (gtk::Box, gtk::Button) {
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.add_css_class("track-context-menu");
+    content.add_css_class("track-context-submenu");
+
+    let back_button = submenu_back_button("Retrieve");
+    content.append(&back_button);
+
+    for (label_text, capability) in [
+        ("Lyrics", OnlineCapability::Lyrics),
+        ("Tags", OnlineCapability::Tags),
+        ("Artwork", OnlineCapability::Artwork),
+    ] {
+        let button = context_menu_button_with_label(label_text);
+        button.set_sensitive(!(menu.enabled)(capability));
+        let popover = popover.clone();
+        let run = menu.run.clone();
+        let track_ids = track_ids.clone();
+        button.connect_clicked(move |_| {
+            popover.popdown();
+            run(track_ids.clone(), OnlineRunRequest::Single(capability));
+        });
+        content.append(&button);
+    }
+
+    let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+    separator.add_css_class("track-context-menu-separator");
+    content.append(&separator);
+
+    let all_button = context_menu_button_with_label("All");
+    let popover_for_all = popover.clone();
+    let run_for_all = menu.run.clone();
+    let track_ids_for_all = track_ids;
+    all_button.connect_clicked(move |_| {
+        popover_for_all.popdown();
+        run_for_all(track_ids_for_all.clone(), OnlineRunRequest::All);
+    });
+    content.append(&all_button);
+
+    (content, back_button)
 }
 
 fn build_add_to_playlist_page(

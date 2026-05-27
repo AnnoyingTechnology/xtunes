@@ -59,7 +59,9 @@ use super::{
     },
     track_context::{
         AddToPlaylistCallback, AddToPlaylistEntry, AddToPlaylistProvider, TrackActionCallback,
-        TrackActionVisibility, TrackContextAction, TrackContextActionSet, TrackRowContextMenu,
+        TrackActionVisibility, TrackAnalyzeEnabledQuery, TrackAnalyzeRunCallback,
+        TrackContextAction, TrackContextActionSet, TrackRetrieveEnabledQuery,
+        TrackRetrieveRunCallback, TrackRowContextMenu,
     },
     track_context_ops::{
         add_to_queue_callback, copy_files_callback, get_info_callback, play_next_callback,
@@ -245,6 +247,14 @@ pub(crate) fn build_main_window(
         .with_add_to_playlist(
             add_to_playlist_provider.clone(),
             add_to_playlist_callback.clone(),
+        )
+        .with_analyze_menu(
+            track_analyze_run_callback(&runtime),
+            analysis_enabled_query(&runtime),
+        )
+        .with_retrieve_menu(
+            track_retrieve_run_callback(&runtime),
+            online_enabled_query(&runtime),
         );
     let playlist_context_actions = playlist_track_context_actions(
         &runtime,
@@ -257,7 +267,15 @@ pub(crate) fn build_main_window(
         &sidebar,
     );
     let playlist_context_menu = TrackRowContextMenu::new(playlist_context_actions, parent_window)
-        .with_add_to_playlist(add_to_playlist_provider, add_to_playlist_callback);
+        .with_add_to_playlist(add_to_playlist_provider, add_to_playlist_callback)
+        .with_analyze_menu(
+            track_analyze_run_callback(&runtime),
+            analysis_enabled_query(&runtime),
+        )
+        .with_retrieve_menu(
+            track_retrieve_run_callback(&runtime),
+            online_enabled_query(&runtime),
+        );
     let rating_changed =
         rating_changed_callback(&command_controller, track_row_changed_holder.clone());
     let songs_table = build_track_table(
@@ -461,6 +479,8 @@ pub(crate) fn build_main_window(
     ));
     sidebar.set_analysis_run_callback(sidebar_analysis_run_callback(&runtime));
     sidebar.set_online_run_callback(sidebar_online_run_callback(&runtime));
+    sidebar.set_analysis_enabled_query(sidebar_analysis_enabled_query(&runtime));
+    sidebar.set_online_enabled_query(sidebar_online_enabled_query(&runtime));
     library_changed_holder.replace(Some(library_changed.clone()));
     let scan_requested = library_scan_requested_callback(&runtime, library_changed.clone());
     let consolidation_requested = library_consolidation_requested_callback(&runtime);
@@ -1030,13 +1050,13 @@ fn sidebar_analysis_run_callback(
     runtime: &SharedRuntime,
 ) -> super::sidebar::SidebarAnalysisRunCallback {
     let runtime = runtime.clone();
-    Rc::new(move |item, capability| {
+    Rc::new(move |item, request| {
         // The runtime decides accept vs deny (based on the global
         // setting) and pushes the matching ephemeral notification; we
         // don't act on the return value.
         let _ = runtime
             .borrow_mut()
-            .request_playlist_analysis_run(item, capability);
+            .request_playlist_analysis_run(item, request);
     })
 }
 
@@ -1044,11 +1064,83 @@ fn sidebar_online_run_callback(
     runtime: &SharedRuntime,
 ) -> super::sidebar::SidebarOnlineRunCallback {
     let runtime = runtime.clone();
-    Rc::new(move |item, capability| {
+    Rc::new(move |item, request| {
         let _ = runtime
             .borrow_mut()
-            .request_playlist_online_run(item, capability);
+            .request_playlist_online_run(item, request);
     })
+}
+
+fn sidebar_analysis_enabled_query(
+    runtime: &SharedRuntime,
+) -> super::sidebar::SidebarAnalysisEnabledQuery {
+    let runtime = runtime.clone();
+    Rc::new(move |capability| analysis_capability_enabled(&runtime, capability))
+}
+
+fn sidebar_online_enabled_query(
+    runtime: &SharedRuntime,
+) -> super::sidebar::SidebarOnlineEnabledQuery {
+    let runtime = runtime.clone();
+    Rc::new(move |capability| online_capability_enabled(&runtime, capability))
+}
+
+fn track_analyze_run_callback(runtime: &SharedRuntime) -> TrackAnalyzeRunCallback {
+    let runtime = runtime.clone();
+    Rc::new(move |track_ids, request| {
+        let _ = runtime
+            .borrow_mut()
+            .request_tracks_analysis_run(track_ids, request);
+    })
+}
+
+fn track_retrieve_run_callback(runtime: &SharedRuntime) -> TrackRetrieveRunCallback {
+    let runtime = runtime.clone();
+    Rc::new(move |track_ids, request| {
+        let _ = runtime
+            .borrow_mut()
+            .request_tracks_online_run(track_ids, request);
+    })
+}
+
+fn analysis_enabled_query(runtime: &SharedRuntime) -> TrackAnalyzeEnabledQuery {
+    let runtime = runtime.clone();
+    Rc::new(move |capability| analysis_capability_enabled(&runtime, capability))
+}
+
+fn online_enabled_query(runtime: &SharedRuntime) -> TrackRetrieveEnabledQuery {
+    let runtime = runtime.clone();
+    Rc::new(move |capability| online_capability_enabled(&runtime, capability))
+}
+
+/// Read the global analysis-capability toggle from the live settings.
+/// Shared by the sidebar's per-playlist submenu and the track-table's
+/// per-track submenu so both see the exact same "is the background
+/// sweep covering this capability?" answer.
+fn analysis_capability_enabled(
+    runtime: &SharedRuntime,
+    capability: sustain_app_runtime::AnalysisCapability,
+) -> bool {
+    let runtime = runtime.borrow();
+    let analysis = runtime.settings().analysis;
+    match capability {
+        sustain_app_runtime::AnalysisCapability::Bpm => analysis.bpm,
+        sustain_app_runtime::AnalysisCapability::Key => analysis.key,
+        sustain_app_runtime::AnalysisCapability::Waveform => analysis.waveform,
+    }
+}
+
+fn online_capability_enabled(
+    runtime: &SharedRuntime,
+    capability: sustain_app_runtime::OnlineCapability,
+) -> bool {
+    let runtime = runtime.borrow();
+    let online = runtime.settings().online;
+    match capability {
+        sustain_app_runtime::OnlineCapability::Lyrics => online.lyrics,
+        sustain_app_runtime::OnlineCapability::Artwork => online.artwork,
+        sustain_app_runtime::OnlineCapability::Tags => online.tags,
+    }
 }
 
 fn sidebar_move_callback(

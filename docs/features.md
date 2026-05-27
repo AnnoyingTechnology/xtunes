@@ -175,19 +175,29 @@ updates the summary so the count always matches what's drawn below.
 The header hides for folder selections and for empty states.
 
 ### Per-playlist analysis & online retrieval — *Sustain-native*
-Right-clicking a playlist or smart playlist exposes six menu items —
-**Analyze BPM**, **Detect Key**, **Generate Waveform**, **Fetch Lyrics**,
-**Fetch Artwork**, **Fetch Missing Tags** — that run the chosen
-capability against that playlist's track set without waiting for the
-background sweep to reach them. Useful for dedicated mix-set
-playlists destined for Pioneer PDB export (waveforms cost a lot of
-decode time on long mixes, so most users keep the global waveform
-toggle off and trigger it per playlist) or for one-shot "fetch lyrics
-on this 'Sing me' playlist" runs. Each item is independently denied
+Right-clicking a playlist or smart playlist exposes two submenus —
+**Analyze** (BPM / Key / Waveform / All) and **Retrieve** (Lyrics /
+Tags / Artwork / All) — that run the chosen capability against that
+playlist's track set without waiting for the background sweep to
+reach them. Useful for dedicated mix-set playlists destined for
+Pioneer PDB export (waveforms cost a lot of decode time on long
+mixes, so most users keep the global waveform toggle off and trigger
+it per playlist) or for one-shot "fetch lyrics on this 'Sing me'
+playlist" runs. Each per-capability entry is rendered insensitive
 when its matching global toggle is on — the background sweep is
 already covering those tracks, so the right-click trigger would be
-redundant. Folders don't expose the items: they don't carry tracks of
-their own.
+redundant. The **All** entry always submits the full mask: when the
+user explicitly bundles all three, the inflight dedup and
+"needs-analysis" filter inside each scheduler keep that from doing
+duplicate work. Folders don't expose the submenus: they don't carry
+tracks of their own.
+
+### Per-track analysis & online retrieval — *Sustain-native*
+The same **Analyze** and **Retrieve** submenus appear on the track
+context menu (Songs view and Playlists view), so the user can target
+the currently-selected tracks instead of a whole playlist. Naming,
+menu shape, and insensitive-when-globally-covered semantics match
+the per-playlist version exactly.
 
 ---
 
@@ -386,6 +396,12 @@ following actions, separated into visually distinct groups:
 - **Copy** — copy the audio file itself
 - **Show in folder** — open the system file manager at the file's
   location (`Ctrl+R`)
+- **Analyze** — submenu (BPM / Key / Waveform / All) running the
+  chosen analysis pass on the selected tracks; per-capability items
+  are insensitive when the matching global toggle is on
+- **Retrieve** — submenu (Lyrics / Tags / Artwork / All) running the
+  chosen online retrieval pass on the selected tracks; same
+  insensitive-when-globally-covered policy
 - **Remove from playlist** — when invoked from a playlist view; removes
   from that playlist only, leaves the track in the library
 - **Remove from library** — delete the library record only, leave the

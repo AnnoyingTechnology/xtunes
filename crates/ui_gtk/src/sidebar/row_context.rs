@@ -3,11 +3,14 @@
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
-use sustain_app_runtime::{AnalysisCapability, OnlineCapability, PlaylistItem};
+use sustain_app_runtime::{
+    AnalysisCapability, AnalysisRunRequest, OnlineCapability, OnlineRunRequest, PlaylistItem,
+};
 
 use super::{
-    AnalysisRunCallbackHolder, DeleteCallbackHolder, EditSmartPlaylistCallbackHolder,
-    OnlineRunCallbackHolder, RenameCallbackHolder,
+    AnalysisEnabledQueryHolder, AnalysisRunCallbackHolder, DeleteCallbackHolder,
+    EditSmartPlaylistCallbackHolder, OnlineEnabledQueryHolder, OnlineRunCallbackHolder,
+    RenameCallbackHolder,
 };
 
 #[derive(Clone)]
@@ -21,6 +24,8 @@ pub(super) struct SidebarRowContext {
     pub(super) on_edit_smart_playlist: EditSmartPlaylistCallbackHolder,
     pub(super) on_analysis_run: AnalysisRunCallbackHolder,
     pub(super) on_online_run: OnlineRunCallbackHolder,
+    pub(super) analysis_enabled_query: AnalysisEnabledQueryHolder,
+    pub(super) online_enabled_query: OnlineEnabledQueryHolder,
 }
 
 pub(super) fn attach_row_context_menu(row: &gtk::Widget, context: SidebarRowContext) {
@@ -64,8 +69,14 @@ fn popup_row_context_menu(anchor: &gtk::Widget, context: SidebarRowContext, x: f
     popover.add_css_class("compact-context-menu");
     popover.set_parent(anchor);
 
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    content.add_css_class("sidebar-context-menu");
+    // Root box hosts every page: the main row-action page on top and
+    // (when the row carries tracks) the two submenu pages below. Pages
+    // share the root by visibility-swap — same pattern as the track
+    // context menu's "Add to Playlist..." submenu.
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+
+    let main_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    main_page.add_css_class("sidebar-context-menu");
 
     if let PlaylistItem::SmartPlaylist(smart_playlist_id) = context.item {
         let edit_button = row_action_button("Edit\u{2026}");
@@ -77,7 +88,7 @@ fn popup_row_context_menu(anchor: &gtk::Widget, context: SidebarRowContext, x: f
                 callback(smart_playlist_id);
             }
         });
-        content.append(&edit_button);
+        main_page.append(&edit_button);
     }
 
     let rename_button = row_action_button("Rename");
@@ -89,7 +100,7 @@ fn popup_row_context_menu(anchor: &gtk::Widget, context: SidebarRowContext, x: f
         popover_for_rename.popdown();
         begin_rename(&name_stack_for_rename, &label_for_rename, &entry_for_rename);
     });
-    content.append(&rename_button);
+    main_page.append(&rename_button);
 
     let delete_button = row_action_button(delete_label_for(context.item));
     let popover_for_delete = popover.clone();
@@ -106,57 +117,37 @@ fn popup_row_context_menu(anchor: &gtk::Widget, context: SidebarRowContext, x: f
             on_delete_for_delete.clone(),
         );
     });
-    content.append(&delete_button);
+    main_page.append(&delete_button);
 
-    // Per-playlist analysis + online retrieval actions. Folders
-    // don't carry tracks of their own, so the run actions only show
-    // up for Playlist and SmartPlaylist rows.
+    root.append(&main_page);
+
+    // Folders don't carry tracks of their own, so the run submenus
+    // only show up for Playlist and SmartPlaylist rows.
     if matches!(
         context.item,
         PlaylistItem::Playlist(_) | PlaylistItem::SmartPlaylist(_)
     ) {
-        content.append(&row_separator());
+        main_page.append(&row_separator());
 
-        for (label_text, capability) in [
-            ("Analyze BPM", AnalysisCapability::Bpm),
-            ("Detect Key", AnalysisCapability::Key),
-            ("Generate Waveform", AnalysisCapability::Waveform),
-        ] {
-            let button = row_action_button(label_text);
-            let popover_for_run = popover.clone();
-            let item_for_run = context.item;
-            let on_analysis_run = context.on_analysis_run.clone();
-            button.connect_clicked(move |_| {
-                popover_for_run.popdown();
-                if let Some(callback) = on_analysis_run.borrow().as_ref() {
-                    callback(item_for_run, capability);
-                }
-            });
-            content.append(&button);
-        }
+        let analyze_trigger = row_submenu_button("Analyze\u{2026}");
+        main_page.append(&analyze_trigger);
 
-        content.append(&row_separator());
+        let retrieve_trigger = row_submenu_button("Retrieve\u{2026}");
+        main_page.append(&retrieve_trigger);
 
-        for (label_text, capability) in [
-            ("Fetch Lyrics", OnlineCapability::Lyrics),
-            ("Fetch Artwork", OnlineCapability::Artwork),
-            ("Fetch Missing Tags", OnlineCapability::Tags),
-        ] {
-            let button = row_action_button(label_text);
-            let popover_for_run = popover.clone();
-            let item_for_run = context.item;
-            let on_online_run = context.on_online_run.clone();
-            button.connect_clicked(move |_| {
-                popover_for_run.popdown();
-                if let Some(callback) = on_online_run.borrow().as_ref() {
-                    callback(item_for_run, capability);
-                }
-            });
-            content.append(&button);
-        }
+        let analyze_page = build_analyze_submenu_page(&popover, &context);
+        analyze_page.set_visible(false);
+        root.append(&analyze_page);
+
+        let retrieve_page = build_retrieve_submenu_page(&popover, &context);
+        retrieve_page.set_visible(false);
+        root.append(&retrieve_page);
+
+        wire_submenu_trigger(&main_page, &analyze_trigger, &analyze_page);
+        wire_submenu_trigger(&main_page, &retrieve_trigger, &retrieve_page);
     }
 
-    popover.set_child(Some(&content));
+    popover.set_child(Some(&root));
 
     let popover_for_close = popover.clone();
     popover.connect_closed(move |_| {
@@ -166,6 +157,153 @@ fn popup_row_context_menu(anchor: &gtk::Widget, context: SidebarRowContext, x: f
     let rect = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
     popover.set_pointing_to(Some(&rect));
     popover.popup();
+}
+
+/// Build the "Analyze" submenu page: BPM / Key / Waveform / All.
+/// Each per-capability button is insensitive when the matching global
+/// toggle is on (the background sweep is already going to cover it).
+/// `All` is always sensitive and always submits the full mask.
+fn build_analyze_submenu_page(popover: &gtk::Popover, context: &SidebarRowContext) -> gtk::Box {
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    page.add_css_class("sidebar-context-menu");
+    page.add_css_class("sidebar-context-submenu");
+
+    let back = row_submenu_back_button("Analyze");
+    page.append(&back);
+    // The "Back" semantics are wired by `wire_submenu_trigger`, which
+    // also caches the back button via the page's first child.
+
+    let analysis_globally_on = |capability: AnalysisCapability| -> bool {
+        context
+            .analysis_enabled_query
+            .borrow()
+            .as_ref()
+            .map(|query| query(capability))
+            .unwrap_or(false)
+    };
+
+    for (label_text, capability) in [
+        ("BPM", AnalysisCapability::Bpm),
+        ("Key", AnalysisCapability::Key),
+        ("Waveform", AnalysisCapability::Waveform),
+    ] {
+        let button = row_action_button(label_text);
+        button.set_sensitive(!analysis_globally_on(capability));
+        let popover_for_run = popover.clone();
+        let item_for_run = context.item;
+        let on_analysis_run = context.on_analysis_run.clone();
+        button.connect_clicked(move |_| {
+            popover_for_run.popdown();
+            if let Some(callback) = on_analysis_run.borrow().as_ref() {
+                callback(item_for_run, AnalysisRunRequest::Single(capability));
+            }
+        });
+        page.append(&button);
+    }
+
+    page.append(&row_separator());
+
+    let all_button = row_action_button("All");
+    let popover_for_all = popover.clone();
+    let item_for_all = context.item;
+    let on_analysis_run = context.on_analysis_run.clone();
+    all_button.connect_clicked(move |_| {
+        popover_for_all.popdown();
+        if let Some(callback) = on_analysis_run.borrow().as_ref() {
+            callback(item_for_all, AnalysisRunRequest::All);
+        }
+    });
+    page.append(&all_button);
+
+    page
+}
+
+/// Build the "Retrieve" submenu page: Lyrics / Tags / Artwork / All.
+/// Same insensitivity policy as the Analyze page.
+fn build_retrieve_submenu_page(popover: &gtk::Popover, context: &SidebarRowContext) -> gtk::Box {
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    page.add_css_class("sidebar-context-menu");
+    page.add_css_class("sidebar-context-submenu");
+
+    let back = row_submenu_back_button("Retrieve");
+    page.append(&back);
+
+    let online_globally_on = |capability: OnlineCapability| -> bool {
+        context
+            .online_enabled_query
+            .borrow()
+            .as_ref()
+            .map(|query| query(capability))
+            .unwrap_or(false)
+    };
+
+    for (label_text, capability) in [
+        ("Lyrics", OnlineCapability::Lyrics),
+        ("Tags", OnlineCapability::Tags),
+        ("Artwork", OnlineCapability::Artwork),
+    ] {
+        let button = row_action_button(label_text);
+        button.set_sensitive(!online_globally_on(capability));
+        let popover_for_run = popover.clone();
+        let item_for_run = context.item;
+        let on_online_run = context.on_online_run.clone();
+        button.connect_clicked(move |_| {
+            popover_for_run.popdown();
+            if let Some(callback) = on_online_run.borrow().as_ref() {
+                callback(item_for_run, OnlineRunRequest::Single(capability));
+            }
+        });
+        page.append(&button);
+    }
+
+    page.append(&row_separator());
+
+    let all_button = row_action_button("All");
+    let popover_for_all = popover.clone();
+    let item_for_all = context.item;
+    let on_online_run = context.on_online_run.clone();
+    all_button.connect_clicked(move |_| {
+        popover_for_all.popdown();
+        if let Some(callback) = on_online_run.borrow().as_ref() {
+            callback(item_for_all, OnlineRunRequest::All);
+        }
+    });
+    page.append(&all_button);
+
+    page
+}
+
+/// Wire a main-page submenu trigger to its submenu page: clicking the
+/// trigger hides the main page and shows the submenu; clicking the
+/// submenu's back button (the page's first child) reverses the swap.
+fn wire_submenu_trigger(main_page: &gtk::Box, trigger: &gtk::Button, submenu: &gtk::Box) {
+    let main_weak = main_page.downgrade();
+    let submenu_weak = submenu.downgrade();
+    trigger.connect_clicked(move |_| {
+        if let Some(main) = main_weak.upgrade() {
+            main.set_visible(false);
+        }
+        if let Some(submenu) = submenu_weak.upgrade() {
+            submenu.set_visible(true);
+        }
+    });
+
+    let Some(first_child) = submenu.first_child() else {
+        return;
+    };
+    let Ok(back) = first_child.downcast::<gtk::Button>() else {
+        return;
+    };
+    let main_weak = main_page.downgrade();
+    let submenu_weak = submenu.downgrade();
+    back.connect_clicked(move |_| {
+        if let Some(submenu) = submenu_weak.upgrade() {
+            submenu.set_visible(false);
+        }
+        if let Some(main) = main_weak.upgrade() {
+            main.set_visible(true);
+        }
+    });
 }
 
 fn row_action_button(label_text: &str) -> gtk::Button {
@@ -178,6 +316,60 @@ fn row_action_button(label_text: &str) -> gtk::Button {
     button.add_css_class("flat");
     button.add_css_class("sidebar-context-menu-item");
     button.set_child(Some(&label));
+    button.set_halign(gtk::Align::Fill);
+    button.set_hexpand(true);
+    button
+}
+
+/// Submenu trigger on the main page: label with a trailing chevron
+/// mirroring the track context menu's "Add to Playlist..." style.
+fn row_submenu_button(label_text: &str) -> gtk::Button {
+    let label = gtk::Label::new(Some(label_text));
+    label.set_xalign(0.0);
+    label.set_halign(gtk::Align::Start);
+    label.set_hexpand(true);
+
+    let chevron = gtk::Image::from_icon_name("go-next-symbolic");
+    chevron.set_pixel_size(12);
+    chevron.add_css_class("sidebar-context-submenu-chevron");
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    row.append(&label);
+    row.append(&chevron);
+
+    let button = gtk::Button::new();
+    button.add_css_class("flat");
+    button.add_css_class("sidebar-context-menu-item");
+    button.set_child(Some(&row));
+    button.set_halign(gtk::Align::Fill);
+    button.set_hexpand(true);
+    button
+}
+
+/// Back button at the top of a submenu page. The label echoes the
+/// submenu's name (e.g. "Analyze") so users know which submenu they
+/// are in. Returning to the main page is wired by
+/// `wire_submenu_trigger` from this button's first-child slot.
+fn row_submenu_back_button(parent_label: &str) -> gtk::Button {
+    let caret = gtk::Image::from_icon_name("go-previous-symbolic");
+    caret.set_pixel_size(12);
+    caret.add_css_class("sidebar-context-submenu-back-caret");
+
+    let label = gtk::Label::new(Some(parent_label));
+    label.set_xalign(0.0);
+    label.set_halign(gtk::Align::Start);
+    label.set_hexpand(true);
+    label.set_margin_start(6);
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    row.append(&caret);
+    row.append(&label);
+
+    let button = gtk::Button::new();
+    button.add_css_class("flat");
+    button.add_css_class("sidebar-context-menu-item");
+    button.add_css_class("sidebar-context-submenu-back");
+    button.set_child(Some(&row));
     button.set_halign(gtk::Align::Fill);
     button.set_hexpand(true);
     button
