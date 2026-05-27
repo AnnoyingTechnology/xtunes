@@ -302,11 +302,16 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     // clicked moments before close is not lost. `shutdown_metadata_writer`
     // joins the worker thread; the channel sender is dropped first so the
     // worker's `recv` returns once the queue is empty.
+    //
+    // Order matters: every consumer that holds a `MetadataWriteHandle`
+    // (currently the online scheduler) must be joined BEFORE the
+    // writer, otherwise the writer's `join` blocks forever on a
+    // surviving sender clone.
     let mut runtime_guard = runtime.borrow_mut();
-    runtime_guard.shutdown_metadata_writer();
-    runtime_guard.shutdown_artwork_fetcher();
     runtime_guard.shutdown_analysis_scheduler();
     runtime_guard.shutdown_online_scheduler();
+    runtime_guard.shutdown_artwork_fetcher();
+    runtime_guard.shutdown_metadata_writer();
 }
 
 /// Activate the already-running Sustain primary instance that owns

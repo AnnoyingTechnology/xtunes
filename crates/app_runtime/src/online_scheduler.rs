@@ -36,13 +36,13 @@ use std::{
 
 use sustain_domain::{FieldChange, MetadataChange, OnlineSettings, SyncedLyrics, Track, TrackId};
 use sustain_library_store::{LibraryStore, OnlineCapabilities, OnlineContext};
-use sustain_metadata::MetadataService;
 use sustain_metadata_remote::{
     FetchedArtwork, FetchedLyrics, GenreCandidate, RemoteError, RemoteMetadataService, TrackMatch,
     TrackMatchRelease, TrackQuery,
 };
 
 use crate::artwork_fetcher::query_from_metadata;
+use crate::metadata_writer::MetadataWriteHandle;
 
 /// How long the worker sleeps between two consecutive tracks. The
 /// HTTP client's per-host rate limiter already prevents bursting
@@ -91,9 +91,13 @@ pub enum SchedulerProgress {
 }
 
 /// Bundle of dependencies the scheduler captures at start-up.
-pub struct OnlineSchedulerConfig {
+pub(crate) struct OnlineSchedulerConfig {
     pub remote_service: Arc<dyn RemoteMetadataService>,
-    pub metadata_service: Arc<dyn MetadataService>,
+    /// Cloneable handle to the runtime's [`crate::metadata_writer::MetadataWriter`]
+    /// actor. Every file-tag write the online scheduler performs is
+    /// routed through it so UI rating clicks and background tag fills
+    /// can never collide on the same file.
+    pub tag_writer: MetadataWriteHandle,
     pub library_store: Arc<dyn LibraryStore>,
     pub progress: ProgressSink,
     /// Optional sink fired after each persisted track mutation so the
@@ -117,13 +121,13 @@ enum SchedulerCommand {
     Shutdown,
 }
 
-pub struct OnlineScheduler {
+pub(crate) struct OnlineScheduler {
     sender: Sender<SchedulerCommand>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl OnlineScheduler {
-    pub fn start(config: OnlineSchedulerConfig) -> Self {
+    pub(crate) fn start(config: OnlineSchedulerConfig) -> Self {
         let (sender, receiver) = mpsc::channel::<SchedulerCommand>();
         let handle = thread::Builder::new()
             .name("sustain-online-scheduler".to_owned())
@@ -176,7 +180,7 @@ impl Drop for OnlineScheduler {
 fn worker_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: OnlineSchedulerConfig) {
     let OnlineSchedulerConfig {
         remote_service,
-        metadata_service,
+        tag_writer,
         library_store,
         progress,
         track_updated,
@@ -267,7 +271,7 @@ fn worker_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: OnlineSchedul
                 &absolute_path,
                 &state.settings,
                 remote_service.as_ref(),
-                metadata_service.as_ref(),
+                &tag_writer,
                 library_store.as_ref(),
             );
 
@@ -368,7 +372,7 @@ fn process_track(
     absolute_path: &Path,
     settings: &OnlineSettings,
     remote_service: &dyn RemoteMetadataService,
-    metadata_service: &dyn MetadataService,
+    tag_writer: &MetadataWriteHandle,
     library_store: &dyn LibraryStore,
 ) -> ProcessReport {
     let query = query_from_metadata(&track.metadata);
@@ -390,7 +394,7 @@ fn process_track(
             absolute_path,
             &query,
             remote_service,
-            metadata_service,
+            tag_writer,
             library_store,
             &mut cached_match,
         ) {
@@ -417,7 +421,7 @@ fn process_track(
             absolute_path,
             &query,
             remote_service,
-            metadata_service,
+            tag_writer,
             cached_match.as_ref(),
         ) {
             AttemptOutcome::Succeeded => {
@@ -443,7 +447,7 @@ fn process_track(
             absolute_path,
             &query,
             remote_service,
-            metadata_service,
+            tag_writer,
             library_store,
         ) {
             AttemptOutcome::Succeeded => {
@@ -499,7 +503,7 @@ fn attempt_artwork(
     absolute_path: &Path,
     query: &TrackQuery,
     remote_service: &dyn RemoteMetadataService,
-    metadata_service: &dyn MetadataService,
+    tag_writer: &MetadataWriteHandle,
     cached_match: Option<&TrackMatch>,
 ) -> AttemptOutcome {
     // The "track already has embedded artwork" filter is enforced by
@@ -529,9 +533,9 @@ fn attempt_artwork(
     let Some(artwork) = fetched else {
         return AttemptOutcome::NoMatch;
     };
-    if let Err(error) = metadata_service.write_artwork(absolute_path, Some(artwork.bytes)) {
+    if !tag_writer.write_artwork(absolute_path.to_path_buf(), Some(artwork.bytes)) {
         eprintln!(
-            "Sustain: artwork tag write failed for {}: {error:?}",
+            "Sustain: artwork tag write failed for {}",
             absolute_path.display()
         );
         return AttemptOutcome::Failed;
@@ -544,7 +548,7 @@ fn attempt_lyrics(
     absolute_path: &Path,
     query: &TrackQuery,
     remote_service: &dyn RemoteMetadataService,
-    metadata_service: &dyn MetadataService,
+    tag_writer: &MetadataWriteHandle,
     library_store: &dyn LibraryStore,
 ) -> AttemptOutcome {
     let has_plain = track
@@ -581,9 +585,9 @@ fn attempt_lyrics(
             lyrics: FieldChange::Set(plain.clone()),
             ..MetadataChange::default()
         };
-        if let Err(error) = metadata_service.write_metadata(absolute_path, change) {
+        if !tag_writer.write_metadata(absolute_path.to_path_buf(), change) {
             eprintln!(
-                "Sustain: lyrics tag write failed for {}: {error:?}",
+                "Sustain: lyrics tag write failed for {}",
                 absolute_path.display()
             );
             return AttemptOutcome::Failed;
@@ -713,7 +717,7 @@ fn attempt_tags(
     absolute_path: &Path,
     query: &TrackQuery,
     remote_service: &dyn RemoteMetadataService,
-    metadata_service: &dyn MetadataService,
+    tag_writer: &MetadataWriteHandle,
     library_store: &dyn LibraryStore,
     cached_match: &mut Option<TrackMatch>,
 ) -> AttemptOutcome {
@@ -820,9 +824,9 @@ fn attempt_tags(
         return AttemptOutcome::NoMatch;
     }
 
-    if let Err(error) = metadata_service.write_metadata(absolute_path, change.clone()) {
+    if !tag_writer.write_metadata(absolute_path.to_path_buf(), change.clone()) {
         eprintln!(
-            "Sustain: tag enrichment write failed for {}: {error:?}",
+            "Sustain: tag enrichment write failed for {}",
             absolute_path.display()
         );
         return AttemptOutcome::Failed;
@@ -932,9 +936,22 @@ mod tests {
     };
     use tempfile::TempDir;
 
+    use crate::metadata_writer::{MetadataWriteHandle, MetadataWriter};
+
     use super::{
         OnlineScheduler, OnlineSchedulerConfig, ProgressSink, SchedulerProgress, UnixClockFn,
     };
+
+    /// Spawn a real [`MetadataWriter`] in front of the test's
+    /// [`StubMetadata`] so the online scheduler's tag writes flow
+    /// through the same actor the production path uses. Returns the
+    /// writer (which must out-live the scheduler so its actor stays
+    /// alive) alongside a cloneable handle for the scheduler config.
+    fn spawn_tag_writer(metadata: Arc<StubMetadata>) -> (MetadataWriter, MetadataWriteHandle) {
+        let writer = MetadataWriter::start(metadata);
+        let handle = writer.handle();
+        (writer, handle)
+    }
 
     fn touch_in(library_root: &Path, relative: &str) -> Track {
         let absolute = library_root.join(relative);
@@ -1112,9 +1129,11 @@ mod tests {
         let metadata = Arc::new(StubMetadata::default());
         let (sink, rx) = capturing_sink();
 
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
         let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
             remote_service: remote.clone(),
-            metadata_service: metadata.clone(),
+            tag_writer,
             library_store: store,
             progress: sink,
             track_updated: None,
@@ -1149,9 +1168,11 @@ mod tests {
         let metadata = Arc::new(StubMetadata::default());
         let (sink, rx) = capturing_sink();
 
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
         let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
             remote_service: remote.clone(),
-            metadata_service: metadata.clone(),
+            tag_writer,
             library_store: store.clone(),
             progress: sink,
             track_updated: None,
@@ -1226,9 +1247,11 @@ mod tests {
         let metadata = Arc::new(StubMetadata::default());
         let (sink, rx) = capturing_sink();
 
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
         let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
             remote_service: remote.clone(),
-            metadata_service: metadata.clone(),
+            tag_writer,
             library_store: store.clone(),
             progress: sink,
             track_updated: None,
@@ -1277,9 +1300,11 @@ mod tests {
         let metadata = Arc::new(StubMetadata::default());
         let (sink, rx) = capturing_sink();
 
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
         let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
             remote_service: remote.clone(),
-            metadata_service: metadata.clone(),
+            tag_writer,
             library_store: store.clone(),
             progress: sink,
             track_updated: None,
@@ -1327,9 +1352,11 @@ mod tests {
         // still applies, so the scheduler asks the remote.
         let (sink, rx) = capturing_sink();
 
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
         let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
             remote_service: remote.clone(),
-            metadata_service: metadata.clone(),
+            tag_writer,
             library_store: store.clone(),
             progress: sink,
             track_updated: None,
@@ -1366,9 +1393,11 @@ mod tests {
         let metadata = Arc::new(StubMetadata::default());
         let (sink, rx) = capturing_sink();
 
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
         let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
             remote_service: remote.clone(),
-            metadata_service: metadata.clone(),
+            tag_writer,
             library_store: store.clone(),
             progress: sink,
             track_updated: None,
@@ -1421,9 +1450,11 @@ mod tests {
         let metadata = Arc::new(StubMetadata::default());
         let (sink, rx) = capturing_sink();
 
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
         let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
             remote_service: remote.clone(),
-            metadata_service: metadata.clone(),
+            tag_writer,
             library_store: store.clone(),
             progress: sink,
             track_updated: None,
@@ -1530,9 +1561,11 @@ mod tests {
         let metadata = Arc::new(StubMetadata::default());
         let (sink, rx) = capturing_sink();
 
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
         let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
             remote_service: remote.clone(),
-            metadata_service: metadata.clone(),
+            tag_writer,
             library_store: store.clone(),
             progress: sink,
             track_updated: None,
@@ -1624,9 +1657,11 @@ mod tests {
         let metadata = Arc::new(StubMetadata::default());
         let (sink, rx) = capturing_sink();
 
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
         let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
             remote_service: remote.clone(),
-            metadata_service: metadata.clone(),
+            tag_writer,
             library_store: store.clone(),
             progress: sink,
             track_updated: None,
@@ -1697,9 +1732,11 @@ mod tests {
         let metadata = Arc::new(StubMetadata::default());
         let (sink, rx) = capturing_sink();
 
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
         let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
             remote_service: remote.clone(),
-            metadata_service: metadata.clone(),
+            tag_writer,
             library_store: store.clone(),
             progress: sink,
             track_updated: None,
@@ -1745,9 +1782,11 @@ mod tests {
             let _ = notify_tx.send(id);
         });
 
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
         let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
             remote_service: remote,
-            metadata_service: metadata,
+            tag_writer,
             library_store: store.clone(),
             progress: sink,
             track_updated: Some(track_updated),
@@ -1788,9 +1827,11 @@ mod tests {
         let metadata = Arc::new(StubMetadata::default());
         let (sink, rx) = capturing_sink();
 
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
         let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
             remote_service: remote.clone(),
-            metadata_service: metadata,
+            tag_writer,
             library_store: store.clone(),
             progress: sink,
             track_updated: None,
@@ -1853,9 +1894,11 @@ mod tests {
         let metadata = Arc::new(StubMetadata::default());
         let (sink, rx) = capturing_sink();
 
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
         let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
             remote_service: remote.clone(),
-            metadata_service: metadata,
+            tag_writer,
             library_store: store.clone(),
             progress: sink,
             track_updated: None,
@@ -1915,9 +1958,11 @@ mod tests {
         let remote = Arc::new(StubRemote::default());
         let metadata = Arc::new(StubMetadata::default());
         let (sink, _rx) = capturing_sink();
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
         let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
             remote_service: remote,
-            metadata_service: metadata,
+            tag_writer,
             library_store: store,
             progress: sink,
             track_updated: None,

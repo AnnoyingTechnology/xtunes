@@ -747,10 +747,17 @@ impl ApplicationRuntime {
             .library_store
             .clone()
             .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
-        let metadata_service = self
-            .metadata_service
-            .clone()
-            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
+        // The online scheduler writes tag changes through the single
+        // [`metadata_writer::MetadataWriter`] actor so its writes
+        // serialise against UI rating clicks and metadata edits. The
+        // writer must be started first; if it has not been installed
+        // we surface that as a missing-service error rather than
+        // silently dropping every tag write.
+        let tag_writer = self
+            .metadata_writer
+            .as_ref()
+            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?
+            .handle();
         let remote_service = self
             .remote_metadata_service
             .clone()
@@ -781,7 +788,7 @@ impl ApplicationRuntime {
         let scheduler =
             online_scheduler::OnlineScheduler::start(online_scheduler::OnlineSchedulerConfig {
                 remote_service,
-                metadata_service,
+                tag_writer,
                 library_store,
                 progress,
                 track_updated,
