@@ -13,7 +13,7 @@ use rusqlite::{Connection, params};
 use sustain_domain::SmartPlaylistRuleSet;
 pub use sustain_domain::{
     LibraryQuery, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, Rating, SmartPlaylist,
-    SmartPlaylistId, Track, TrackAnalysis, TrackColumnEntry, TrackColumnLayout,
+    SmartPlaylistId, SyncedLyrics, Track, TrackAnalysis, TrackColumnEntry, TrackColumnLayout,
     TrackColumnLayoutScope, TrackId, WaveformSegments,
 };
 
@@ -26,9 +26,11 @@ pub use memory::InMemoryLibraryStore;
 
 use query::{sort_tracks, track_matches_search};
 use schema::{
-    FILL_TRACK_BPM_IF_NULL_SQL, FILL_TRACK_MUSICAL_KEY_IF_NULL_SQL, SAVE_TRACK_SQL, SCHEMA_SQL,
-    SELECT_ALL_TRACKS_SQL, SELECT_TRACK_BY_CONTENT_HASH_SQL, SELECT_TRACK_BY_ID_SQL,
-    SELECT_TRACK_WAVEFORM_SQL, SELECT_TRACKS_NEEDING_ANALYSIS_SQL, UPSERT_TRACK_ANALYSIS_SQL,
+    DELETE_TRACK_SYNCED_LYRICS_SQL, FILL_TRACK_BPM_IF_NULL_SQL, FILL_TRACK_MUSICAL_KEY_IF_NULL_SQL,
+    SAVE_TRACK_SQL, SCHEMA_SQL, SELECT_ALL_TRACKS_SQL, SELECT_TRACK_BY_CONTENT_HASH_SQL,
+    SELECT_TRACK_BY_ID_SQL, SELECT_TRACK_SYNCED_LYRICS_SQL, SELECT_TRACK_WAVEFORM_SQL,
+    SELECT_TRACKS_NEEDING_ANALYSIS_SQL, SELECT_TRACKS_NEEDING_ONLINE_SQL,
+    UPSERT_TRACK_ANALYSIS_SQL, UPSERT_TRACK_ONLINE_STATUS_SQL, UPSERT_TRACK_SYNCED_LYRICS_SQL,
     UPSERT_TRACK_WAVEFORM_SQL,
 };
 use sqlite_rows::{
@@ -98,6 +100,52 @@ impl AnalysisCapabilities {
     }
 }
 
+/// Which network-bound retrievals a write or query applies to.
+///
+/// Symmetric counterpart of [`AnalysisCapabilities`] for online work
+/// (artwork, tag enrichment, lyrics). Tag-fetch is included in the
+/// flag set but is not yet wired through the runtime — the
+/// scheduler ignores it today and the field exists so the storage
+/// layer's row shape does not have to change when tag-fetch lands.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OnlineCapabilities {
+    pub artwork: bool,
+    pub tags: bool,
+    pub lyrics: bool,
+}
+
+impl OnlineCapabilities {
+    pub const fn none() -> Self {
+        Self {
+            artwork: false,
+            tags: false,
+            lyrics: false,
+        }
+    }
+
+    pub const fn all() -> Self {
+        Self {
+            artwork: true,
+            tags: true,
+            lyrics: true,
+        }
+    }
+
+    pub const fn is_empty(self) -> bool {
+        !(self.artwork || self.tags || self.lyrics)
+    }
+}
+
+/// Per-attempt facts stamped onto `track_online_status`. `provider_version`
+/// is the watermark the scheduler compares against to invalidate stale
+/// rows after a provider switch or significant client change; `now_unix`
+/// is the wall clock at the moment the attempt completed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OnlineContext {
+    pub provider_version: u32,
+    pub now_unix: i64,
+}
+
 /// Both waveform tiers as returned by [`LibraryStore::load_waveform`].
 /// Cheap to clone (`Vec<u8>` of segment bytes, decoded once into
 /// `WaveformSegment` on read). Renderers typically request this lazily
@@ -118,6 +166,16 @@ pub struct StoredWaveform {
 pub struct AnalysisContext {
     pub analyzer_version: u32,
     pub now_unix: i64,
+}
+
+/// Synced lyrics as returned by [`LibraryStore::load_synced_lyrics`].
+/// `source` is the short provider identifier under which the lines were
+/// originally written (e.g. `"lrclib"`); a future diagnostic UI can
+/// surface it without reaching back into logs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredSyncedLyrics {
+    pub lyrics: SyncedLyrics,
+    pub source: String,
 }
 
 pub trait LibraryStore: Send + Sync {
@@ -206,6 +264,51 @@ pub trait LibraryStore: Send + Sync {
     /// when the track has not been waveform-analyzed yet (or analysis
     /// failed).
     fn load_waveform(&self, track_id: TrackId) -> StoreResult<Option<StoredWaveform>>;
+
+    /// Persist time-coded lyrics for a track. Overwrites any previous
+    /// entry — synced lyrics are a single-shot store-or-replace, not
+    /// a merge. Passing an empty [`SyncedLyrics`] is a no-op and
+    /// leaves any existing row untouched (call [`Self::clear_synced_lyrics`]
+    /// to delete instead).
+    fn record_synced_lyrics(
+        &self,
+        track_id: TrackId,
+        lyrics: &SyncedLyrics,
+        source: &str,
+    ) -> StoreResult<()>;
+
+    /// Load synced lyrics for a track, if any.
+    fn load_synced_lyrics(&self, track_id: TrackId) -> StoreResult<Option<StoredSyncedLyrics>>;
+
+    /// Drop any stored synced lyrics for the track. Used by the
+    /// "remove lyrics" path (a future UI affordance) and by the
+    /// online scheduler when a re-fetch returns nothing.
+    fn clear_synced_lyrics(&self, track_id: TrackId) -> StoreResult<()>;
+
+    /// Stamp an online retrieval attempt against the track. Each
+    /// requested capability's `*_attempted_at_unix` is set to the
+    /// supplied wall clock; capabilities that were not requested
+    /// preserve their previous value. This is the only write the
+    /// online scheduler makes regardless of whether the underlying
+    /// provider returned data — "attempted but found nothing" must
+    /// be recorded so the scheduler does not retry every cycle.
+    fn record_online_attempt(
+        &self,
+        track_id: TrackId,
+        capabilities: OnlineCapabilities,
+        context: OnlineContext,
+    ) -> StoreResult<()>;
+
+    /// Return up to `limit` track IDs that need at least one of the
+    /// requested online capabilities attempted. Excludes tracks
+    /// marked missing. Returns an empty list when
+    /// `capabilities.is_empty()`.
+    fn tracks_needing_online(
+        &self,
+        capabilities: OnlineCapabilities,
+        provider_version: u32,
+        limit: usize,
+    ) -> StoreResult<Vec<TrackId>>;
 
     fn tracks_matching(&self, query: LibraryQuery) -> StoreResult<Vec<Track>> {
         let mut tracks = if let Some(playlist_id) = query.playlist_id {
@@ -371,6 +474,7 @@ fn save_track_with_connection(connection: &Connection, track: &Track) -> StoreRe
                 metadata.lyrics.as_deref(),
                 track.content_hash.as_ref().map(|hash| hash.as_str()),
                 track.file_size_bytes.map(|size| size as i64),
+                track.has_embedded_artwork.map(i64::from),
             ],
         )
         .map(|_| ())
@@ -1064,6 +1168,115 @@ impl LibraryStore for SqliteLibraryStore {
             },
         }))
     }
+
+    fn record_synced_lyrics(
+        &self,
+        track_id: TrackId,
+        lyrics: &SyncedLyrics,
+        source: &str,
+    ) -> StoreResult<()> {
+        if lyrics.is_empty() {
+            return Ok(());
+        }
+        let json = serde_json::to_string(&lyrics.lines)
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        let connection = self.connection_guard()?;
+        connection
+            .execute(
+                UPSERT_TRACK_SYNCED_LYRICS_SQL,
+                params![track_id.get(), json, source],
+            )
+            .map(|_| ())
+            .map_err(StoreError::from)
+    }
+
+    fn load_synced_lyrics(&self, track_id: TrackId) -> StoreResult<Option<StoredSyncedLyrics>> {
+        let connection = self.connection_guard()?;
+        let mut statement = connection
+            .prepare(SELECT_TRACK_SYNCED_LYRICS_SQL)
+            .map_err(StoreError::from)?;
+        let mut rows = statement
+            .query(params![track_id.get()])
+            .map_err(StoreError::from)?;
+        let Some(row) = rows.next().map_err(StoreError::from)? else {
+            return Ok(None);
+        };
+        let json: String = row.get(0).map_err(StoreError::from)?;
+        let source: String = row.get(1).map_err(StoreError::from)?;
+        let lines =
+            serde_json::from_str(&json).map_err(|error| StoreError::Database(error.to_string()))?;
+        Ok(Some(StoredSyncedLyrics {
+            lyrics: SyncedLyrics { lines },
+            source,
+        }))
+    }
+
+    fn clear_synced_lyrics(&self, track_id: TrackId) -> StoreResult<()> {
+        let connection = self.connection_guard()?;
+        connection
+            .execute(DELETE_TRACK_SYNCED_LYRICS_SQL, params![track_id.get()])
+            .map(|_| ())
+            .map_err(StoreError::from)
+    }
+
+    fn record_online_attempt(
+        &self,
+        track_id: TrackId,
+        capabilities: OnlineCapabilities,
+        context: OnlineContext,
+    ) -> StoreResult<()> {
+        if capabilities.is_empty() {
+            return Ok(());
+        }
+        let artwork_at = capabilities.artwork.then_some(context.now_unix);
+        let tags_at = capabilities.tags.then_some(context.now_unix);
+        let lyrics_at = capabilities.lyrics.then_some(context.now_unix);
+        let connection = self.connection_guard()?;
+        connection
+            .execute(
+                UPSERT_TRACK_ONLINE_STATUS_SQL,
+                params![
+                    track_id.get(),
+                    artwork_at,
+                    tags_at,
+                    lyrics_at,
+                    i64::from(context.provider_version),
+                ],
+            )
+            .map(|_| ())
+            .map_err(StoreError::from)
+    }
+
+    fn tracks_needing_online(
+        &self,
+        capabilities: OnlineCapabilities,
+        provider_version: u32,
+        limit: usize,
+    ) -> StoreResult<Vec<TrackId>> {
+        if capabilities.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = self.connection_guard()?;
+        let mut statement = connection
+            .prepare(SELECT_TRACKS_NEEDING_ONLINE_SQL)
+            .map_err(StoreError::from)?;
+        let mut rows = statement
+            .query(params![
+                i64::from(capabilities.artwork),
+                i64::from(capabilities.tags),
+                i64::from(capabilities.lyrics),
+                i64::from(provider_version),
+                limit as i64,
+            ])
+            .map_err(StoreError::from)?;
+        let mut ids = Vec::new();
+        while let Some(row) = rows.next().map_err(StoreError::from)? {
+            let raw: i64 = row.get(0).map_err(StoreError::from)?;
+            let id = TrackId::new(raw).ok_or(StoreError::InvalidStoredId(raw))?;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
 }
 
 /// Shared upsert helper for [`SqliteLibraryStore::record_analysis`] and
@@ -1136,11 +1349,12 @@ mod tests {
 
     use super::{
         AnalysisCapabilities, AnalysisContext, InMemoryLibraryStore, LibraryQuery, LibraryStore,
-        Playlist, PlaylistFolder, PlaylistFolderId, SmartPlaylist, SmartPlaylistId,
-        SqliteLibraryStore, StoredWaveform, Track, TrackColumnEntry, TrackColumnLayout,
-        TrackColumnLayoutScope,
+        OnlineCapabilities, OnlineContext, Playlist, PlaylistFolder, PlaylistFolderId,
+        SmartPlaylist, SmartPlaylistId, SqliteLibraryStore, StoredSyncedLyrics, StoredWaveform,
+        SyncedLyrics, Track, TrackColumnEntry, TrackColumnLayout, TrackColumnLayoutScope,
     };
     use crate::{PlaylistId, StoreResult, TrackId};
+    use sustain_domain::SyncedLyricsLine;
 
     #[test]
     fn in_memory_store_starts_empty() {
@@ -2090,6 +2304,485 @@ mod tests {
 
     // -------- end analysis storage --------
 
+    // -------- synced lyrics storage --------
+
+    fn sample_synced_lyrics() -> SyncedLyrics {
+        SyncedLyrics {
+            lines: vec![
+                SyncedLyricsLine {
+                    at_ms: 1_000,
+                    text: "Hello".to_owned(),
+                },
+                SyncedLyricsLine {
+                    at_ms: 3_500,
+                    text: "World".to_owned(),
+                },
+            ],
+        }
+    }
+
+    fn run_record_and_load_synced_lyrics_round_trips(store: &dyn LibraryStore) {
+        let t = track(1, "a.flac");
+        store.save_track(t.clone()).expect("save");
+        let lyrics = sample_synced_lyrics();
+        store
+            .record_synced_lyrics(t.id, &lyrics, "lrclib")
+            .expect("record");
+
+        let loaded = store
+            .load_synced_lyrics(t.id)
+            .expect("load")
+            .expect("present");
+        assert_eq!(loaded.lyrics, lyrics);
+        assert_eq!(loaded.source, "lrclib");
+    }
+
+    #[test]
+    fn sqlite_record_and_load_synced_lyrics_round_trips() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open");
+        run_record_and_load_synced_lyrics_round_trips(&store);
+    }
+
+    #[test]
+    fn in_memory_record_and_load_synced_lyrics_round_trips() {
+        run_record_and_load_synced_lyrics_round_trips(&InMemoryLibraryStore::new());
+    }
+
+    fn run_record_synced_lyrics_replaces_previous(store: &dyn LibraryStore) {
+        let t = track(1, "a.flac");
+        store.save_track(t.clone()).expect("save");
+        store
+            .record_synced_lyrics(t.id, &sample_synced_lyrics(), "lrclib")
+            .expect("first");
+        let replacement = SyncedLyrics {
+            lines: vec![SyncedLyricsLine {
+                at_ms: 500,
+                text: "Only".to_owned(),
+            }],
+        };
+        store
+            .record_synced_lyrics(t.id, &replacement, "user")
+            .expect("second");
+
+        let loaded = store
+            .load_synced_lyrics(t.id)
+            .expect("load")
+            .expect("present");
+        assert_eq!(loaded.lyrics, replacement);
+        assert_eq!(loaded.source, "user");
+    }
+
+    #[test]
+    fn sqlite_record_synced_lyrics_replaces_previous() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open");
+        run_record_synced_lyrics_replaces_previous(&store);
+    }
+
+    #[test]
+    fn in_memory_record_synced_lyrics_replaces_previous() {
+        run_record_synced_lyrics_replaces_previous(&InMemoryLibraryStore::new());
+    }
+
+    fn run_record_synced_lyrics_empty_is_no_op(store: &dyn LibraryStore) {
+        let t = track(1, "a.flac");
+        store.save_track(t.clone()).expect("save");
+        store
+            .record_synced_lyrics(t.id, &sample_synced_lyrics(), "lrclib")
+            .expect("seed");
+        store
+            .record_synced_lyrics(t.id, &SyncedLyrics::default(), "noop")
+            .expect("no-op write");
+
+        let loaded = store
+            .load_synced_lyrics(t.id)
+            .expect("load")
+            .expect("present");
+        assert_eq!(loaded.source, "lrclib");
+        assert_eq!(loaded.lyrics, sample_synced_lyrics());
+    }
+
+    #[test]
+    fn sqlite_record_synced_lyrics_empty_is_no_op() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open");
+        run_record_synced_lyrics_empty_is_no_op(&store);
+    }
+
+    #[test]
+    fn in_memory_record_synced_lyrics_empty_is_no_op() {
+        run_record_synced_lyrics_empty_is_no_op(&InMemoryLibraryStore::new());
+    }
+
+    fn run_clear_synced_lyrics_removes_row(store: &dyn LibraryStore) {
+        let t = track(1, "a.flac");
+        store.save_track(t.clone()).expect("save");
+        store
+            .record_synced_lyrics(t.id, &sample_synced_lyrics(), "lrclib")
+            .expect("seed");
+        store.clear_synced_lyrics(t.id).expect("clear");
+        assert_eq!(store.load_synced_lyrics(t.id), Ok(None));
+        // Clearing again is a no-op.
+        store.clear_synced_lyrics(t.id).expect("clear again");
+    }
+
+    #[test]
+    fn sqlite_clear_synced_lyrics_removes_row() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open");
+        run_clear_synced_lyrics_removes_row(&store);
+    }
+
+    #[test]
+    fn in_memory_clear_synced_lyrics_removes_row() {
+        run_clear_synced_lyrics_removes_row(&InMemoryLibraryStore::new());
+    }
+
+    #[test]
+    fn sqlite_cascade_delete_clears_synced_lyrics() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open");
+        let t = track(1, "a.flac");
+        store.save_track(t.clone()).expect("save");
+        store
+            .record_synced_lyrics(t.id, &sample_synced_lyrics(), "lrclib")
+            .expect("seed");
+        store.delete_track(t.id).expect("delete");
+        assert_eq!(store.load_synced_lyrics(t.id), Ok(None));
+    }
+
+    #[test]
+    fn stored_synced_lyrics_equality_is_well_defined() {
+        let s = StoredSyncedLyrics {
+            lyrics: sample_synced_lyrics(),
+            source: "lrclib".to_owned(),
+        };
+        assert_eq!(s.clone(), s);
+    }
+
+    // -------- end synced lyrics storage --------
+
+    // -------- online status storage --------
+
+    fn online_ctx(now_unix: i64) -> OnlineContext {
+        OnlineContext {
+            provider_version: 1,
+            now_unix,
+        }
+    }
+
+    fn run_record_online_attempt_marks_only_requested_capabilities(store: &dyn LibraryStore) {
+        let t = track(1, "a.flac");
+        store.save_track(t.clone()).expect("save");
+
+        // Lyrics-only attempt.
+        store
+            .record_online_attempt(
+                t.id,
+                OnlineCapabilities {
+                    artwork: false,
+                    tags: false,
+                    lyrics: true,
+                },
+                online_ctx(1_700_000_000),
+            )
+            .expect("record lyrics");
+
+        // Should drop out of "needs lyrics" but still appear in
+        // "needs artwork" — artwork was never stamped.
+        let needs_lyrics = store
+            .tracks_needing_online(
+                OnlineCapabilities {
+                    artwork: false,
+                    tags: false,
+                    lyrics: true,
+                },
+                1,
+                10,
+            )
+            .expect("query");
+        assert!(needs_lyrics.is_empty(), "lyrics attempt should be recorded");
+
+        let needs_artwork = store
+            .tracks_needing_online(
+                OnlineCapabilities {
+                    artwork: true,
+                    tags: false,
+                    lyrics: false,
+                },
+                1,
+                10,
+            )
+            .expect("query");
+        assert_eq!(
+            needs_artwork,
+            vec![t.id],
+            "artwork attempt was not requested"
+        );
+    }
+
+    #[test]
+    fn sqlite_record_online_attempt_marks_only_requested_capabilities() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open");
+        run_record_online_attempt_marks_only_requested_capabilities(&store);
+    }
+
+    #[test]
+    fn in_memory_record_online_attempt_marks_only_requested_capabilities() {
+        run_record_online_attempt_marks_only_requested_capabilities(&InMemoryLibraryStore::new());
+    }
+
+    fn run_online_attempts_partial_capability_preserves_other(store: &dyn LibraryStore) {
+        let t = track(1, "a.flac");
+        store.save_track(t.clone()).expect("save");
+
+        store
+            .record_online_attempt(
+                t.id,
+                OnlineCapabilities {
+                    artwork: true,
+                    tags: false,
+                    lyrics: false,
+                },
+                online_ctx(1_000),
+            )
+            .expect("record artwork");
+        store
+            .record_online_attempt(
+                t.id,
+                OnlineCapabilities {
+                    artwork: false,
+                    tags: false,
+                    lyrics: true,
+                },
+                online_ctx(2_000),
+            )
+            .expect("record lyrics");
+
+        // Both artwork + lyrics attempts must be recorded; tags is
+        // still pending.
+        let needs = store
+            .tracks_needing_online(OnlineCapabilities::all(), 1, 10)
+            .expect("query");
+        assert_eq!(needs, vec![t.id], "tags is still un-attempted");
+
+        let needs_artwork = store
+            .tracks_needing_online(
+                OnlineCapabilities {
+                    artwork: true,
+                    tags: false,
+                    lyrics: false,
+                },
+                1,
+                10,
+            )
+            .expect("query");
+        let needs_lyrics = store
+            .tracks_needing_online(
+                OnlineCapabilities {
+                    artwork: false,
+                    tags: false,
+                    lyrics: true,
+                },
+                1,
+                10,
+            )
+            .expect("query");
+        assert!(needs_artwork.is_empty());
+        assert!(needs_lyrics.is_empty());
+    }
+
+    #[test]
+    fn sqlite_online_attempts_partial_capability_preserves_other() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open");
+        run_online_attempts_partial_capability_preserves_other(&store);
+    }
+
+    #[test]
+    fn in_memory_online_attempts_partial_capability_preserves_other() {
+        run_online_attempts_partial_capability_preserves_other(&InMemoryLibraryStore::new());
+    }
+
+    fn run_online_query_skips_missing_tracks(store: &dyn LibraryStore) {
+        let present = track(1, "present.flac");
+        let mut missing = track(2, "missing.flac");
+        missing.location = missing
+            .location
+            .with_availability(sustain_domain::TrackAvailability::Missing);
+        for t in [&present, &missing] {
+            store.save_track(t.clone()).expect("save");
+        }
+        let needs = store
+            .tracks_needing_online(OnlineCapabilities::all(), 1, 10)
+            .expect("query");
+        assert_eq!(needs, vec![present.id]);
+    }
+
+    #[test]
+    fn sqlite_online_query_skips_missing_tracks() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open");
+        run_online_query_skips_missing_tracks(&store);
+    }
+
+    #[test]
+    fn in_memory_online_query_skips_missing_tracks() {
+        run_online_query_skips_missing_tracks(&InMemoryLibraryStore::new());
+    }
+
+    fn run_online_query_invalidates_stale_provider_version(store: &dyn LibraryStore) {
+        let t = track(1, "a.flac");
+        store.save_track(t.clone()).expect("save");
+        store
+            .record_online_attempt(
+                t.id,
+                OnlineCapabilities {
+                    artwork: false,
+                    tags: false,
+                    lyrics: true,
+                },
+                OnlineContext {
+                    provider_version: 1,
+                    now_unix: 1_000,
+                },
+            )
+            .expect("record");
+
+        // Same version: track is satisfied.
+        assert!(
+            store
+                .tracks_needing_online(
+                    OnlineCapabilities {
+                        artwork: false,
+                        tags: false,
+                        lyrics: true,
+                    },
+                    1,
+                    10,
+                )
+                .expect("query")
+                .is_empty()
+        );
+
+        // Newer version: track re-qualifies.
+        assert_eq!(
+            store
+                .tracks_needing_online(
+                    OnlineCapabilities {
+                        artwork: false,
+                        tags: false,
+                        lyrics: true,
+                    },
+                    2,
+                    10,
+                )
+                .expect("query"),
+            vec![t.id]
+        );
+    }
+
+    #[test]
+    fn sqlite_online_query_invalidates_stale_provider_version() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open");
+        run_online_query_invalidates_stale_provider_version(&store);
+    }
+
+    #[test]
+    fn in_memory_online_query_invalidates_stale_provider_version() {
+        run_online_query_invalidates_stale_provider_version(&InMemoryLibraryStore::new());
+    }
+
+    fn run_online_query_excludes_tracks_with_embedded_artwork(store: &dyn LibraryStore) {
+        let mut with_art = track(1, "with_art.flac");
+        with_art.has_embedded_artwork = Some(true);
+        let mut without_art = track(2, "without_art.flac");
+        without_art.has_embedded_artwork = Some(false);
+        let unknown = track(3, "unknown.flac"); // has_embedded_artwork = None
+        for t in [&with_art, &without_art, &unknown] {
+            store.save_track(t.clone()).expect("save");
+        }
+        // Artwork-only request: the seeded picture excludes id 1; ids 2 and 3
+        // (false and "never scanned") remain candidates.
+        let mut needs = store
+            .tracks_needing_online(
+                OnlineCapabilities {
+                    artwork: true,
+                    tags: false,
+                    lyrics: false,
+                },
+                1,
+                10,
+            )
+            .expect("query");
+        needs.sort();
+        assert_eq!(needs, vec![without_art.id, unknown.id]);
+
+        // Lyrics-only request: the artwork bit is irrelevant, so all three
+        // tracks remain candidates.
+        let mut needs_lyrics = store
+            .tracks_needing_online(
+                OnlineCapabilities {
+                    artwork: false,
+                    tags: false,
+                    lyrics: true,
+                },
+                1,
+                10,
+            )
+            .expect("query");
+        needs_lyrics.sort();
+        assert_eq!(needs_lyrics, vec![with_art.id, without_art.id, unknown.id]);
+    }
+
+    #[test]
+    fn sqlite_online_query_excludes_tracks_with_embedded_artwork() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open");
+        run_online_query_excludes_tracks_with_embedded_artwork(&store);
+    }
+
+    #[test]
+    fn in_memory_online_query_excludes_tracks_with_embedded_artwork() {
+        run_online_query_excludes_tracks_with_embedded_artwork(&InMemoryLibraryStore::new());
+    }
+
+    #[test]
+    fn empty_online_capabilities_record_is_no_op() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open");
+        let t = track(1, "a.flac");
+        store.save_track(t.clone()).expect("save");
+        store
+            .record_online_attempt(t.id, OnlineCapabilities::none(), online_ctx(1_000))
+            .expect("no-op");
+        // No row → track still appears in any non-empty query.
+        let needs = store
+            .tracks_needing_online(OnlineCapabilities::all(), 1, 10)
+            .expect("query");
+        assert_eq!(needs, vec![t.id]);
+    }
+
+    #[test]
+    fn sqlite_cascade_delete_clears_online_status() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open");
+        let t = track(1, "a.flac");
+        store.save_track(t.clone()).expect("save");
+        store
+            .record_online_attempt(
+                t.id,
+                OnlineCapabilities {
+                    artwork: false,
+                    tags: false,
+                    lyrics: true,
+                },
+                online_ctx(1_000),
+            )
+            .expect("record");
+        store.delete_track(t.id).expect("delete");
+        // Re-add and query — the cascading delete must have dropped
+        // the bookkeeping row, so the track qualifies again.
+        store.save_track(t.clone()).expect("re-save");
+        let needs = store
+            .tracks_needing_online(OnlineCapabilities::all(), 1, 10)
+            .expect("query");
+        assert_eq!(needs, vec![t.id]);
+    }
+
+    // -------- end online status storage --------
+
     fn track(id: i64, path: &str) -> Track {
         Track {
             id: track_id(id),
@@ -2099,6 +2792,7 @@ mod tests {
             rating: Rating::unrated(),
             statistics: PlayStatistics::default(),
             file_size_bytes: None,
+            has_embedded_artwork: None,
         }
     }
 

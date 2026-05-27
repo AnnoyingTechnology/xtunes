@@ -40,6 +40,14 @@ use sustain_settings::SettingsStore;
 pub mod analysis_scheduler;
 pub use analysis_scheduler::SchedulerProgress as AnalysisProgress;
 
+/// Watermark stamped into `track_online_status.provider_version` so a
+/// future incompatible change to the online-retrieval pipeline (a
+/// different provider, a corrected matching heuristic) can invalidate
+/// previously-attempted rows without a migration. Bumped centrally,
+/// not per-provider; the scheduler doesn't read it for anything other
+/// than the bookkeeping write.
+pub const ONLINE_PROVIDER_VERSION: u32 = 1;
+
 pub(crate) mod artwork_fetcher;
 mod commands;
 mod library_mutation;
@@ -47,6 +55,8 @@ mod library_scan;
 pub mod managed_library;
 pub(crate) mod metadata_writer;
 pub mod notifications;
+pub mod online_scheduler;
+pub use online_scheduler::SchedulerProgress as OnlineProgress;
 mod playback;
 mod playlist_folders;
 mod playlist_items;
@@ -239,6 +249,17 @@ pub struct ApplicationRuntime {
     analysis_scheduler: Option<analysis_scheduler::AnalysisScheduler>,
     analysis_progress_sink: Option<async_channel::Sender<analysis_scheduler::SchedulerProgress>>,
     analysis_notification_id: Option<NotificationId>,
+    online_scheduler: Option<online_scheduler::OnlineScheduler>,
+    online_progress_sink: Option<async_channel::Sender<online_scheduler::SchedulerProgress>>,
+    online_notification_id: Option<NotificationId>,
+    // Channel handed to background workers that mutate the persisted
+    // copy of a track behind the runtime's back (analysis fills BPM /
+    // key, online lyrics/tags writes a row). Workers push the touched
+    // `TrackId`; the UI shell drains the channel on the main loop and
+    // calls [`Self::apply_track_updated`], which reloads the row from
+    // the library store, replaces it in `library_tracks`, and fires
+    // [`Self::track_data_observer`] so visible widgets repaint.
+    track_updated_sink: Option<async_channel::Sender<TrackId>>,
     clock: Arc<dyn Clock>,
     notifications: NotificationCenter,
     // Fires after every push/dismiss/expire on `notifications`. Set by
@@ -253,6 +274,11 @@ pub struct ApplicationRuntime {
     // installs this once to drive its narrow per-row icon refresh —
     // see the design note on [`TrackAvailabilityObserver`].
     track_availability_observer: Option<TrackAvailabilityObserver>,
+    // Fires from [`Self::apply_track_updated`] after the in-memory
+    // copy of a single track has been refreshed from the library
+    // store. The UI shell installs this once to drive its targeted
+    // per-row refresh — see [`TrackDataObserver`].
+    track_data_observer: Option<TrackDataObserver>,
 }
 
 /// Callback fired after every mutation of [`NotificationCenter`]. Held
@@ -269,6 +295,15 @@ pub type NotificationObserver = Box<dyn Fn()>;
 /// when this fires; observers must defer their work onto the main
 /// loop (e.g. `glib::idle_add_local_once`).
 pub type TrackAvailabilityObserver = Box<dyn Fn()>;
+
+/// Callback fired after [`ApplicationRuntime::apply_track_updated`]
+/// has refreshed a single track in `library_tracks` from the library
+/// store. The UI shell uses this to drive its narrow per-row repaint
+/// (analogous to [`TrackAvailabilityObserver`] but scoped to a
+/// specific id). Same re-entrancy contract as the other observers:
+/// the runtime is mid-borrow when this fires, so the closure must
+/// defer back-into-runtime work onto the main loop.
+pub type TrackDataObserver = Box<dyn Fn(TrackId)>;
 
 impl ApplicationRuntime {
     pub fn new() -> Self {
@@ -303,10 +338,15 @@ impl ApplicationRuntime {
             analysis_scheduler: None,
             analysis_progress_sink: None,
             analysis_notification_id: None,
+            online_scheduler: None,
+            online_progress_sink: None,
+            online_notification_id: None,
+            track_updated_sink: None,
             clock: Arc::new(SystemClock),
             notifications: NotificationCenter::new(),
             notification_observer: None,
             track_availability_observer: None,
+            track_data_observer: None,
         }
     }
 
@@ -317,13 +357,17 @@ impl ApplicationRuntime {
             .load_settings()
             .map_err(|_| ApplicationRuntimeError::SettingsLoadFailed)?;
 
+        let initial_playback_queue = PlaybackQueue::empty(PlaybackOptions {
+            shuffle_enabled: settings.playback.shuffle_enabled,
+            repeat_mode: RepeatMode::Off,
+        });
         Ok(Self {
             settings,
             settings_store: Some(settings_store),
             library_store: None,
             metadata_service: None,
             playback_service: None,
-            playback_queue: PlaybackQueue::default(),
+            playback_queue: initial_playback_queue,
             playback_session: None,
             library_tracks: Vec::new(),
             playlists: Vec::new(),
@@ -348,10 +392,15 @@ impl ApplicationRuntime {
             analysis_scheduler: None,
             analysis_progress_sink: None,
             analysis_notification_id: None,
+            online_scheduler: None,
+            online_progress_sink: None,
+            online_notification_id: None,
+            track_updated_sink: None,
             clock: Arc::new(SystemClock),
             notifications: NotificationCenter::new(),
             notification_observer: None,
             track_availability_observer: None,
+            track_data_observer: None,
         })
     }
 
@@ -521,10 +570,20 @@ impl ApplicationRuntime {
             }
         });
 
+        let track_updated =
+            self.track_updated_sink
+                .clone()
+                .map(|sender| -> analysis_scheduler::TrackUpdatedSink {
+                    Arc::new(move |track_id| {
+                        let _ = sender.try_send(track_id);
+                    })
+                });
+
         let scheduler = analysis_scheduler::AnalysisScheduler::start(
             analysis_scheduler::AnalysisSchedulerConfig {
                 analyzer,
                 progress,
+                track_updated,
                 clock,
                 library_store,
                 initial_settings: self.settings.analysis,
@@ -605,6 +664,130 @@ impl ApplicationRuntime {
 
     pub(crate) fn analysis_scheduler(&self) -> Option<&analysis_scheduler::AnalysisScheduler> {
         self.analysis_scheduler.as_ref()
+    }
+
+    /// Spin up the background online scheduler against the previously
+    /// installed library store, metadata service, and remote service.
+    /// Mirrors [`Self::start_analysis_scheduler`]: the scheduler
+    /// observes the current `OnlineSettings` (`artwork` / `tags` /
+    /// `lyrics` tickboxes) and library root, and toggling either
+    /// through the settings command path automatically propagates to
+    /// the worker. Returns
+    /// [`ApplicationRuntimeError::LibraryServicesUnavailable`] if a
+    /// dependency is missing.
+    pub fn start_online_scheduler(&mut self) -> ApplicationRuntimeResult<()> {
+        let library_store = self
+            .library_store
+            .clone()
+            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
+        let metadata_service = self
+            .metadata_service
+            .clone()
+            .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
+        let remote_service = self
+            .remote_metadata_service
+            .clone()
+            .ok_or(ApplicationRuntimeError::ArtworkFetchingUnavailable)?;
+
+        let clock: online_scheduler::UnixClockFn = Arc::new(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+        });
+
+        let progress_sink = self.online_progress_sink.clone();
+        let progress: online_scheduler::ProgressSink = Arc::new(move |progress| {
+            if let Some(sender) = &progress_sink {
+                let _ = sender.try_send(progress);
+            }
+        });
+        let track_updated =
+            self.track_updated_sink
+                .clone()
+                .map(|sender| -> online_scheduler::TrackUpdatedSink {
+                    Arc::new(move |track_id| {
+                        let _ = sender.try_send(track_id);
+                    })
+                });
+
+        let scheduler =
+            online_scheduler::OnlineScheduler::start(online_scheduler::OnlineSchedulerConfig {
+                remote_service,
+                metadata_service,
+                library_store,
+                progress,
+                track_updated,
+                clock,
+                initial_settings: self.settings.online,
+                library_path: self.settings.library.path.clone(),
+                provider_version: ONLINE_PROVIDER_VERSION,
+            });
+        self.online_scheduler = Some(scheduler);
+        Ok(())
+    }
+
+    /// Register the async-channel sink that receives [`OnlineProgress`]
+    /// events. The UI typically holds the matching receiver and
+    /// forwards each event into [`Self::apply_online_progress`] from
+    /// the GTK main loop.
+    pub fn set_online_progress_sink(
+        &mut self,
+        sink: async_channel::Sender<online_scheduler::SchedulerProgress>,
+    ) {
+        self.online_progress_sink = Some(sink);
+    }
+
+    /// Drop the scheduler's sender and join its worker. Safe at app
+    /// shutdown; idempotent across calls.
+    pub fn shutdown_online_scheduler(&mut self) {
+        if let Some(id) = self.online_notification_id.take() {
+            self.dismiss_notification(id);
+        }
+        if let Some(scheduler) = self.online_scheduler.take() {
+            scheduler.shutdown();
+        }
+    }
+
+    /// Apply an [`OnlineProgress`] event to the notification center.
+    /// Symmetric to [`Self::apply_analysis_progress`].
+    pub fn apply_online_progress(&mut self, progress: online_scheduler::SchedulerProgress) {
+        match progress {
+            online_scheduler::SchedulerProgress::Tick {
+                completed,
+                failed: _,
+                remaining,
+            } => {
+                let body = notifications::online_background_running_text(completed, remaining);
+                if let Some(existing) = self.online_notification_id {
+                    self.update_notification_body(existing, body);
+                } else {
+                    let id = self.push_persistent_notification(
+                        NotificationCategory::OnlineBackground,
+                        NotificationSeverity::Info,
+                        body,
+                        false,
+                    );
+                    self.online_notification_id = Some(id);
+                }
+            }
+            online_scheduler::SchedulerProgress::Idle { completed, failed } => {
+                if let Some(id) = self.online_notification_id.take() {
+                    self.dismiss_notification(id);
+                }
+                if completed > 0 || failed > 0 {
+                    self.push_ephemeral_notification(
+                        NotificationCategory::OnlineBackground,
+                        NotificationSeverity::Info,
+                        notifications::online_background_outcome_text(completed, failed),
+                    );
+                }
+            }
+        }
+    }
+
+    pub(crate) fn online_scheduler(&self) -> Option<&online_scheduler::OnlineScheduler> {
+        self.online_scheduler.as_ref()
     }
 
     pub(crate) fn artwork_fetcher(&self) -> Option<&artwork_fetcher::ArtworkFetcher> {
@@ -803,6 +986,62 @@ impl ApplicationRuntime {
         }
     }
 
+    /// Install the channel sender background workers use to announce
+    /// that a single track's persisted state has changed under us
+    /// (analysis filled BPM, online lyrics/tags wrote a row, etc.).
+    /// The UI shell holds the matching receiver and forwards each id
+    /// into [`Self::apply_track_updated`] on the main loop.
+    pub fn set_track_updated_sink(&mut self, sink: async_channel::Sender<TrackId>) {
+        self.track_updated_sink = Some(sink);
+    }
+
+    /// Install the observer fired by [`Self::apply_track_updated`].
+    /// The observer must not synchronously re-enter the runtime —
+    /// same contract as [`Self::set_track_availability_observer`].
+    pub fn set_track_data_observer(&mut self, observer: TrackDataObserver) {
+        self.track_data_observer = Some(observer);
+    }
+
+    /// Reload the named track from the library store, replace its
+    /// entry in `library_tracks` (preserving sort order: the vec is
+    /// kept sorted by id and we never reorder), and fire the
+    /// `track_data_observer` so visible widgets can repaint just
+    /// that row. No-op when the track has vanished from the store
+    /// between push and drain — the next library_changed pass will
+    /// pick up the deletion.
+    pub fn apply_track_updated(&mut self, track_id: TrackId) {
+        let Some(store) = self.library_store.as_deref() else {
+            return;
+        };
+        let refreshed = match store
+            .tracks()
+            .ok()
+            .and_then(|tracks| tracks.into_iter().find(|track| track.id == track_id))
+        {
+            Some(track) => track,
+            None => return,
+        };
+        if let Some(slot) = self
+            .library_tracks
+            .iter_mut()
+            .find(|track| track.id == track_id)
+        {
+            *slot = refreshed;
+        } else {
+            // Track became visible to the store between the original
+            // load and now. Insert in id-sort order so the slice
+            // contract holds.
+            let insertion = self
+                .library_tracks
+                .binary_search_by_key(&track_id, |track| track.id)
+                .unwrap_or_else(|index| index);
+            self.library_tracks.insert(insertion, refreshed);
+        }
+        if let Some(observer) = &self.track_data_observer {
+            observer(track_id);
+        }
+    }
+
     pub fn playback_state(&self) -> PlaybackState {
         self.playback_service
             .as_deref()
@@ -866,6 +1105,23 @@ impl ApplicationRuntime {
             return Ok(());
         }
         self.settings.playback.volume = volume;
+        if let Some(store) = self.settings_store.as_ref() {
+            store
+                .save_settings(self.settings.clone())
+                .map_err(|_| ApplicationRuntimeError::SettingsSaveFailed)?;
+        }
+        Ok(())
+    }
+
+    /// Mirror the current playback queue's shuffle flag into the persisted
+    /// user settings. Called from the shuffle command handler so the choice
+    /// survives a restart, the same way [`Self::save_playback_volume`] does.
+    pub(crate) fn persist_playback_shuffle(&mut self) -> ApplicationRuntimeResult<()> {
+        let shuffle_enabled = self.playback_queue.options().shuffle_enabled;
+        if self.settings.playback.shuffle_enabled == shuffle_enabled {
+            return Ok(());
+        }
+        self.settings.playback.shuffle_enabled = shuffle_enabled;
         if let Some(store) = self.settings_store.as_ref() {
             store
                 .save_settings(self.settings.clone())
@@ -2089,6 +2345,7 @@ mod tests {
             rating: Rating::unrated(),
             statistics: PlayStatistics::default(),
             file_size_bytes: None,
+            has_embedded_artwork: None,
         };
         assert_eq!(store.save_track(track), Ok(()));
 
@@ -2139,6 +2396,41 @@ mod tests {
                 repeat_mode: RepeatMode::Off,
             }
         );
+    }
+
+    #[test]
+    fn runtime_persists_shuffle_toggle_to_settings_store() {
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::default()),
+        ))
+        .expect("load settings from test store");
+
+        assert!(!runtime.settings().playback.shuffle_enabled);
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle)),
+            Ok(())
+        );
+        assert!(runtime.settings().playback.shuffle_enabled);
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(
+                PlaybackCommand::SetShuffleEnabled(false)
+            )),
+            Ok(())
+        );
+        assert!(!runtime.settings().playback.shuffle_enabled);
+    }
+
+    #[test]
+    fn runtime_restores_persisted_shuffle_at_startup() {
+        let mut initial_settings = UserSettings::default();
+        initial_settings.playback.shuffle_enabled = true;
+        let runtime = ApplicationRuntime::with_settings_store(Box::new(TestSettingsStore::new(
+            initial_settings,
+        )))
+        .expect("load settings from test store");
+
+        assert!(runtime.playback_options().shuffle_enabled);
     }
 
     #[test]
@@ -4084,6 +4376,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn apply_track_updated_reloads_from_store_and_fires_observer() {
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+        std::fs::write(root.join("a.flac"), b"audio").expect("write a");
+
+        let store: Arc<dyn LibraryStore> = Arc::new(InMemoryLibraryStore::new());
+        let mut original = test_track(track_id(1), "a.flac");
+        original.metadata.title = Some("Before".to_owned());
+        store.save_track(original.clone()).expect("seed");
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(root.clone()))),
+        ))
+        .expect("load settings")
+        .with_library_services(store.clone(), Arc::new(TestMetadataService))
+        .expect("library services initialize");
+
+        // The in-memory library copy starts with the seeded value.
+        assert_eq!(
+            runtime
+                .library_tracks()
+                .iter()
+                .find(|track| track.id == track_id(1))
+                .and_then(|t| t.metadata.title.as_deref()),
+            Some("Before")
+        );
+
+        // Mutate the store out-of-band (simulates a worker write).
+        let mut mutated = original.clone();
+        mutated.metadata.title = Some("After".to_owned());
+        store.save_track(mutated).expect("mutate");
+
+        // Hook the observer so we can prove it ran with the right id.
+        let observed: Arc<std::sync::Mutex<Vec<TrackId>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_clone = observed.clone();
+        runtime.set_track_data_observer(Box::new(move |id| {
+            observed_clone.lock().expect("lock").push(id);
+        }));
+
+        runtime.apply_track_updated(track_id(1));
+
+        assert_eq!(
+            runtime
+                .library_tracks()
+                .iter()
+                .find(|track| track.id == track_id(1))
+                .and_then(|t| t.metadata.title.as_deref()),
+            Some("After"),
+            "in-memory copy must be refreshed from the store"
+        );
+        assert_eq!(observed.lock().expect("lock").as_slice(), &[track_id(1)]);
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
     fn test_track(track_id: TrackId, path: &str) -> Track {
         Track {
             id: track_id,
@@ -4093,6 +4442,7 @@ mod tests {
             rating: Rating::unrated(),
             statistics: PlayStatistics::default(),
             file_size_bytes: None,
+            has_embedded_artwork: None,
         }
     }
 

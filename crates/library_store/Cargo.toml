@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 rusqlite = { version = "0.39.0", features = ["bundled"] }
+serde_json = "1.0.150"
 sustain-domain = { path = "../domain" }
 
 [lints]

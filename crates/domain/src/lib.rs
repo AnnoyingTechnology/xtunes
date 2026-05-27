@@ -20,6 +20,7 @@ mod smart_playlist;
 mod smart_playlist_defaults;
 mod smart_playlist_evaluation;
 mod statistics;
+mod synced_lyrics;
 mod track;
 mod track_column_layout;
 mod waveform;
@@ -53,6 +54,7 @@ pub use smart_playlist::{
 pub use smart_playlist_defaults::default_smart_playlists;
 pub use smart_playlist_evaluation::{matching_tracks, track_matches_rule, track_matches_rule_set};
 pub use statistics::PlayStatistics;
+pub use synced_lyrics::{SyncedLyrics, SyncedLyricsLine};
 pub use track::{Track, TrackAvailability, TrackContentHash, TrackLocation, TrackRelativePath};
 pub use track_column_layout::{TrackColumnEntry, TrackColumnLayout, TrackColumnLayoutScope};
 pub use waveform::{

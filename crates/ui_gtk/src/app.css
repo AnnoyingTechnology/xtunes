@@ -311,8 +311,14 @@ button.preferences-tab-button:checked {
     opacity: 0.55;
 }
 
+/* The inner `listview.playlist-sidebar-list` is not given an explicit
+   background, so it shows GTK's default `@theme_base_color`. Painting the
+   same color on the sidebar Box keeps the upper zone (LIBRARY label,
+   Music row, PLAYLISTS label) visually contiguous with the scrolling
+   playlist list below — otherwise the two regions render in different
+   shades and the upper zone looks like a separate header band. */
 .playlist-sidebar {
-    background-color: mix(@theme_bg_color, black, 0.10);
+    background-color: @theme_base_color;
     border-right: 1px solid alpha(@theme_fg_color, 0.12);
 }
 
@@ -599,11 +605,29 @@ popover.compact-context-menu > contents {
 /* Adwaita gives every `listview > row` ~8px vertical padding and a 32px
    minimum height, which pads our sidebar rows well past anything we set on
    the inner Box. Strip both so the row's geometry is driven purely by
-   .playlist-sidebar-row and the icon/label inside. */
+   .playlist-sidebar-row and the icon/label inside.
+   Adwaita also paints `listview` (and its enclosing `scrolledwindow`)
+   with their own opaque background, which renders the scrolling
+   playlist area as a separate "card" sitting on top of `.playlist-sidebar`.
+   We strip those backgrounds so the sidebar's own colour shows through
+   uniformly — no seam between the upper LIBRARY/Music/PLAYLISTS strip and
+   the playlist list below. */
 .playlist-sidebar-list,
 .playlist-sidebar-list > row {
     padding: 0;
     min-height: 0;
+}
+
+.playlist-sidebar scrolledwindow,
+listview.playlist-sidebar-list,
+listview.playlist-sidebar-list > row,
+listview.playlist-sidebar-list > row:hover,
+listview.playlist-sidebar-list > row:active,
+listview.playlist-sidebar-list > row:focus {
+    background: none;
+    background-color: transparent;
+    background-image: none;
+    border: none;
 }
 
 /* The rename Entry inherits Adwaita's standard ~32px entry chrome. Even

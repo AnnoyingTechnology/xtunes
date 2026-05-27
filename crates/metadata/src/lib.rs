@@ -49,6 +49,17 @@ pub trait MetadataService: Send + Sync {
     fn write_rating(&self, path: &Path, rating: Rating) -> MetadataResult<()>;
     fn read_artwork(&self, path: &Path) -> MetadataResult<Option<Vec<u8>>>;
     fn write_artwork(&self, path: &Path, artwork: Option<Vec<u8>>) -> MetadataResult<()>;
+
+    /// Cheaper-than-[`Self::read_artwork`] probe: returns whether
+    /// the file carries at least one embedded picture, without
+    /// copying the bytes. Used at scan time so the
+    /// `has_embedded_artwork` column on `tracks` can be populated in
+    /// the same pass. Default implementation falls back to
+    /// `read_artwork(path)?.is_some()`; implementations that can
+    /// answer without decoding the picture payload should override.
+    fn has_embedded_artwork(&self, path: &Path) -> MetadataResult<bool> {
+        Ok(self.read_artwork(path)?.is_some())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,6 +68,11 @@ pub struct ScannedTrack {
     pub metadata: TrackMetadata,
     pub rating: Rating,
     pub file_size_bytes: Option<u64>,
+    /// True when the file's tag carried at least one embedded picture
+    /// (any `PictureType`). Captured at scan time so the online
+    /// artwork retriever can filter candidates with a SQL predicate
+    /// instead of re-probing every file on every cycle.
+    pub has_embedded_artwork: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -193,11 +209,20 @@ where
                 return;
             }
         };
+        // Probe at scan time so the online artwork scheduler can use
+        // a SQL predicate instead of re-opening the file per pass. A
+        // probe failure here is not fatal — treat it as "unknown,
+        // assume no artwork" so the scheduler may still try to fetch.
+        let has_embedded_artwork = self
+            .metadata_service
+            .has_embedded_artwork(&path)
+            .unwrap_or(false);
         scan.tracks.push(ScannedTrack {
             relative_path,
             metadata,
             rating,
             file_size_bytes: Some(file_size_bytes),
+            has_embedded_artwork,
         });
     }
 }
@@ -347,6 +372,18 @@ impl MetadataService for LoftyMetadataService {
             .get_picture_type(PictureType::CoverFront)
             .or_else(|| tag.pictures().first());
         Ok(picture.map(|picture| picture.data().to_vec()))
+    }
+
+    fn has_embedded_artwork(&self, path: &Path) -> MetadataResult<bool> {
+        audio_format_from_path(path)?;
+        let tagged_file = lofty::read_from_path(path).map_err(|_| MetadataError::ReadFailed)?;
+        let Some(tag) = tagged_file
+            .primary_tag()
+            .or_else(|| tagged_file.first_tag())
+        else {
+            return Ok(false);
+        };
+        Ok(!tag.pictures().is_empty())
     }
 
     fn write_artwork(&self, path: &Path, artwork: Option<Vec<u8>>) -> MetadataResult<()> {

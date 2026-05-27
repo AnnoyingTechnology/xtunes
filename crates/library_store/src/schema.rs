@@ -42,7 +42,14 @@ CREATE TABLE IF NOT EXISTS tracks (
     channels INTEGER,
     lyrics TEXT,
     content_hash TEXT,
-    file_size_bytes INTEGER
+    file_size_bytes INTEGER,
+    -- Scan-time "does the file carry an embedded picture?" bit.
+    -- NULL means the scanner has not observed this file yet (a row
+    -- imported from an external source before any scan); 0/1 reflect
+    -- the most recent scan. The online artwork scheduler reads this
+    -- column directly in its candidate query and never re-probes the
+    -- file at attempt time.
+    has_embedded_artwork INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS tracks_content_hash_idx
@@ -157,6 +164,36 @@ CREATE TABLE IF NOT EXISTS track_waveform (
     detail_segment_duration_ms  REAL    NOT NULL,
     detail_segments             BLOB    NOT NULL
 );
+
+-- Time-coded lyrics. Plain lyrics live on tracks.lyrics (mirrored to
+-- the file's standard Lyrics tag); synced lyrics are kept separately
+-- because no cross-format tag exists for them and they are heavier
+-- (a typical LRC parses to ~5 KB of JSON, larger for verbose songs).
+-- Storing the parsed JSON form rather than the raw LRC string lets
+-- the player iterate lines without re-parsing on every load.
+CREATE TABLE IF NOT EXISTS track_synced_lyrics (
+    track_id INTEGER PRIMARY KEY
+                  REFERENCES tracks(id) ON DELETE CASCADE,
+    lines_json TEXT NOT NULL,
+    source     TEXT NOT NULL
+);
+
+-- Per-track bookkeeping for network-bound retrievals (artwork, tag
+-- enrichment, lyrics). Same shape as track_analysis: a NULL
+-- *_attempted_at_unix means "not yet tried at the current
+-- provider_version", a non-NULL value means "tried, do not keep
+-- retrying every cycle even if the field is still empty". The
+-- scheduler's "find tracks needing online work" query LEFT JOINs
+-- against this table to filter the candidate set without scanning the
+-- whole library on every batch.
+CREATE TABLE IF NOT EXISTS track_online_status (
+    track_id                    INTEGER PRIMARY KEY
+                                  REFERENCES tracks(id) ON DELETE CASCADE,
+    artwork_attempted_at_unix   INTEGER,
+    tags_attempted_at_unix      INTEGER,
+    lyrics_attempted_at_unix    INTEGER,
+    provider_version            INTEGER NOT NULL
+);
 "#;
 
 #[derive(Clone, Copy)]
@@ -214,6 +251,7 @@ const TRACK_COLUMNS: &[TrackColumn] = &[
     TrackColumn::stored_value("lyrics"),
     TrackColumn::stored_value("content_hash"),
     TrackColumn::stored_value("file_size_bytes"),
+    TrackColumn::stored_value("has_embedded_artwork"),
 ];
 
 pub(crate) mod track_column_index {
@@ -249,6 +287,7 @@ pub(crate) mod track_column_index {
     pub(crate) const LYRICS: usize = 29;
     pub(crate) const CONTENT_HASH: usize = 30;
     pub(crate) const FILE_SIZE_BYTES: usize = 31;
+    pub(crate) const HAS_EMBEDDED_ARTWORK: usize = 32;
 }
 
 pub(super) static SAVE_TRACK_SQL: LazyLock<String> = LazyLock::new(|| {
@@ -363,6 +402,81 @@ FROM track_waveform
 WHERE track_id = ?1
 "#;
 
+/// Upsert the synced-lyrics JSON for a track. Source is a short
+/// provider tag (e.g. `"lrclib"`) kept so a later diagnostic can
+/// answer "where did this come from?" without consulting logs.
+pub(super) const UPSERT_TRACK_SYNCED_LYRICS_SQL: &str = r#"
+INSERT INTO track_synced_lyrics (track_id, lines_json, source)
+VALUES (?1, ?2, ?3)
+ON CONFLICT(track_id) DO UPDATE SET
+    lines_json = excluded.lines_json,
+    source     = excluded.source
+"#;
+
+pub(super) const SELECT_TRACK_SYNCED_LYRICS_SQL: &str = r#"
+SELECT lines_json, source
+FROM track_synced_lyrics
+WHERE track_id = ?1
+"#;
+
+pub(super) const DELETE_TRACK_SYNCED_LYRICS_SQL: &str =
+    r#"DELETE FROM track_synced_lyrics WHERE track_id = ?1"#;
+
+/// Upsert into `track_online_status`. Each `*_attempted_at_unix`
+/// parameter is either the timestamp (capability ran this pass) or
+/// `NULL` (capability not requested this pass) — `COALESCE`
+/// preserves the existing value so a lyrics-only pass does not
+/// clobber the artwork attempt timestamp.
+pub(super) const UPSERT_TRACK_ONLINE_STATUS_SQL: &str = r#"
+INSERT INTO track_online_status (
+    track_id,
+    artwork_attempted_at_unix,
+    tags_attempted_at_unix,
+    lyrics_attempted_at_unix,
+    provider_version
+)
+VALUES (?1, ?2, ?3, ?4, ?5)
+ON CONFLICT(track_id) DO UPDATE SET
+    artwork_attempted_at_unix = COALESCE(excluded.artwork_attempted_at_unix, artwork_attempted_at_unix),
+    tags_attempted_at_unix    = COALESCE(excluded.tags_attempted_at_unix,    tags_attempted_at_unix),
+    lyrics_attempted_at_unix  = COALESCE(excluded.lyrics_attempted_at_unix,  lyrics_attempted_at_unix),
+    provider_version          = excluded.provider_version
+"#;
+
+/// "Find tracks needing online work." Returns track IDs not marked
+/// missing AND having at least one of the requested capabilities
+/// either un-attempted (NULL timestamp) or stamped by an older
+/// provider_version.
+///
+/// The artwork capability has an extra non-destructive guard: tracks
+/// whose most recent scan observed an embedded picture
+/// (`has_embedded_artwork = 1`) are excluded entirely from the
+/// artwork-needs clause. We will not touch a file that already has
+/// its own cover, even on a fresh provider_version. `IS NULL` is
+/// treated as "not yet scanned" → still a candidate.
+///
+/// Bound parameters mirror the analysis query:
+///   ?1 = include_artwork   (1 or 0)
+///   ?2 = include_tags      (1 or 0)
+///   ?3 = include_lyrics    (1 or 0)
+///   ?4 = current provider_version
+///   ?5 = LIMIT
+pub(super) const SELECT_TRACKS_NEEDING_ONLINE_SQL: &str = r#"
+SELECT t.id
+FROM tracks t
+LEFT JOIN track_online_status s ON s.track_id = t.id
+WHERE t.is_missing = 0
+  AND (
+        (?1 = 1
+            AND COALESCE(t.has_embedded_artwork, 0) = 0
+            AND (s.artwork_attempted_at_unix IS NULL OR s.provider_version < ?4))
+     OR (?2 = 1 AND (s.tags_attempted_at_unix    IS NULL OR s.provider_version < ?4))
+     OR (?3 = 1 AND (s.lyrics_attempted_at_unix  IS NULL OR s.provider_version < ?4))
+      )
+ORDER BY t.id
+LIMIT ?5
+"#;
+
 /// "Find tracks needing analysis." Returns track IDs that are not
 /// marked missing AND have at least one of the requested capabilities
 /// either un-attempted (NULL timestamp) or stamped by an older
@@ -455,6 +569,10 @@ mod tests {
             (track_column_index::LYRICS, "lyrics"),
             (track_column_index::CONTENT_HASH, "content_hash"),
             (track_column_index::FILE_SIZE_BYTES, "file_size_bytes"),
+            (
+                track_column_index::HAS_EMBEDDED_ARTWORK,
+                "has_embedded_artwork",
+            ),
         ];
 
         assert_eq!(TRACK_COLUMNS.len(), expected.len());

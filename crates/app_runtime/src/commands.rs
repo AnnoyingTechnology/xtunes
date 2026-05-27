@@ -45,6 +45,7 @@ impl ApplicationRuntime {
                 }
                 let previous_library_path = self.settings.library.path.clone();
                 let previous_analysis = self.settings.analysis;
+                let previous_online = self.settings.online;
                 if let Some(settings_store) = &self.settings_store {
                     settings_store
                         .save_settings(settings.clone())
@@ -79,6 +80,16 @@ impl ApplicationRuntime {
                 }
                 if self.settings.library.path != previous_library_path
                     && let Some(scheduler) = self.analysis_scheduler()
+                {
+                    scheduler.set_library_path(self.settings.library.path.clone());
+                }
+                if self.settings.online != previous_online
+                    && let Some(scheduler) = self.online_scheduler()
+                {
+                    scheduler.update_settings(self.settings.online);
+                }
+                if self.settings.library.path != previous_library_path
+                    && let Some(scheduler) = self.online_scheduler()
                 {
                     scheduler.set_library_path(self.settings.library.path.clone());
                 }

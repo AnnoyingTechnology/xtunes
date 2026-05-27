@@ -143,6 +143,8 @@ struct PlaybackSettingsDocument {
     /// with an out-of-range value can never crash the app at startup.
     #[serde(default = "default_volume_percent")]
     volume_percent: u8,
+    #[serde(default)]
+    shuffle_enabled: bool,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -179,6 +181,7 @@ impl Default for PlaybackSettingsDocument {
     fn default() -> Self {
         Self {
             volume_percent: DEFAULT_PLAYBACK_VOLUME_PERCENT,
+            shuffle_enabled: false,
         }
     }
 }
@@ -223,6 +226,7 @@ impl SettingsDocument {
             },
             playback: PlaybackSettingsDocument {
                 volume_percent: settings.playback.volume.get(),
+                shuffle_enabled: settings.playback.shuffle_enabled,
             },
             ui: UiSettingsDocument {
                 search_text: settings.ui.search_text,
@@ -253,6 +257,7 @@ impl SettingsDocument {
             },
             playback: PlaybackSettings {
                 volume: VolumePercent::from_clamped(self.playback.volume_percent),
+                shuffle_enabled: self.playback.shuffle_enabled,
             },
             ui: UiSettings {
                 search_text: self.ui.search_text,
@@ -386,6 +391,23 @@ mod tests {
         let store = TomlSettingsStore::new(&path);
         let mut settings = UserSettings::default();
         settings.playback.volume = VolumePercent::from_clamped(37);
+
+        assert_eq!(store.save_settings(settings.clone()), Ok(()));
+        assert_eq!(store.load_settings(), Ok(settings));
+
+        let root = path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .expect("test path has two parents");
+        fs::remove_dir_all(root).expect("remove test settings directory");
+    }
+
+    #[test]
+    fn toml_settings_store_round_trips_playback_shuffle() {
+        let path = unique_settings_path();
+        let store = TomlSettingsStore::new(&path);
+        let mut settings = UserSettings::default();
+        settings.playback.shuffle_enabled = true;
 
         assert_eq!(store.save_settings(settings.clone()), Ok(()));
         assert_eq!(store.load_settings(), Ok(settings));

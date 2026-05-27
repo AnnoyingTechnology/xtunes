@@ -316,6 +316,7 @@ mod tests {
                 date_added_at: Some(unix(1_000)),
             },
             file_size_bytes: None,
+            has_embedded_artwork: None,
         }
     }
 

@@ -28,7 +28,7 @@ use std::{
 };
 
 use serde::de::DeserializeOwned;
-use ureq::Agent;
+use ureq::{Agent, http};
 
 use crate::error::{RemoteError, RemoteResult};
 
@@ -43,6 +43,25 @@ pub const COVER_ART_ARCHIVE_MIN_REQUEST_GAP: Duration = MUSICBRAINZ_MIN_REQUEST_
 /// AcoustID documents a soft three-per-second limit for fingerprint
 /// lookups; we sit just under it.
 pub const ACOUSTID_MIN_REQUEST_GAP: Duration = Duration::from_millis(360);
+
+/// LRClib does not publish a hard rate limit. We pace ourselves at
+/// roughly three requests per second to stay polite while still
+/// draining a 9000-track library in a sensible amount of time when
+/// the user enables background lyrics retrieval.
+pub const LRCLIB_MIN_REQUEST_GAP: Duration = Duration::from_millis(350);
+
+/// Fallback cool-down applied when a server returns 429/503 without
+/// a usable `Retry-After` header. One minute is comfortably more
+/// than any of the providers' published gaps; the caller can fail
+/// fast if a smaller value is appropriate.
+pub const DEFAULT_RATE_LIMITED_COOL_DOWN: Duration = Duration::from_secs(60);
+
+/// Upper bound applied to whatever the server asked for in
+/// `Retry-After`. A misconfigured or hostile server cannot pin our
+/// worker for an unbounded duration; if a provider really wants us
+/// off for a longer span the user will eventually nudge the
+/// scheduler (library scan, settings toggle, restart).
+pub const MAX_RATE_LIMITED_COOL_DOWN: Duration = Duration::from_secs(15 * 60);
 
 /// HTTP request timeout. The remote endpoints answer in well under a
 /// second on a healthy network; anything past a few seconds is almost
@@ -73,7 +92,13 @@ struct RateLimitPolicy {
 
 #[derive(Default)]
 struct HostState {
-    last_request_at: Option<Instant>,
+    /// "Intent to fire" time for the most recent request to this
+    /// host. New requests wait until this Instant before sending.
+    /// Pushed forward by both the per-host minimum gap *and* any
+    /// 429/503 cool-down observed by [`HttpClient::record_cool_down`],
+    /// so the rate limiter automatically holds the worker back after
+    /// the provider has asked us to stop.
+    next_request_at: Option<Instant>,
 }
 
 pub struct HttpClient {
@@ -85,8 +110,12 @@ pub struct HttpClient {
 
 impl HttpClient {
     pub fn new(config: HttpClientConfig) -> Self {
+        // http_status_as_error(false) so non-2xx responses come back
+        // as Ok(response) with their headers intact — we need to read
+        // `Retry-After` on 429/503 before the response body is dropped.
         let agent: Agent = Agent::config_builder()
             .timeout_global(Some(REQUEST_TIMEOUT))
+            .http_status_as_error(false)
             .build()
             .into();
 
@@ -107,6 +136,12 @@ impl HttpClient {
             "api.acoustid.org",
             RateLimitPolicy {
                 minimum_gap: ACOUSTID_MIN_REQUEST_GAP,
+            },
+        );
+        rate_limits.insert(
+            "lrclib.net",
+            RateLimitPolicy {
+                minimum_gap: LRCLIB_MIN_REQUEST_GAP,
             },
         );
 
@@ -135,8 +170,12 @@ impl HttpClient {
             .call()
             .map_err(|error| map_ureq_error(error, url))?;
 
+        let status = response.status().as_u16();
+        if let Some(cool_down) = self.handle_rate_limit_status(url, status, response.headers()) {
+            return Err(RemoteError::RateLimited { cool_down });
+        }
         if !response.status().is_success() {
-            return Err(RemoteError::BadStatus(response.status().as_u16()));
+            return Err(RemoteError::BadStatus(status));
         }
 
         response
@@ -162,12 +201,15 @@ impl HttpClient {
             Err(error) => return map_get_bytes_error(error, url),
         };
 
-        let status = response.status();
-        if status.as_u16() == 404 {
+        let status = response.status().as_u16();
+        if status == 404 {
             return Ok(None);
         }
-        if !status.is_success() {
-            return Err(RemoteError::BadStatus(status.as_u16()));
+        if let Some(cool_down) = self.handle_rate_limit_status(url, status, response.headers()) {
+            return Err(RemoteError::RateLimited { cool_down });
+        }
+        if !response.status().is_success() {
+            return Err(RemoteError::BadStatus(status));
         }
 
         let bytes = response
@@ -178,6 +220,50 @@ impl HttpClient {
             return Ok(None);
         }
         Ok(Some(bytes))
+    }
+
+    /// Recognise 429 (Too Many Requests) and 503 (Service Unavailable).
+    /// On a match, parse `Retry-After`, push the host's cool-down
+    /// forward, and return `Some(cool_down)` so the caller can surface
+    /// a [`RemoteError::RateLimited`]. Returns `None` for any other
+    /// status, leaving normal handling to the caller.
+    fn handle_rate_limit_status(
+        &self,
+        url: &str,
+        status: u16,
+        headers: &http::HeaderMap,
+    ) -> Option<Duration> {
+        if status != 429 && status != 503 {
+            return None;
+        }
+        let cool_down = parse_retry_after(headers).unwrap_or(DEFAULT_RATE_LIMITED_COOL_DOWN);
+        let cool_down = cool_down.min(MAX_RATE_LIMITED_COOL_DOWN);
+        if let Some(host) = host_from_url(url) {
+            self.record_cool_down(host, cool_down);
+        }
+        eprintln!(
+            "Sustain: remote {url} returned HTTP {status}; holding the host for {} s before the next request",
+            cool_down.as_secs()
+        );
+        Some(cool_down)
+    }
+
+    /// Push the named host's "next request at" forward by `cool_down`
+    /// from now. Subsequent calls to [`Self::respect_rate_limit`] for
+    /// the same host wait against the new value, so a 429 reply
+    /// automatically translates into a real pause for every other
+    /// scheduled request to that host.
+    fn record_cool_down(&self, host: &'static str, cool_down: Duration) {
+        let mut states = match self.host_states.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => recover_poisoned(poisoned),
+        };
+        let entry = states.entry(host).or_default();
+        let target = Instant::now() + cool_down;
+        entry.next_request_at = Some(match entry.next_request_at {
+            Some(existing) => existing.max(target),
+            None => target,
+        });
     }
 
     fn respect_rate_limit(&self, url: &str) {
@@ -199,21 +285,16 @@ impl HttpClient {
             };
             let entry = states.entry(host).or_default();
             let now = Instant::now();
-            let sleep_for = entry
-                .last_request_at
-                .map(|last| {
-                    let elapsed = now.duration_since(last);
-                    if elapsed >= policy.minimum_gap {
-                        Duration::ZERO
-                    } else {
-                        policy.minimum_gap - elapsed
-                    }
-                })
-                .unwrap_or_default();
+            let gap_target = entry
+                .next_request_at
+                .map(|previous| previous + policy.minimum_gap)
+                .unwrap_or(now);
+            let target = gap_target.max(now);
+            let sleep_for = target.saturating_duration_since(now);
             // Record the time we *intend* to fire — not the time we
             // actually fire — so concurrent threads serialise against
             // an honest schedule even if some of them are still sleeping.
-            entry.last_request_at = Some(now + sleep_for);
+            entry.next_request_at = Some(target);
             sleep_for
         };
 
@@ -221,6 +302,18 @@ impl HttpClient {
             thread::sleep(sleep_for);
         }
     }
+}
+
+/// Parse the value of an HTTP `Retry-After` header into a duration.
+/// Per RFC 7231 the header is either a non-negative delta-seconds
+/// integer or an HTTP-date. We honour the delta-seconds form (by far
+/// the more common reply from MusicBrainz et al.) and treat the
+/// HTTP-date form as unparsed — the caller falls back to the default
+/// cool-down rather than try to parse arbitrary date formats here.
+fn parse_retry_after(headers: &http::HeaderMap) -> Option<Duration> {
+    let value = headers.get("retry-after")?.to_str().ok()?;
+    let seconds: u64 = value.trim().parse().ok()?;
+    Some(Duration::from_secs(seconds))
 }
 
 fn map_ureq_error(error: ureq::Error, url: &str) -> RemoteError {
@@ -250,7 +343,12 @@ fn host_from_url(url: &str) -> Option<&'static str> {
     // a tiny string scan is enough for our small fixed set of
     // recognised hosts. Returning &'static str lets the host string be
     // a key directly into the rate-limit map.
-    const HOSTS: &[&str] = &["musicbrainz.org", "coverartarchive.org", "api.acoustid.org"];
+    const HOSTS: &[&str] = &[
+        "musicbrainz.org",
+        "coverartarchive.org",
+        "api.acoustid.org",
+        "lrclib.net",
+    ];
     HOSTS
         .iter()
         .copied()
@@ -303,5 +401,107 @@ mod tests {
     fn ignores_unknown_hosts() {
         assert_eq!(host_from_url("https://example.com/whatever"), None);
         assert_eq!(host_from_url("not a url"), None);
+    }
+
+    fn headers_with_retry_after(value: &str) -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "retry-after",
+            http::HeaderValue::from_str(value).expect("valid header"),
+        );
+        headers
+    }
+
+    #[test]
+    fn parse_retry_after_accepts_integer_seconds() {
+        let headers = headers_with_retry_after("42");
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(42)));
+    }
+
+    #[test]
+    fn parse_retry_after_trims_whitespace() {
+        let headers = headers_with_retry_after("  7  ");
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn parse_retry_after_rejects_http_date_form() {
+        // RFC 7231 also allows an HTTP-date here. We intentionally do
+        // not parse it; the caller falls back to the default
+        // cool-down, which is comfortably longer than any sane
+        // server-supplied wait.
+        let headers = headers_with_retry_after("Wed, 21 Oct 2015 07:28:00 GMT");
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn parse_retry_after_returns_none_when_header_is_absent() {
+        let headers = http::HeaderMap::new();
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn record_cool_down_pushes_next_request_at_forward() {
+        let client = HttpClient::new(HttpClientConfig {
+            user_agent: "Sustain-test/0".to_owned(),
+        });
+        // Seed the host with a recent "next request at" so we can
+        // verify the cool-down genuinely moves it forward (not just
+        // sets a non-None value).
+        {
+            let mut states = client.host_states.lock().expect("lock");
+            states.entry("musicbrainz.org").or_default().next_request_at = Some(Instant::now());
+        }
+        let before = client
+            .host_states
+            .lock()
+            .expect("lock")
+            .get("musicbrainz.org")
+            .and_then(|s| s.next_request_at)
+            .expect("seeded");
+        client.record_cool_down("musicbrainz.org", Duration::from_secs(30));
+        let after = client
+            .host_states
+            .lock()
+            .expect("lock")
+            .get("musicbrainz.org")
+            .and_then(|s| s.next_request_at)
+            .expect("present after cool-down");
+        // The new value should be far in the future relative to
+        // `before` — at least the cool-down minus a little slack for
+        // the function call itself.
+        assert!(
+            after.saturating_duration_since(before) >= Duration::from_secs(29),
+            "cool-down should move next_request_at forward by ~30s, moved {:?}",
+            after.saturating_duration_since(before)
+        );
+    }
+
+    #[test]
+    fn record_cool_down_never_pulls_next_request_at_backward() {
+        // If we somehow recorded an earlier cool-down after a longer
+        // one (e.g. a 30s window already in place, a transient 5s
+        // retry-after later), the later call must not shorten the
+        // existing window.
+        let client = HttpClient::new(HttpClientConfig {
+            user_agent: "Sustain-test/0".to_owned(),
+        });
+        client.record_cool_down("musicbrainz.org", Duration::from_secs(120));
+        let long_window = client
+            .host_states
+            .lock()
+            .expect("lock")
+            .get("musicbrainz.org")
+            .and_then(|s| s.next_request_at)
+            .expect("present");
+        client.record_cool_down("musicbrainz.org", Duration::from_secs(1));
+        let observed = client
+            .host_states
+            .lock()
+            .expect("lock")
+            .get("musicbrainz.org")
+            .and_then(|s| s.next_request_at)
+            .expect("still present");
+        assert_eq!(observed, long_window);
     }
 }

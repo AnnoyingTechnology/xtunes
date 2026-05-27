@@ -96,6 +96,9 @@ impl ApplicationRuntime {
         if let Some(scheduler) = self.analysis_scheduler() {
             scheduler.wake();
         }
+        if let Some(scheduler) = self.online_scheduler() {
+            scheduler.wake();
+        }
     }
 
     pub fn fail_library_scan(&mut self, error: ApplicationRuntimeError) {
@@ -227,6 +230,12 @@ fn track_from_scanned_track(
                 .refresh_audio_stream_properties_from(&scanned_track.metadata);
             track.location = TrackLocation::available(scanned_track.relative_path);
             track.file_size_bytes = scanned_track.file_size_bytes;
+            // Refresh the artwork-presence bit on every scan: the
+            // user may have embedded a cover externally (e.g. via
+            // another tagger) since the last pass, and the online
+            // scheduler must stop offering to fetch a cover for a
+            // file that now has one.
+            track.has_embedded_artwork = Some(scanned_track.has_embedded_artwork);
             Ok(track)
         }
         None => {
@@ -245,6 +254,7 @@ fn track_from_scanned_track(
                     ..PlayStatistics::default()
                 },
                 file_size_bytes: scanned_track.file_size_bytes,
+                has_embedded_artwork: Some(scanned_track.has_embedded_artwork),
             })
         }
     }
@@ -259,6 +269,7 @@ pub(super) fn track_with_current_availability(library_path: &Path, track: Track)
         rating,
         statistics,
         file_size_bytes,
+        has_embedded_artwork,
     } = track;
     let availability = if location.absolute_path(library_path).exists() {
         TrackAvailability::Available
@@ -274,6 +285,7 @@ pub(super) fn track_with_current_availability(library_path: &Path, track: Track)
         rating,
         statistics,
         file_size_bytes,
+        has_embedded_artwork,
     }
 }
 

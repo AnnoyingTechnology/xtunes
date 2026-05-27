@@ -17,6 +17,13 @@ pub struct Track {
     /// `None` when the file was never successfully stat'd (e.g. a record
     /// imported from iTunes XML before its file was located).
     pub file_size_bytes: Option<u64>,
+    /// True when the file carries at least one embedded picture
+    /// (any `PictureType`), false when it does not, `None` when the
+    /// state has never been observed by a scan. Populated by the
+    /// library scanner via lofty; the online artwork scheduler trusts
+    /// this flag as a SQL filter so it never refetches artwork for a
+    /// track that already has its own cover embedded.
+    pub has_embedded_artwork: Option<bool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

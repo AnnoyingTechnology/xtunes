@@ -76,7 +76,12 @@ pub(crate) fn track_from_row(row: &Row<'_>) -> StoreResult<Track> {
         },
         file_size_bytes: optional_i64(row, track_column::FILE_SIZE_BYTES)?
             .map(|value| value as u64),
+        has_embedded_artwork: optional_bool(row, track_column::HAS_EMBEDDED_ARTWORK)?,
     })
+}
+
+fn optional_bool(row: &Row<'_>, index: usize) -> StoreResult<Option<bool>> {
+    optional_i64(row, index).map(|value| value.map(|value| value != 0))
 }
 
 fn track_location_from_row(row: &Row<'_>) -> StoreResult<TrackLocation> {

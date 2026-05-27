@@ -439,6 +439,7 @@ mod tests {
             rating: Rating::unrated(),
             statistics: PlayStatistics::default(),
             file_size_bytes: None,
+            has_embedded_artwork: None,
         }]);
 
         assert_eq!(albums[0].title, "Unknown Album");
@@ -484,6 +485,7 @@ mod tests {
             rating: Rating::unrated(),
             statistics: PlayStatistics::default(),
             file_size_bytes: None,
+            has_embedded_artwork: None,
         }
     }
 

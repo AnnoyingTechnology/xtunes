@@ -9,9 +9,10 @@ use std::{
 use sustain_domain::TrackAnalysis;
 
 use crate::{
-    AnalysisCapabilities, AnalysisContext, LibraryStore, Playlist, PlaylistFolder,
-    PlaylistFolderId, PlaylistId, SmartPlaylist, SmartPlaylistId, StoreError, StoreResult,
-    StoredWaveform, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
+    AnalysisCapabilities, AnalysisContext, LibraryStore, OnlineCapabilities, OnlineContext,
+    Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, SmartPlaylist, SmartPlaylistId,
+    StoreError, StoreResult, StoredSyncedLyrics, StoredWaveform, SyncedLyrics, Track,
+    TrackColumnLayout, TrackColumnLayoutScope, TrackId,
 };
 
 #[derive(Debug, Default)]
@@ -25,6 +26,8 @@ pub struct InMemoryLibraryStore {
     smart_playlist_layouts: Mutex<BTreeMap<SmartPlaylistId, TrackColumnLayout>>,
     analysis_bookkeeping: Mutex<BTreeMap<TrackId, AnalysisBookkeeping>>,
     waveforms: Mutex<BTreeMap<TrackId, StoredWaveform>>,
+    synced_lyrics: Mutex<BTreeMap<TrackId, StoredSyncedLyrics>>,
+    online_bookkeeping: Mutex<BTreeMap<TrackId, OnlineBookkeeping>>,
 }
 
 /// In-memory mirror of one `track_analysis` row. Mirrors the SQLite
@@ -36,6 +39,16 @@ struct AnalysisBookkeeping {
     key_attempted_at_unix: Option<i64>,
     waveform_attempted_at_unix: Option<i64>,
     analyzer_version: u32,
+}
+
+/// In-memory mirror of one `track_online_status` row. Same COALESCE
+/// semantics as [`AnalysisBookkeeping`].
+#[derive(Clone, Copy, Debug, Default)]
+struct OnlineBookkeeping {
+    artwork_attempted_at_unix: Option<i64>,
+    tags_attempted_at_unix: Option<i64>,
+    lyrics_attempted_at_unix: Option<i64>,
+    provider_version: u32,
 }
 
 impl InMemoryLibraryStore {
@@ -447,5 +460,116 @@ impl LibraryStore for InMemoryLibraryStore {
             .map_err(|_| StoreError::StoreUnavailable)?
             .get(&track_id)
             .cloned())
+    }
+
+    fn record_synced_lyrics(
+        &self,
+        track_id: TrackId,
+        lyrics: &SyncedLyrics,
+        source: &str,
+    ) -> StoreResult<()> {
+        if lyrics.is_empty() {
+            return Ok(());
+        }
+        self.synced_lyrics
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .insert(
+                track_id,
+                StoredSyncedLyrics {
+                    lyrics: lyrics.clone(),
+                    source: source.to_owned(),
+                },
+            );
+        Ok(())
+    }
+
+    fn load_synced_lyrics(&self, track_id: TrackId) -> StoreResult<Option<StoredSyncedLyrics>> {
+        Ok(self
+            .synced_lyrics
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .get(&track_id)
+            .cloned())
+    }
+
+    fn clear_synced_lyrics(&self, track_id: TrackId) -> StoreResult<()> {
+        self.synced_lyrics
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .remove(&track_id);
+        Ok(())
+    }
+
+    fn record_online_attempt(
+        &self,
+        track_id: TrackId,
+        capabilities: OnlineCapabilities,
+        context: OnlineContext,
+    ) -> StoreResult<()> {
+        if capabilities.is_empty() {
+            return Ok(());
+        }
+        let mut bookkeeping = self
+            .online_bookkeeping
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?;
+        let entry = bookkeeping.entry(track_id).or_default();
+        if capabilities.artwork {
+            entry.artwork_attempted_at_unix = Some(context.now_unix);
+        }
+        if capabilities.tags {
+            entry.tags_attempted_at_unix = Some(context.now_unix);
+        }
+        if capabilities.lyrics {
+            entry.lyrics_attempted_at_unix = Some(context.now_unix);
+        }
+        entry.provider_version = context.provider_version;
+        Ok(())
+    }
+
+    fn tracks_needing_online(
+        &self,
+        capabilities: OnlineCapabilities,
+        provider_version: u32,
+        limit: usize,
+    ) -> StoreResult<Vec<TrackId>> {
+        if capabilities.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tracks = self.tracks_guard()?;
+        let bookkeeping = self
+            .online_bookkeeping
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?;
+        let mut out = Vec::new();
+        for (track_id, track) in tracks.iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if track.location.is_missing() {
+                continue;
+            }
+            let book = bookkeeping.get(track_id).copied().unwrap_or_default();
+            // Mirror the SQL guard: a track with a known embedded
+            // picture is excluded from the artwork-needs clause, even
+            // at a fresh `provider_version`. `None` is treated as
+            // "not yet scanned" → still a candidate.
+            let has_artwork = track.has_embedded_artwork.unwrap_or(false);
+            let needs_artwork = capabilities.artwork
+                && !has_artwork
+                && (book.artwork_attempted_at_unix.is_none()
+                    || book.provider_version < provider_version);
+            let needs_tags = capabilities.tags
+                && (book.tags_attempted_at_unix.is_none()
+                    || book.provider_version < provider_version);
+            let needs_lyrics = capabilities.lyrics
+                && (book.lyrics_attempted_at_unix.is_none()
+                    || book.provider_version < provider_version);
+            if needs_artwork || needs_tags || needs_lyrics {
+                out.push(*track_id);
+            }
+        }
+        Ok(out)
     }
 }

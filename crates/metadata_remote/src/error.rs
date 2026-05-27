@@ -11,7 +11,7 @@
 //! Finer-grained diagnostics belong in log lines, not in the type
 //! the runtime branches on.
 
-use std::fmt;
+use std::{fmt, time::Duration};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RemoteError {
@@ -19,6 +19,14 @@ pub enum RemoteError {
     /// timeout). The user might fix it by checking connectivity; the
     /// app's job is to back off without spinning on the failure.
     Network,
+    /// Server explicitly asked us to stop sending requests for a
+    /// while (HTTP 429 or 503). `cool_down` is the time the HTTP
+    /// client has *already* recorded against the offending host; the
+    /// caller can treat this as a strong signal to stop the current
+    /// batch instead of just the current track. The rate limiter
+    /// holds back the next request to that host automatically — the
+    /// caller does not need to re-implement the wait.
+    RateLimited { cool_down: Duration },
     /// Server responded but with a status code we cannot use. Held
     /// for diagnostics; the UI does not branch on the specific code.
     BadStatus(u16),
@@ -36,6 +44,11 @@ impl fmt::Display for RemoteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Network => f.write_str("network unavailable"),
+            Self::RateLimited { cool_down } => write!(
+                f,
+                "remote service rate-limited us (cool-down {} s)",
+                cool_down.as_secs()
+            ),
             Self::BadStatus(code) => write!(f, "remote service returned HTTP {code}"),
             Self::InvalidResponse => f.write_str("remote service returned an unexpected payload"),
             Self::NotConfigured => f.write_str("remote service not configured"),

@@ -110,6 +110,9 @@ pub(crate) type ArtworkFetchResultReceiver =
     async_channel::Receiver<sustain_app_runtime::ArtworkFetchResult>;
 pub(crate) type AnalysisProgressReceiver =
     async_channel::Receiver<sustain_app_runtime::AnalysisProgress>;
+pub(crate) type OnlineProgressReceiver =
+    async_channel::Receiver<sustain_app_runtime::OnlineProgress>;
+pub(crate) type TrackUpdatedReceiver = async_channel::Receiver<sustain_app_runtime::TrackId>;
 
 pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     let trun = std::time::Instant::now();
@@ -166,6 +169,15 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
 
     tlog!("artwork fetcher started");
 
+    // Install the shared track-updated channel BEFORE either scheduler
+    // is started so each captures a live sender. The UI shell drains
+    // the receiver on the main loop and reloads the touched row from
+    // the library store; without this, scheduler writes (analysis BPM,
+    // online lyrics/tags) would not surface until the next launch.
+    let (track_updated_tx, track_updated_rx) =
+        async_channel::unbounded::<sustain_app_runtime::TrackId>();
+    runtime.set_track_updated_sink(track_updated_tx);
+
     // Start the paced background analysis scheduler. The progress sink
     // is installed before `start_analysis_scheduler` so the worker's
     // first Idle/Tick has somewhere to land. As with the metadata
@@ -184,6 +196,20 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
         eprintln!("Sustain: analysis scheduler could not start ({error:?}).");
     }
     tlog!("analysis scheduler started");
+
+    // Start the paced background online scheduler. Same shape as the
+    // analysis scheduler — progress sink installed first, then the
+    // worker. Failure is non-fatal: a build without a remote metadata
+    // service simply has no online retrieval surface.
+    let (online_progress_tx, online_progress_rx) =
+        async_channel::unbounded::<sustain_app_runtime::OnlineProgress>();
+    runtime.set_online_progress_sink(online_progress_tx);
+    if let Err(error) = runtime.start_online_scheduler() {
+        eprintln!(
+            "Sustain: online scheduler disabled ({error:?}); background lyrics/artwork retrieval will not run."
+        );
+    }
+    tlog!("online scheduler started");
 
     let runtime = Rc::new(RefCell::new(runtime));
 
@@ -214,6 +240,10 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
         Rc::new(RefCell::new(Some(fetch_result_rx)));
     let analysis_progress_rx_holder: Rc<RefCell<Option<AnalysisProgressReceiver>>> =
         Rc::new(RefCell::new(Some(analysis_progress_rx)));
+    let online_progress_rx_holder: Rc<RefCell<Option<OnlineProgressReceiver>>> =
+        Rc::new(RefCell::new(Some(online_progress_rx)));
+    let track_updated_rx_holder: Rc<RefCell<Option<TrackUpdatedReceiver>>> =
+        Rc::new(RefCell::new(Some(track_updated_rx)));
 
     tlog!("mpris done; about to connect_activate");
     app.connect_activate({
@@ -228,14 +258,20 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
             let write_result_rx = write_result_rx_holder.borrow_mut().take();
             let fetch_result_rx = fetch_result_rx_holder.borrow_mut().take();
             let analysis_progress_rx = analysis_progress_rx_holder.borrow_mut().take();
+            let online_progress_rx = online_progress_rx_holder.borrow_mut().take();
+            let track_updated_rx = track_updated_rx_holder.borrow_mut().take();
             let main_window = build_main_window(
                 app,
                 runtime.clone(),
                 mpris_service.clone(),
-                mpris_command_rx,
-                write_result_rx,
-                fetch_result_rx,
-                analysis_progress_rx,
+                crate::main_window::MainWindowAsyncReceivers {
+                    mpris_command_rx,
+                    metadata_write_result_rx: write_result_rx,
+                    artwork_fetch_result_rx: fetch_result_rx,
+                    analysis_progress_rx,
+                    online_progress_rx,
+                    track_updated_rx,
+                },
             );
             eprintln!(
                 "[TIMING]   activate: build_main_window returned at {:.1}ms",
@@ -270,6 +306,7 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     runtime_guard.shutdown_metadata_writer();
     runtime_guard.shutdown_artwork_fetcher();
     runtime_guard.shutdown_analysis_scheduler();
+    runtime_guard.shutdown_online_scheduler();
 }
 
 /// Activate the already-running Sustain primary instance that owns

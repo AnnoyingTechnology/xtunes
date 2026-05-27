@@ -18,9 +18,10 @@ use sustain_app_runtime::{
 use super::{
     ALBUMS_VIEW, APP_ID, AnalysisProgressReceiver, ApplicationCommand, ApplicationRuntime,
     ArtworkFetchResultReceiver, AvailabilityChangedCallback, LibraryChangedCallback,
-    LibraryChangedHolder, MetadataWriteResultReceiver, MprisCommandReceiver, PLAYLISTS_VIEW,
-    PlaybackChangedCallback, SONGS_VIEW, SharedMprisService, SharedRuntime, ShowAlbumAction,
-    ShowAlbumHolder, TrackRowChangedCallback, TrackRowChangedHolder,
+    LibraryChangedHolder, MetadataWriteResultReceiver, MprisCommandReceiver,
+    OnlineProgressReceiver, PLAYLISTS_VIEW, PlaybackChangedCallback, SONGS_VIEW,
+    SharedMprisService, SharedRuntime, ShowAlbumAction, ShowAlbumHolder, TrackRowChangedCallback,
+    TrackRowChangedHolder, TrackUpdatedReceiver,
     accent::install_accent_css,
     albums::AlbumsView,
     app_css::install_app_css,
@@ -72,15 +73,35 @@ use super::{
     window_chrome::{install_resize_handles, install_window_state_chrome},
 };
 
+/// Channel receivers the main window installs as glib consumers on
+/// the GTK main loop. Bundled into a struct rather than passed as
+/// individual `build_main_window` parameters so the function signature
+/// stays under clippy's argument-count threshold and so adding the
+/// next background worker is a one-line struct extension instead of
+/// touching every call site.
+pub(crate) struct MainWindowAsyncReceivers {
+    pub mpris_command_rx: Option<MprisCommandReceiver>,
+    pub metadata_write_result_rx: Option<MetadataWriteResultReceiver>,
+    pub artwork_fetch_result_rx: Option<ArtworkFetchResultReceiver>,
+    pub analysis_progress_rx: Option<AnalysisProgressReceiver>,
+    pub online_progress_rx: Option<OnlineProgressReceiver>,
+    pub track_updated_rx: Option<TrackUpdatedReceiver>,
+}
+
 pub(crate) fn build_main_window(
     app: &gtk::Application,
     runtime: SharedRuntime,
     mpris_service: Option<SharedMprisService>,
-    mpris_command_rx: Option<MprisCommandReceiver>,
-    metadata_write_result_rx: Option<MetadataWriteResultReceiver>,
-    artwork_fetch_result_rx: Option<ArtworkFetchResultReceiver>,
-    analysis_progress_rx: Option<AnalysisProgressReceiver>,
+    receivers: MainWindowAsyncReceivers,
 ) -> BuiltMainWindow {
+    let MainWindowAsyncReceivers {
+        mpris_command_rx,
+        metadata_write_result_rx,
+        artwork_fetch_result_rx,
+        analysis_progress_rx,
+        online_progress_rx,
+        track_updated_rx,
+    } = receivers;
     let tbw = std::time::Instant::now();
     macro_rules! tlog {
         ($label:expr) => {
@@ -370,6 +391,9 @@ pub(crate) fn build_main_window(
         track_row_changed_holder: track_row_changed_holder.clone(),
     });
     install_analysis_progress_consumer(analysis_progress_rx, runtime.clone());
+    install_online_progress_consumer(online_progress_rx, runtime.clone());
+    install_track_data_observer(&runtime, track_row_changed_holder.clone());
+    install_track_updated_consumer(track_updated_rx, runtime.clone());
     // Authoritative record of the user's top-bar view-mode choice.
     //
     // The mode used to be inferred from `content_stack.visible_child_name()`
@@ -1648,6 +1672,66 @@ fn install_analysis_progress_consumer(
     glib::MainContext::default().spawn_local(async move {
         while let Ok(progress) = receiver.recv().await {
             runtime.borrow_mut().apply_analysis_progress(progress);
+        }
+    });
+}
+
+/// Symmetric to [`install_analysis_progress_consumer`] but for the
+/// online scheduler. Each event lands in
+/// [`ApplicationRuntime::apply_online_progress`] which owns the
+/// matching persistent/ephemeral notification surface.
+fn install_online_progress_consumer(
+    receiver: Option<OnlineProgressReceiver>,
+    runtime: SharedRuntime,
+) {
+    let Some(receiver) = receiver else {
+        return;
+    };
+    glib::MainContext::default().spawn_local(async move {
+        while let Ok(progress) = receiver.recv().await {
+            runtime.borrow_mut().apply_online_progress(progress);
+        }
+    });
+}
+
+/// Wires the runtime's `track_data_observer` to the shared
+/// per-row refresh callback. The runtime fires this observer after
+/// every `apply_track_updated` — i.e. after a background worker has
+/// mutated a single track in the library store. The deferred
+/// closure invokes the standard row-refresh path so Songs/Albums/
+/// Playlists views all repaint the touched row without rebuilding
+/// the table.
+fn install_track_data_observer(
+    runtime: &SharedRuntime,
+    track_row_changed_holder: TrackRowChangedHolder,
+) {
+    runtime
+        .borrow_mut()
+        .set_track_data_observer(Box::new(move |track_id| {
+            // The runtime is mid-borrow when this fires — defer the
+            // refresh onto the GLib main loop so the closure can
+            // re-borrow read-only without panicking.
+            let track_row_changed_holder = track_row_changed_holder.clone();
+            glib::idle_add_local_once(move || {
+                if let Some(callback) = track_row_changed_holder.borrow().clone() {
+                    callback(track_id);
+                }
+            });
+        }));
+}
+
+/// Drains track-id events emitted by the analysis and online
+/// schedulers. Each id is fed into
+/// [`ApplicationRuntime::apply_track_updated`], which reloads the
+/// row from the library store and fires the
+/// `track_data_observer` so the UI repaints.
+fn install_track_updated_consumer(receiver: Option<TrackUpdatedReceiver>, runtime: SharedRuntime) {
+    let Some(receiver) = receiver else {
+        return;
+    };
+    glib::MainContext::default().spawn_local(async move {
+        while let Ok(track_id) = receiver.recv().await {
+            runtime.borrow_mut().apply_track_updated(track_id);
         }
     });
 }

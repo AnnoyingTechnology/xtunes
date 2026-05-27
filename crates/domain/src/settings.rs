@@ -26,12 +26,17 @@ pub enum LibraryManagementMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlaybackSettings {
     pub volume: VolumePercent,
+    /// Persisted shuffle preference. Restored at startup into the
+    /// runtime's initial `PlaybackQueue::options()` so a user who
+    /// closed the app with shuffle on reopens with shuffle on.
+    pub shuffle_enabled: bool,
 }
 
 impl Default for PlaybackSettings {
     fn default() -> Self {
         Self {
             volume: VolumePercent::from_clamped(DEFAULT_PLAYBACK_VOLUME_PERCENT),
+            shuffle_enabled: false,
         }
     }
 }

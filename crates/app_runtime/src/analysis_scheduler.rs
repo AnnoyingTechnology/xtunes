@@ -40,7 +40,7 @@ use std::{
 };
 
 use sustain_analysis::{AnalysisError, AnalysisOptions, TrackAnalysis};
-use sustain_domain::AnalysisSettings;
+use sustain_domain::{AnalysisSettings, TrackId};
 use sustain_library_store::{AnalysisCapabilities, AnalysisContext, LibraryStore};
 
 /// How long the worker sleeps between two consecutive analyses. Keeps
@@ -64,6 +64,13 @@ pub type AnalyzerFn =
 /// wraps this in an `async_channel` send so notifications surface on
 /// the GTK main loop without the worker touching widgets directly.
 pub type ProgressSink = Arc<dyn Fn(SchedulerProgress) + Send + Sync>;
+
+/// Sink invoked once per track after a successful `record_analysis`
+/// landed BPM/key/waveform data into the store. The runtime wraps
+/// this in an `async_channel` send so the UI shell refreshes the
+/// matching row on the main loop. Stays a no-op when no sink is
+/// installed (tests, headless deployments).
+pub type TrackUpdatedSink = Arc<dyn Fn(TrackId) + Send + Sync>;
 
 /// Source for the current wall-clock unix timestamp recorded into the
 /// `track_analysis.*_attempted_at_unix` columns. Injected so tests can
@@ -96,6 +103,11 @@ pub enum SchedulerProgress {
 pub struct AnalysisSchedulerConfig {
     pub analyzer: AnalyzerFn,
     pub progress: ProgressSink,
+    /// Optional refresh signal: after every successful analysis pass
+    /// the worker pushes the touched `TrackId` so the runtime can
+    /// reload that row from the store into its in-memory copy. `None`
+    /// when the embedder does not care about live UI refreshes.
+    pub track_updated: Option<TrackUpdatedSink>,
     pub clock: UnixClockFn,
     pub library_store: Arc<dyn LibraryStore>,
     pub initial_settings: AnalysisSettings,
@@ -179,6 +191,7 @@ fn worker_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisSched
     let AnalysisSchedulerConfig {
         analyzer,
         progress,
+        track_updated,
         clock,
         library_store,
         initial_settings,
@@ -296,6 +309,9 @@ fn worker_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisSched
                         capabilities_from(&state.settings),
                         context,
                     );
+                    if let Some(notify) = track_updated.as_deref() {
+                        notify(track_id);
+                    }
                     state.completed = state.completed.saturating_add(1);
                 }
                 Err(_) => {
@@ -428,6 +444,7 @@ mod tests {
             rating: Default::default(),
             statistics: Default::default(),
             file_size_bytes: None,
+            has_embedded_artwork: None,
         }
     }
 
@@ -510,6 +527,7 @@ mod tests {
         let scheduler = AnalysisScheduler::start(AnalysisSchedulerConfig {
             analyzer: ok_analyzer(),
             progress: sink,
+            track_updated: None,
             clock: fixed_clock(1_700_000_000),
             library_store: store.clone(),
             initial_settings: AnalysisSettings {
@@ -556,6 +574,7 @@ mod tests {
         let scheduler = AnalysisScheduler::start(AnalysisSchedulerConfig {
             analyzer: err_analyzer(),
             progress: sink,
+            track_updated: None,
             clock: fixed_clock(2_000),
             library_store: store.clone(),
             initial_settings: AnalysisSettings {
@@ -617,6 +636,7 @@ mod tests {
         let scheduler = AnalysisScheduler::start(AnalysisSchedulerConfig {
             analyzer,
             progress: sink,
+            track_updated: None,
             clock: fixed_clock(0),
             library_store: store,
             initial_settings: AnalysisSettings::default(),
@@ -650,6 +670,7 @@ mod tests {
         let scheduler = AnalysisScheduler::start(AnalysisSchedulerConfig {
             analyzer: ok_analyzer(),
             progress: sink,
+            track_updated: None,
             clock: fixed_clock(1),
             library_store: store.clone(),
             initial_settings: AnalysisSettings::default(),
@@ -710,6 +731,7 @@ mod tests {
         let scheduler = AnalysisScheduler::start(AnalysisSchedulerConfig {
             analyzer,
             progress: sink,
+            track_updated: None,
             clock: fixed_clock(1),
             library_store: store.clone(),
             initial_settings: AnalysisSettings {
@@ -786,6 +808,7 @@ mod tests {
         let scheduler = AnalysisScheduler::start(AnalysisSchedulerConfig {
             analyzer: ok_analyzer(),
             progress: sink,
+            track_updated: None,
             clock: fixed_clock(0),
             library_store: store,
             initial_settings: AnalysisSettings::default(),
@@ -796,6 +819,47 @@ mod tests {
         let start = Instant::now();
         scheduler.shutdown();
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn track_updated_sink_fires_after_successful_analysis() {
+        use std::sync::mpsc as std_mpsc;
+
+        let temp = TempDir::new().expect("temp dir");
+        let library_root = temp.path().to_path_buf();
+        let track = touch_in(&library_root, "alpha.flac");
+
+        let store: Arc<dyn LibraryStore> = Arc::new(InMemoryLibraryStore::new());
+        store.save_track(track.clone()).expect("save track");
+
+        let (notify_tx, notify_rx) = std_mpsc::channel::<sustain_domain::TrackId>();
+        let track_updated: super::TrackUpdatedSink = Arc::new(move |id| {
+            let _ = notify_tx.send(id);
+        });
+
+        let (sink, _rx) = capturing_sink();
+        let scheduler = AnalysisScheduler::start(AnalysisSchedulerConfig {
+            analyzer: ok_analyzer(),
+            progress: sink,
+            track_updated: Some(track_updated),
+            clock: fixed_clock(1),
+            library_store: store,
+            initial_settings: AnalysisSettings {
+                bpm: true,
+                key: true,
+                waveform: true,
+            },
+            library_path: Some(library_root),
+            analyzer_version: 1,
+            analysis_options: AnalysisOptions::default(),
+        });
+
+        let observed = notify_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("track_updated sink fires once analysis completes");
+        assert_eq!(observed, track.id);
+
+        scheduler.shutdown();
     }
 
     #[test]

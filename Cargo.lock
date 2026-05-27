@@ -2023,12 +2023,17 @@ dependencies = [
 [[package]]
 name = "sustain-domain"
 version = "0.1.0-alpha.2"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "sustain-library-store"
 version = "0.1.0-alpha.2"
 dependencies = [
  "rusqlite",
+ "serde_json",
  "sustain-domain",
 ]
 

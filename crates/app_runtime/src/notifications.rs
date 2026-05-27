@@ -64,6 +64,11 @@ pub enum NotificationCategory {
     /// tracks are being analyzed and as an ephemeral summary once the
     /// queue drains.
     AnalysisBackground,
+    /// Background network-bound retrieval (artwork / lyrics) driven by
+    /// the `OnlineScheduler`. Same lifecycle as
+    /// [`Self::AnalysisBackground`] — a persistent notification while
+    /// the worker is running, a one-shot summary once it idles.
+    OnlineBackground,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -306,6 +311,37 @@ pub fn analysis_background_outcome_text(completed: u32, failed: u32) -> String {
     } else {
         format!(
             "Analyzed {} {}, {} {} skipped.",
+            completed,
+            pluralize(completed as usize, "track", "tracks"),
+            failed,
+            pluralize(failed as usize, "track", "tracks"),
+        )
+    }
+}
+
+pub fn online_background_running_text(completed: u32, remaining: u32) -> String {
+    if remaining == 0 {
+        format!(
+            "Retrieving online data ({} {} done)...",
+            completed,
+            pluralize(completed as usize, "track", "tracks"),
+        )
+    } else {
+        let total = completed.saturating_add(remaining);
+        format!("Retrieving online data ({completed}/{total})...")
+    }
+}
+
+pub fn online_background_outcome_text(completed: u32, failed: u32) -> String {
+    if failed == 0 {
+        format!(
+            "Retrieved online data for {} {}.",
+            completed,
+            pluralize(completed as usize, "track", "tracks"),
+        )
+    } else {
+        format!(
+            "Retrieved online data for {} {}, {} {} skipped.",
             completed,
             pluralize(completed as usize, "track", "tracks"),
             failed,

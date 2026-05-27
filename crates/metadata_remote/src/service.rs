@@ -33,6 +33,7 @@ use std::sync::Arc;
 use crate::acoustid::{AcoustIdClient, AudioFingerprint};
 use crate::cover_art_archive::CoverArtArchiveClient;
 use crate::error::RemoteResult;
+use crate::lrclib::LrcLibClient;
 use crate::musicbrainz::{MusicBrainzClient, RecordingMatch, RecordingSearchTerms};
 
 /// Minimum MusicBrainz score (0..=100) we accept from a text-based
@@ -143,6 +144,22 @@ pub struct FetchedArtwork {
     pub release_mbid: String,
 }
 
+/// Lyrics payload as returned by a remote provider. Both fields are
+/// optional and independent — providers commonly serve plain-only or
+/// synced-only entries. `synced_lrc` is the verbatim LRC source text;
+/// callers parse it via `sustain_domain::SyncedLyrics::parse_lrc`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FetchedLyrics {
+    pub plain: Option<String>,
+    pub synced_lrc: Option<String>,
+}
+
+impl FetchedLyrics {
+    pub fn is_empty(&self) -> bool {
+        self.plain.is_none() && self.synced_lrc.is_none()
+    }
+}
+
 /// Service contract. Implementations are required to be `Send + Sync`
 /// so the runtime can hand them across worker boundaries.
 pub trait RemoteMetadataService: Send + Sync {
@@ -169,15 +186,23 @@ pub trait RemoteMetadataService: Send + Sync {
         };
         self.fetch_artwork_for_match(&track_match)
     }
+
+    /// Fetch lyrics for the track described by `query`. Returns
+    /// `Ok(None)` when the provider has no entry for the track —
+    /// indistinguishable from "we tried, no hit", and the caller
+    /// records the attempt regardless so the scheduler does not
+    /// keep retrying the same miss.
+    fn fetch_lyrics(&self, query: &TrackQuery) -> RemoteResult<Option<FetchedLyrics>>;
 }
 
 /// The production implementation. Owns one [`MusicBrainzClient`], one
-/// [`CoverArtArchiveClient`], and optionally one [`AcoustIdClient`].
-/// The AcoustID slot is optional because builds without an API key
-/// must still work for tag-based identification.
+/// [`CoverArtArchiveClient`], one [`LrcLibClient`], and optionally one
+/// [`AcoustIdClient`]. The AcoustID slot is optional because builds
+/// without an API key must still work for tag-based identification.
 pub struct ComposedRemoteMetadataService {
     musicbrainz: MusicBrainzClient,
     cover_art_archive: CoverArtArchiveClient,
+    lrclib: LrcLibClient,
     acoustid: Option<AcoustIdClient>,
 }
 
@@ -185,11 +210,13 @@ impl ComposedRemoteMetadataService {
     pub fn new(
         musicbrainz: MusicBrainzClient,
         cover_art_archive: CoverArtArchiveClient,
+        lrclib: LrcLibClient,
         acoustid: Option<AcoustIdClient>,
     ) -> Self {
         Self {
             musicbrainz,
             cover_art_archive,
+            lrclib,
             acoustid,
         }
     }
@@ -197,15 +224,16 @@ impl ComposedRemoteMetadataService {
     /// Convenience wrapper: build the whole service stack from a
     /// shared [`crate::client::HttpClient`] and an optional AcoustID
     /// key. The HTTP client carries the User-Agent and rate-limit
-    /// state shared across all three providers.
+    /// state shared across all four providers.
     pub fn from_http_client(
         http: Arc<crate::client::HttpClient>,
         acoustid_api_key: Option<&str>,
     ) -> Self {
         let musicbrainz = MusicBrainzClient::new(Arc::clone(&http));
         let cover_art_archive = CoverArtArchiveClient::new(Arc::clone(&http));
+        let lrclib = LrcLibClient::new(Arc::clone(&http));
         let acoustid = acoustid_api_key.and_then(|key| AcoustIdClient::new(http, key));
-        Self::new(musicbrainz, cover_art_archive, acoustid)
+        Self::new(musicbrainz, cover_art_archive, lrclib, acoustid)
     }
 
     fn identify_via_musicbrainz(&self, query: &TrackQuery) -> RemoteResult<Option<TrackMatch>> {
@@ -298,6 +326,10 @@ impl RemoteMetadataService for ComposedRemoteMetadataService {
             }
         }
         Ok(None)
+    }
+
+    fn fetch_lyrics(&self, query: &TrackQuery) -> RemoteResult<Option<FetchedLyrics>> {
+        self.lrclib.fetch(query)
     }
 }
 

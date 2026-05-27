@@ -18,6 +18,10 @@
 //!   sparse for MusicBrainz to match by text. The actual Chromaprint
 //!   fingerprint computation lives outside this crate; the client
 //!   here accepts a precomputed [`acoustid::AudioFingerprint`].
+//! * **LRClib** — open lyrics database ([`lrclib::LrcLibClient`]).
+//!   Looks up plain and time-coded lyrics by exact artist/title/album
+//!   match; the only provider in this crate that does not depend on
+//!   MusicBrainz at all.
 //!
 //! Direct callers should depend on [`RemoteMetadataService`] — the
 //! single public surface that composes the three clients with the
@@ -39,6 +43,7 @@ pub mod acoustid;
 pub mod client;
 pub mod cover_art_archive;
 pub mod error;
+pub mod lrclib;
 mod mbid;
 pub mod musicbrainz;
 pub mod service;
@@ -47,10 +52,11 @@ pub use acoustid::{AcoustIdClient, AcoustIdMatch, AudioFingerprint};
 pub use client::{HttpClient, HttpClientConfig};
 pub use cover_art_archive::CoverArtArchiveClient;
 pub use error::{RemoteError, RemoteResult};
+pub use lrclib::LrcLibClient;
 pub use musicbrainz::{MusicBrainzClient, RecordingMatch, RecordingRelease, RecordingSearchTerms};
 pub use service::{
-    ComposedRemoteMetadataService, FetchedArtwork, RemoteMetadataService, TrackMatch,
-    TrackMatchRelease, TrackMatchSource, TrackQuery,
+    ComposedRemoteMetadataService, FetchedArtwork, FetchedLyrics, RemoteMetadataService,
+    TrackMatch, TrackMatchRelease, TrackMatchSource, TrackQuery,
 };
 
 /// Read the compile-time AcoustID API key from the build environment.

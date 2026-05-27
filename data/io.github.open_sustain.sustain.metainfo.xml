@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+<!-- Copyright (C) 2026 AnnoyingTechnology -->
+<component type="desktop-application">
+  <id>io.github.open_sustain.sustain</id>
+  <launchable type="desktop-id">io.github.open_sustain.sustain.desktop</launchable>
+
+  <name>Sustain</name>
+  <summary>Music library and player</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <developer id="io.github.annoyingtechnology">
+    <name>AnnoyingTechnology</name>
+  </developer>
+
+  <description>
+    <p>
+      Sustain is a Linux-native music library and player heavily inspired by
+      the dense, predictable workflow of iTunes circa 2012. It is built around
+      a fast main table view, with first-class playlists, smart playlists,
+      ratings, listening statistics, and search.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Songs, Albums, and Playlists views with a keyboard-friendly table</li>
+      <li>Playlists, smart playlists, and playlist folders</li>
+      <li>Get Info metadata editor with tag mirroring to ID3, Vorbis, and MP4</li>
+      <li>5-star ratings, play count, skip count, last played, last skipped</li>
+      <li>Up Next queue with Play Next and Add to Queue</li>
+      <li>Real-time search with sortable and customizable columns</li>
+      <li>Remote artwork and metadata fetching via MusicBrainz, Cover Art Archive, and AcoustID</li>
+      <li>MPRIS, D-Bus, and media-key integration</li>
+      <li>Native light and dark themes that follow the system accent color</li>
+      <li>Two library modes: leave files in place, or keep the library organized on disk</li>
+    </ul>
+  </description>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Music</category>
+    <category>Player</category>
+  </categories>
+
+  <keywords>
+    <keyword>music</keyword>
+    <keyword>player</keyword>
+    <keyword>library</keyword>
+    <keyword>audio</keyword>
+    <keyword>itunes</keyword>
+    <keyword>mp3</keyword>
+    <keyword>flac</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/open-sustain/sustain</url>
+  <url type="bugtracker">https://github.com/open-sustain/sustain/issues</url>
+  <url type="vcs-browser">https://github.com/open-sustain/sustain</url>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Main library view in the system dark theme</caption>
+      <image>https://raw.githubusercontent.com/open-sustain/sustain/main/.github/assets/screenshot-dark.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Main library view in the system light theme</caption>
+      <image>https://raw.githubusercontent.com/open-sustain/sustain/main/.github/assets/screenshot-light.png</image>
+    </screenshot>
+  </screenshots>
+
+  <provides>
+    <binary>sustain</binary>
+  </provides>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.1.0-alpha.2" date="2026-05-27" type="development" />
+  </releases>
+</component>

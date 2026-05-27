@@ -36,6 +36,7 @@ depends = "$auto, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad"
 assets = [
     ["target/release/sustain", "usr/bin/", "755"],
     ["../../data/io.github.open_sustain.sustain.desktop", "usr/share/applications/", "644"],
+    ["../../data/io.github.open_sustain.sustain.metainfo.xml", "usr/share/metainfo/", "644"],
     ["../../data/icons/hicolor/16x16/apps/io.github.open_sustain.sustain.png", "usr/share/icons/hicolor/16x16/apps/", "644"],
     ["../../data/icons/hicolor/24x24/apps/io.github.open_sustain.sustain.png", "usr/share/icons/hicolor/24x24/apps/", "644"],
     ["../../data/icons/hicolor/32x32/apps/io.github.open_sustain.sustain.png", "usr/share/icons/hicolor/32x32/apps/", "644"],

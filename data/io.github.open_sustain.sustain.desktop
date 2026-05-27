@@ -5,6 +5,6 @@ Comment=Music library and player
 Exec=sustain
 Icon=io.github.open_sustain.sustain
 Terminal=false
-Categories=Audio;Music;Player;GTK;
+Categories=AudioVideo;Audio;Music;Player;GTK;
 Keywords=music;player;library;audio;
 StartupWMClass=io.github.open_sustain.sustain

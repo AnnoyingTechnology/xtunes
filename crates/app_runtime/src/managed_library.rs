@@ -448,6 +448,10 @@ impl LibraryImportContext {
                 .read_rating(&source_path)
                 .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?
                 .unwrap_or_else(Rating::unrated);
+            let has_embedded_artwork = self
+                .metadata_service
+                .has_embedded_artwork(&source_path)
+                .unwrap_or(false);
             let plan = plan_destination(
                 &planner,
                 &mut occupied_paths,
@@ -464,6 +468,7 @@ impl LibraryImportContext {
                 metadata,
                 rating,
                 file_size_bytes: source_size,
+                has_embedded_artwork,
             });
         }
 
@@ -507,6 +512,7 @@ impl LibraryImportContext {
                     ..PlayStatistics::default()
                 },
                 file_size_bytes: Some(import.file_size_bytes),
+                has_embedded_artwork: Some(import.has_embedded_artwork),
             });
         }
 
@@ -579,6 +585,10 @@ impl LibraryImportContext {
             let file_size_bytes = fs::metadata(&source_path)
                 .map(|metadata| metadata.len())
                 .ok();
+            let has_embedded_artwork = self
+                .metadata_service
+                .has_embedded_artwork(&source_path)
+                .unwrap_or(false);
 
             let Some(track_id) = sustain_domain::TrackId::new(next_track_id) else {
                 return Err(ApplicationRuntimeError::LibraryStoreFailed);
@@ -595,6 +605,7 @@ impl LibraryImportContext {
                     ..PlayStatistics::default()
                 },
                 file_size_bytes,
+                has_embedded_artwork: Some(has_embedded_artwork),
             });
         }
 
@@ -945,6 +956,7 @@ struct PlannedManagedImport {
     metadata: sustain_domain::TrackMetadata,
     rating: Rating,
     file_size_bytes: u64,
+    has_embedded_artwork: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

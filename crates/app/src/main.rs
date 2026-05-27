@@ -9,6 +9,20 @@ use std::{process, sync::Arc};
 
 use crate::instance_lock::{AcquireOutcome, InstanceLock};
 
+/// Canonical reverse-DNS GApplication id. Must match the basename of
+/// the installed `.desktop` entry and the file name shipped under
+/// `usr/share/icons/hicolor/*/apps/`, because GNOME Shell and other
+/// Wayland compositors look up the alt-tab / dock / "running app" icon
+/// by exact-matching the surface's `app_id` against either a desktop
+/// file with the same id or an icon-theme entry with the same name.
+/// Using a fixed string here (rather than deriving one from the
+/// database path) is the only reliable way to surface Sustain's icon
+/// in the window list. Sustain is a single-instance application; the
+/// GApplication uniqueness check handles routing a second activation
+/// to the running window, and [`instance_lock`] is the
+/// filesystem-level backstop documented there.
+const GTK_APPLICATION_ID: &str = "io.github.open_sustain.sustain";
+
 fn main() {
     let t0 = std::time::Instant::now();
     macro_rules! tlog {
@@ -22,17 +36,15 @@ fn main() {
     }
     tlog!("main() entered");
     // Resolve the on-disk library database location up front so the
-    // single-instance lock and the GTK application id are both keyed off
-    // the exact same path the library store will end up opening. See
-    // `instance_lock.rs` for the integrity rationale.
+    // single-instance lock is keyed off the exact same path the library
+    // store will end up opening. See `instance_lock.rs` for the integrity
+    // rationale.
     let Some(database_path) = sustain_library_store::default_database_path() else {
         eprintln!(
             "Sustain: cannot resolve the library database path (XDG_DATA_HOME and HOME are both unset)."
         );
         process::exit(1);
     };
-
-    let application_id = instance_lock::application_id_for(&database_path);
 
     let _instance_lock: InstanceLock = match instance_lock::acquire(&database_path) {
         AcquireOutcome::Acquired(lock) => lock,
@@ -44,7 +56,7 @@ fn main() {
             // Hand the activate off to the primary instance so its window
             // is raised/focused, then exit with whatever GTK reported for
             // the brief remote registration.
-            let exit_code = sustain_ui_gtk::forward_activate(&application_id);
+            let exit_code = sustain_ui_gtk::forward_activate(GTK_APPLICATION_ID);
             process::exit(i32::from(exit_code));
         }
         AcquireOutcome::Failed { lock_path, error } => {
@@ -129,7 +141,7 @@ fn main() {
     let user_agent = format!(
         "Sustain/{version} ( {homepage} )",
         version = env!("CARGO_PKG_VERSION"),
-        homepage = "https://github.com/AnnoyingTechnology/Sustain",
+        homepage = "https://github.com/open-sustain/sustain",
     );
     let http_client = std::sync::Arc::new(sustain_metadata_remote::HttpClient::new(
         sustain_metadata_remote::HttpClientConfig { user_agent },
@@ -149,5 +161,5 @@ fn main() {
     // force `GSK_RENDERER` here. If it becomes visually broken, prefer documenting
     // `GSK_RENDERER=ngl` / `GSK_RENDERER=gl` as a user workaround before changing
     // the app default.
-    sustain_ui_gtk::run(runtime, &application_id);
+    sustain_ui_gtk::run(runtime, GTK_APPLICATION_ID);
 }
