@@ -41,9 +41,7 @@ use std::{
 
 use sustain_analysis::{AnalysisError, AnalysisOptions, TrackAnalysis};
 use sustain_domain::AnalysisSettings;
-use sustain_library_store::{
-    AnalysisAttemptContext, AnalysisCapabilities, AnalysisRunContext, LibraryStore,
-};
+use sustain_library_store::{AnalysisCapabilities, AnalysisContext, LibraryStore};
 
 /// How long the worker sleeps between two consecutive analyses. Keeps
 /// the average CPU load well below saturation so playback and UI
@@ -285,22 +283,9 @@ fn worker_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisSched
                 continue;
             };
             let absolute_path = track.location.absolute_path(&library_path);
-            let now_unix = (clock)();
-            // sample_rate_hz and duration are populated by the metadata
-            // scan and live on TrackMetadata already — recording them
-            // here lets the storage row carry the audio-stream facts
-            // that were in effect when this DSP pass ran, useful for
-            // future renderers cross-checking the waveform's time
-            // mapping against the file the user is now seeing.
-            let run_context = AnalysisRunContext {
+            let context = AnalysisContext {
                 analyzer_version,
-                sample_rate: track.metadata.sample_rate_hz.unwrap_or(0),
-                duration_ms: track
-                    .metadata
-                    .duration
-                    .and_then(|duration| u32::try_from(duration.as_millis()).ok())
-                    .unwrap_or(0),
-                now_unix,
+                now_unix: (clock)(),
             };
 
             match (analyzer)(&absolute_path, analysis_options) {
@@ -309,7 +294,7 @@ fn worker_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisSched
                         track_id,
                         &analysis,
                         capabilities_from(&state.settings),
-                        run_context,
+                        context,
                     );
                     state.completed = state.completed.saturating_add(1);
                 }
@@ -317,10 +302,7 @@ fn worker_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisSched
                     let _ = library_store.record_analysis_attempt_failure(
                         track_id,
                         capabilities_from(&state.settings),
-                        AnalysisAttemptContext {
-                            analyzer_version,
-                            now_unix,
-                        },
+                        context,
                     );
                     state.failed = state.failed.saturating_add(1);
                 }

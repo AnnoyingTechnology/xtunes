@@ -142,9 +142,7 @@ CREATE TABLE IF NOT EXISTS track_analysis (
     bpm_attempted_at_unix       INTEGER,
     key_attempted_at_unix       INTEGER,
     waveform_attempted_at_unix  INTEGER,
-    analyzer_version            INTEGER NOT NULL,
-    sample_rate_at_analysis     INTEGER,
-    duration_ms_at_analysis     INTEGER
+    analyzer_version            INTEGER NOT NULL
 );
 
 -- Waveform BLOBs only. Split from track_analysis so a future
@@ -320,18 +318,14 @@ INSERT INTO track_analysis (
     bpm_attempted_at_unix,
     key_attempted_at_unix,
     waveform_attempted_at_unix,
-    analyzer_version,
-    sample_rate_at_analysis,
-    duration_ms_at_analysis
+    analyzer_version
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+VALUES (?1, ?2, ?3, ?4, ?5)
 ON CONFLICT(track_id) DO UPDATE SET
     bpm_attempted_at_unix = COALESCE(excluded.bpm_attempted_at_unix, bpm_attempted_at_unix),
     key_attempted_at_unix = COALESCE(excluded.key_attempted_at_unix, key_attempted_at_unix),
     waveform_attempted_at_unix = COALESCE(excluded.waveform_attempted_at_unix, waveform_attempted_at_unix),
-    analyzer_version = excluded.analyzer_version,
-    sample_rate_at_analysis = COALESCE(excluded.sample_rate_at_analysis, sample_rate_at_analysis),
-    duration_ms_at_analysis = COALESCE(excluded.duration_ms_at_analysis, duration_ms_at_analysis)
+    analyzer_version = excluded.analyzer_version
 "#;
 
 pub(super) const UPSERT_TRACK_WAVEFORM_SQL: &str = r#"

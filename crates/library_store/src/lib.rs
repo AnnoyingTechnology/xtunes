@@ -109,23 +109,13 @@ pub struct StoredWaveform {
     pub detail: WaveformSegments,
 }
 
-/// Metadata captured at the time an analysis pass completes. Bundles
-/// the per-run facts so the trait method signature stays manageable
-/// and callers can build the context once and reuse it across a batch.
+/// Per-attempt facts the storage layer stamps onto `track_analysis`
+/// alongside the capability timestamps. `analyzer_version` is the
+/// watermark the scheduler compares against to invalidate stale rows
+/// after a DSP change; `now_unix` is the wall clock at the moment the
+/// attempt completed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AnalysisRunContext {
-    pub analyzer_version: u32,
-    pub sample_rate: u32,
-    pub duration_ms: u32,
-    pub now_unix: i64,
-}
-
-/// Lighter context for failed-attempt bookkeeping where the run never
-/// produced a sample rate or duration. Stamping `analyzer_version` and
-/// the wall-clock time is enough to keep the scheduler from
-/// re-queuing the same track immediately.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AnalysisAttemptContext {
+pub struct AnalysisContext {
     pub analyzer_version: u32,
     pub now_unix: i64,
 }
@@ -188,7 +178,7 @@ pub trait LibraryStore: Send + Sync {
         track_id: TrackId,
         analysis: &TrackAnalysis,
         capabilities: AnalysisCapabilities,
-        context: AnalysisRunContext,
+        context: AnalysisContext,
     ) -> StoreResult<()>;
 
     /// Record a failed analysis attempt. Stamps the requested
@@ -199,7 +189,7 @@ pub trait LibraryStore: Send + Sync {
         &self,
         track_id: TrackId,
         capabilities: AnalysisCapabilities,
-        context: AnalysisAttemptContext,
+        context: AnalysisContext,
     ) -> StoreResult<()>;
 
     /// Return up to `limit` track IDs that need at least one of the
@@ -954,7 +944,7 @@ impl LibraryStore for SqliteLibraryStore {
         track_id: TrackId,
         analysis: &TrackAnalysis,
         capabilities: AnalysisCapabilities,
-        context: AnalysisRunContext,
+        context: AnalysisContext,
     ) -> StoreResult<()> {
         if capabilities.is_empty() {
             return Ok(());
@@ -962,15 +952,7 @@ impl LibraryStore for SqliteLibraryStore {
         let mut connection = self.connection_guard()?;
         let transaction = connection.transaction().map_err(StoreError::from)?;
 
-        upsert_track_analysis(
-            &transaction,
-            track_id,
-            capabilities,
-            context.analyzer_version,
-            context.sample_rate,
-            context.duration_ms,
-            context.now_unix,
-        )?;
+        upsert_track_analysis(&transaction, track_id, capabilities, context)?;
 
         if capabilities.waveform && !analysis.waveform_detail.segments.is_empty() {
             transaction
@@ -1016,24 +998,13 @@ impl LibraryStore for SqliteLibraryStore {
         &self,
         track_id: TrackId,
         capabilities: AnalysisCapabilities,
-        context: AnalysisAttemptContext,
+        context: AnalysisContext,
     ) -> StoreResult<()> {
         if capabilities.is_empty() {
             return Ok(());
         }
         let connection = self.connection_guard()?;
-        upsert_track_analysis(
-            &connection,
-            track_id,
-            capabilities,
-            context.analyzer_version,
-            // We do not know sample_rate / duration for a failed
-            // attempt; pass 0 so COALESCE preserves any previously
-            // recorded value rather than clobbering it.
-            0,
-            0,
-            context.now_unix,
-        )
+        upsert_track_analysis(&connection, track_id, capabilities, context)
     }
 
     fn tracks_needing_analysis(
@@ -1103,16 +1074,11 @@ fn upsert_track_analysis(
     connection: &Connection,
     track_id: TrackId,
     capabilities: AnalysisCapabilities,
-    analyzer_version: u32,
-    sample_rate: u32,
-    duration_ms: u32,
-    now_unix: i64,
+    context: AnalysisContext,
 ) -> StoreResult<()> {
-    let bpm_at = capabilities.bpm.then_some(now_unix);
-    let key_at = capabilities.key.then_some(now_unix);
-    let waveform_at = capabilities.waveform.then_some(now_unix);
-    let sample_rate_param = (sample_rate > 0).then_some(i64::from(sample_rate));
-    let duration_ms_param = (duration_ms > 0).then_some(i64::from(duration_ms));
+    let bpm_at = capabilities.bpm.then_some(context.now_unix);
+    let key_at = capabilities.key.then_some(context.now_unix);
+    let waveform_at = capabilities.waveform.then_some(context.now_unix);
     connection
         .execute(
             UPSERT_TRACK_ANALYSIS_SQL,
@@ -1121,9 +1087,7 @@ fn upsert_track_analysis(
                 bpm_at,
                 key_at,
                 waveform_at,
-                i64::from(analyzer_version),
-                sample_rate_param,
-                duration_ms_param,
+                i64::from(context.analyzer_version),
             ],
         )
         .map(|_| ())
@@ -1171,10 +1135,10 @@ mod tests {
     };
 
     use super::{
-        AnalysisAttemptContext, AnalysisCapabilities, AnalysisRunContext, InMemoryLibraryStore,
-        LibraryQuery, LibraryStore, Playlist, PlaylistFolder, PlaylistFolderId, SmartPlaylist,
-        SmartPlaylistId, SqliteLibraryStore, StoredWaveform, Track, TrackColumnEntry,
-        TrackColumnLayout, TrackColumnLayoutScope,
+        AnalysisCapabilities, AnalysisContext, InMemoryLibraryStore, LibraryQuery, LibraryStore,
+        Playlist, PlaylistFolder, PlaylistFolderId, SmartPlaylist, SmartPlaylistId,
+        SqliteLibraryStore, StoredWaveform, Track, TrackColumnEntry, TrackColumnLayout,
+        TrackColumnLayoutScope,
     };
     use crate::{PlaylistId, StoreResult, TrackId};
 
@@ -1772,20 +1736,10 @@ mod tests {
         }
     }
 
-    /// Standard run context used by analysis tests: analyzer_version
-    /// 1 at 44.1 kHz / 4 min, with caller-supplied wall-clock.
-    fn run_ctx(now_unix: i64) -> AnalysisRunContext {
-        AnalysisRunContext {
-            analyzer_version: 1,
-            sample_rate: 44_100,
-            duration_ms: 240_000,
-            now_unix,
-        }
-    }
-
-    /// Standard attempt context: analyzer_version 1 plus a wall-clock.
-    fn attempt_ctx(now_unix: i64) -> AnalysisAttemptContext {
-        AnalysisAttemptContext {
+    /// Standard context used by analysis tests: analyzer_version 1
+    /// plus caller-supplied wall-clock.
+    fn ctx(now_unix: i64) -> AnalysisContext {
+        AnalysisContext {
             analyzer_version: 1,
             now_unix,
         }
@@ -1801,7 +1755,7 @@ mod tests {
                 track.id,
                 &analysis,
                 AnalysisCapabilities::all(),
-                run_ctx(1_700_000_000),
+                ctx(1_700_000_000),
             )
             .expect("record analysis");
 
@@ -1847,7 +1801,7 @@ mod tests {
                     id,
                     &analysis,
                     AnalysisCapabilities::all(),
-                    run_ctx(1_700_000_000),
+                    ctx(1_700_000_000),
                 )
                 .expect("record");
         }
@@ -1894,7 +1848,7 @@ mod tests {
                     key: false,
                     waveform: true,
                 },
-                run_ctx(1_700_000_000),
+                ctx(1_700_000_000),
             )
             .expect("record waveform for gamma");
 
@@ -1936,7 +1890,7 @@ mod tests {
                     key: false,
                     waveform: false,
                 },
-                attempt_ctx(1_700_000_000),
+                ctx(1_700_000_000),
             )
             .expect("record failure");
 
@@ -1992,7 +1946,7 @@ mod tests {
                 t.id,
                 &sample_analysis(Some(120.0), Some(MusicalKey::CMajor)),
                 AnalysisCapabilities::all(),
-                run_ctx(1_700_000_000),
+                ctx(1_700_000_000),
             )
             .expect("record");
         assert!(matches!(store.load_waveform(t.id), Ok(Some(_))));
@@ -2007,7 +1961,7 @@ mod tests {
                 t.id,
                 &sample_analysis(Some(130.0), Some(MusicalKey::EMinor)),
                 AnalysisCapabilities::all(),
-                run_ctx(1_700_000_000),
+                ctx(1_700_000_000),
             )
             .expect("record again");
         assert!(matches!(store.load_waveform(t.id), Ok(Some(_))));
@@ -2026,7 +1980,7 @@ mod tests {
                     key: false,
                     waveform: false,
                 },
-                attempt_ctx(1_000),
+                ctx(1_000),
             )
             .expect("record bpm");
 
@@ -2040,7 +1994,7 @@ mod tests {
                     key: false,
                     waveform: true,
                 },
-                run_ctx(2_000),
+                ctx(2_000),
             )
             .expect("record waveform");
 
@@ -2106,7 +2060,7 @@ mod tests {
                 t.id,
                 &sample_analysis(Some(120.0), Some(MusicalKey::CMajor)),
                 AnalysisCapabilities::none(),
-                run_ctx(1_000),
+                ctx(1_000),
             )
             .expect("no-op");
         // No bookkeeping row → track is still listed as needing analysis.

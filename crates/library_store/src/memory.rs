@@ -9,9 +9,9 @@ use std::{
 use sustain_domain::TrackAnalysis;
 
 use crate::{
-    AnalysisAttemptContext, AnalysisCapabilities, AnalysisRunContext, LibraryStore, Playlist,
-    PlaylistFolder, PlaylistFolderId, PlaylistId, SmartPlaylist, SmartPlaylistId, StoreError,
-    StoreResult, StoredWaveform, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
+    AnalysisCapabilities, AnalysisContext, LibraryStore, Playlist, PlaylistFolder,
+    PlaylistFolderId, PlaylistId, SmartPlaylist, SmartPlaylistId, StoreError, StoreResult,
+    StoredWaveform, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
 };
 
 #[derive(Debug, Default)]
@@ -319,7 +319,7 @@ impl LibraryStore for InMemoryLibraryStore {
         track_id: TrackId,
         analysis: &TrackAnalysis,
         capabilities: AnalysisCapabilities,
-        context: AnalysisRunContext,
+        context: AnalysisContext,
     ) -> StoreResult<()> {
         if capabilities.is_empty() {
             return Ok(());
@@ -378,7 +378,7 @@ impl LibraryStore for InMemoryLibraryStore {
         &self,
         track_id: TrackId,
         capabilities: AnalysisCapabilities,
-        context: AnalysisAttemptContext,
+        context: AnalysisContext,
     ) -> StoreResult<()> {
         if capabilities.is_empty() {
             return Ok(());
