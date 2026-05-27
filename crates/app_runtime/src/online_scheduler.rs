@@ -23,8 +23,26 @@
 //!
 //! Lifecycle, command channel, and shutdown semantics are identical
 //! to the analysis scheduler; see its docs for the longer rationale.
+//!
+//! ## Work sources
+//!
+//! The worker multiplexes two sources of work, mirroring the
+//! analysis scheduler:
+//!
+//! 1. **Background sweep** — driven by `LibraryStore::tracks_needing_online`
+//!    with capabilities derived from the global `OnlineSettings`.
+//! 2. **Explicit queue** — populated by
+//!    `OnlineScheduler::request_explicit_run` for per-playlist
+//!    user-initiated runs. Each entry carries its own capability
+//!    mask, independent of the global settings, so a user can fetch
+//!    lyrics for a single playlist while keeping the global lyrics
+//!    toggle off.
+//!
+//! The explicit queue is drained first on every refill, then any
+//! remaining slack is filled from the background query.
 
 use std::{
+    collections::VecDeque,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -118,7 +136,28 @@ enum SchedulerCommand {
     /// "Look for new work" — the library has grown or the user
     /// manually requested a re-run.
     Wake,
+    /// User-initiated batch: process every track in `track_ids`
+    /// with the given `capabilities`, independent of the global
+    /// `OnlineSettings`. The worker enqueues them into the explicit
+    /// queue, drained ahead of the background sweep.
+    ExplicitRun {
+        track_ids: Vec<TrackId>,
+        capabilities: OnlineCapabilities,
+    },
     Shutdown,
+}
+
+/// Per-track entry queued for processing. Each entry carries its own
+/// capability mask so the worker can mix the background sweep
+/// (capabilities derived from `OnlineSettings`) and the explicit
+/// user-initiated queue (capabilities chosen by the right-click menu
+/// item) through the same processing path. `is_explicit` distinguishes
+/// the two for live-settings handling and for diagnostic logging.
+#[derive(Clone, Copy)]
+struct PendingItem {
+    track_id: TrackId,
+    capabilities: OnlineCapabilities,
+    is_explicit: bool,
 }
 
 pub(crate) struct OnlineScheduler {
@@ -151,6 +190,21 @@ impl OnlineScheduler {
 
     pub fn wake(&self) {
         let _ = self.sender.send(SchedulerCommand::Wake);
+    }
+
+    /// Enqueue a user-initiated batch for online retrieval with the
+    /// given capability mask. The batch is processed ahead of the
+    /// background sweep; capabilities here are independent of the
+    /// global `OnlineSettings`, so the caller can fetch lyrics on a
+    /// single playlist while the global lyrics toggle is off.
+    pub fn request_explicit_run(&self, track_ids: Vec<TrackId>, capabilities: OnlineCapabilities) {
+        if track_ids.is_empty() || capabilities.is_empty() {
+            return;
+        }
+        let _ = self.sender.send(SchedulerCommand::ExplicitRun {
+            track_ids,
+            capabilities,
+        });
     }
 
     /// Send Shutdown, drop the sender, and join the worker. Blocks
@@ -195,6 +249,7 @@ fn worker_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: OnlineSchedul
         library_path,
         completed: 0,
         failed: 0,
+        explicit_queue: VecDeque::new(),
     };
 
     loop {
@@ -203,8 +258,10 @@ fn worker_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: OnlineSchedul
             DrainOutcome::Continue => {}
         }
 
-        let capabilities = effective_capabilities(&state.settings);
-        if capabilities.is_empty() || state.library_path.is_none() {
+        let bg_capabilities = effective_capabilities(&state.settings);
+        let has_explicit_work = !state.explicit_queue.is_empty();
+        let has_background_work = !bg_capabilities.is_empty();
+        if state.library_path.is_none() || (!has_explicit_work && !has_background_work) {
             (progress)(SchedulerProgress::Idle {
                 completed: state.completed,
                 failed: state.failed,
@@ -218,19 +275,40 @@ fn worker_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: OnlineSchedul
             continue;
         }
 
-        let pending =
-            match library_store.tracks_needing_online(capabilities, provider_version, BATCH_SIZE) {
-                Ok(ids) => ids,
+        // Build the next batch: explicit queue first, then any
+        // remaining slack filled from the background sweep.
+        let mut batch: Vec<PendingItem> = Vec::new();
+        while batch.len() < BATCH_SIZE {
+            match state.explicit_queue.pop_front() {
+                Some(item) => batch.push(item),
+                None => break,
+            }
+        }
+        if batch.len() < BATCH_SIZE && has_background_work {
+            let room = BATCH_SIZE.saturating_sub(batch.len());
+            match library_store.tracks_needing_online(bg_capabilities, provider_version, room) {
+                Ok(ids) => {
+                    for id in ids {
+                        batch.push(PendingItem {
+                            track_id: id,
+                            capabilities: bg_capabilities,
+                            is_explicit: false,
+                        });
+                    }
+                }
                 Err(_) => {
+                    // Store error: block on the command channel so
+                    // we do not hot-loop against a broken database.
                     match receiver.recv() {
                         Ok(SchedulerCommand::Shutdown) | Err(_) => return,
                         Ok(command) => apply_command(command, &mut state),
                     }
                     continue;
                 }
-            };
+            }
+        }
 
-        if pending.is_empty() {
+        if batch.is_empty() {
             (progress)(SchedulerProgress::Idle {
                 completed: state.completed,
                 failed: state.failed,
@@ -249,27 +327,44 @@ fn worker_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: OnlineSchedul
             None => continue,
         };
 
-        for track_id in pending {
+        for item in batch {
             // Re-check between tracks so a toggle in Preferences stops
-            // the loop within at most one track's worth of work.
+            // the loop within at most one track's worth of work for
+            // background items. Explicit items always keep going —
+            // the user explicitly asked for them.
             if let Some(command) = receiver.try_iter().next() {
                 if matches!(command, SchedulerCommand::Shutdown) {
                     return;
                 }
                 apply_command(command, &mut state);
-                if effective_capabilities(&state.settings).is_empty() {
-                    break;
-                }
             }
 
-            let Ok(Some(track)) = library_store.track(track_id) else {
+            // Resolve dispatch capabilities: explicit items keep what
+            // the user submitted; background items snap to the live
+            // settings so a mid-batch toggle takes effect within one
+            // track.
+            let dispatch_caps = if item.is_explicit {
+                item.capabilities
+            } else {
+                effective_capabilities(&state.settings)
+            };
+            if dispatch_caps.is_empty() {
+                continue;
+            }
+
+            let Ok(Some(track)) = library_store.track(item.track_id) else {
                 continue;
             };
             let absolute_path = track.location.absolute_path(&library_path);
+            let dispatch_settings = OnlineSettings {
+                artwork: dispatch_caps.artwork,
+                tags: dispatch_caps.tags,
+                lyrics: dispatch_caps.lyrics,
+            };
             let report = process_track(
                 &track,
                 &absolute_path,
-                &state.settings,
+                &dispatch_settings,
                 remote_service.as_ref(),
                 &tag_writer,
                 library_store.as_ref(),
@@ -278,7 +373,7 @@ fn worker_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: OnlineSchedul
             if matches!(report.outcome, ProcessOutcome::Succeeded)
                 && let Some(notify) = track_updated.as_deref()
             {
-                notify(track_id);
+                notify(item.track_id);
             }
 
             // Only stamp capabilities that actually completed — a
@@ -290,7 +385,8 @@ fn worker_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: OnlineSchedul
                     provider_version,
                     now_unix: (clock)(),
                 };
-                let _ = library_store.record_online_attempt(track_id, report.attempted, context);
+                let _ =
+                    library_store.record_online_attempt(item.track_id, report.attempted, context);
             }
 
             match report.outcome {
@@ -309,7 +405,8 @@ fn worker_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: OnlineSchedul
                     BATCH_SIZE.saturating_mul(64),
                 )
                 .map(|ids| ids.len() as u32)
-                .unwrap_or(0);
+                .unwrap_or(0)
+                .saturating_add(state.explicit_queue.len() as u32);
             (progress)(SchedulerProgress::Tick {
                 completed: state.completed,
                 failed: state.failed,
@@ -630,6 +727,10 @@ struct WorkerState {
     library_path: Option<PathBuf>,
     completed: u32,
     failed: u32,
+    /// User-initiated work, drained ahead of the background sweep.
+    /// Items here keep their own capability mask, independent of the
+    /// global `OnlineSettings`.
+    explicit_queue: VecDeque<PendingItem>,
 }
 
 enum DrainOutcome {
@@ -657,6 +758,31 @@ fn apply_command(command: SchedulerCommand, state: &mut WorkerState) {
         }
         SchedulerCommand::LibraryPathChanged(path) => {
             state.library_path = path;
+        }
+        SchedulerCommand::ExplicitRun {
+            track_ids,
+            capabilities,
+        } => {
+            if capabilities.is_empty() {
+                return;
+            }
+            // Dedup against the existing queue so a double-clicking
+            // user does not queue the same playlist twice.
+            let already_queued: std::collections::HashSet<TrackId> = state
+                .explicit_queue
+                .iter()
+                .map(|item| item.track_id)
+                .collect();
+            for track_id in track_ids {
+                if already_queued.contains(&track_id) {
+                    continue;
+                }
+                state.explicit_queue.push_back(PendingItem {
+                    track_id,
+                    capabilities,
+                    is_explicit: true,
+                });
+            }
         }
         SchedulerCommand::Wake | SchedulerCommand::Shutdown => {
             // Shutdown is handled at the caller; Wake has no side
@@ -1974,5 +2100,59 @@ mod tests {
         let start = Instant::now();
         scheduler.shutdown();
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn explicit_run_processes_tracks_with_global_settings_off() {
+        // Per-playlist "Fetch Lyrics" must work even though the
+        // global lyrics toggle is off — the user explicitly asked
+        // for it on this playlist.
+        let temp = TempDir::new().expect("temp");
+        let store: Arc<dyn LibraryStore> = Arc::new(InMemoryLibraryStore::new());
+        let track = track_with_metadata(temp.path(), "alpha.flac");
+        store.save_track(track.clone()).expect("save");
+
+        let remote = Arc::new(StubRemote::default().with_lyrics(Ok(Some(FetchedLyrics {
+            plain: Some("Plain text".to_owned()),
+            synced_lrc: None,
+        }))));
+        let metadata = Arc::new(StubMetadata::default());
+        let (sink, rx) = capturing_sink();
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
+        let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
+            remote_service: remote.clone(),
+            tag_writer,
+            library_store: store.clone(),
+            progress: sink,
+            track_updated: None,
+            clock: fixed_clock(1_700_000_000),
+            // Background settings all off — without the explicit
+            // command, nothing would happen.
+            initial_settings: OnlineSettings::default(),
+            library_path: Some(temp.path().to_path_buf()),
+            provider_version: 1,
+        });
+
+        scheduler.request_explicit_run(
+            vec![track.id],
+            OnlineCapabilities {
+                artwork: false,
+                tags: false,
+                lyrics: true,
+            },
+        );
+
+        let _tick = wait_for(&rx, Duration::from_secs(2), |progress| {
+            matches!(progress, SchedulerProgress::Tick { completed: 1, .. })
+        });
+
+        // Lyrics were fetched and persisted, proving the explicit
+        // capability mask routed all the way through.
+        let stored = store.track(track.id).expect("load").expect("present");
+        assert_eq!(stored.metadata.lyrics.as_deref(), Some("Plain text"));
+        assert_eq!(remote.lyrics_calls.load(Ordering::SeqCst), 1);
+
+        scheduler.shutdown();
     }
 }

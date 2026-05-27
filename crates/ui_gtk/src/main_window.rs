@@ -459,6 +459,8 @@ pub(crate) fn build_main_window(
         &runtime,
         &sidebar,
     ));
+    sidebar.set_analysis_run_callback(sidebar_analysis_run_callback(&runtime));
+    sidebar.set_online_run_callback(sidebar_online_run_callback(&runtime));
     library_changed_holder.replace(Some(library_changed.clone()));
     let scan_requested = library_scan_requested_callback(&runtime, library_changed.clone());
     let consolidation_requested = library_consolidation_requested_callback(&runtime);
@@ -1021,6 +1023,31 @@ fn sidebar_delete_callback(
         if dispatched {
             sidebar.refresh();
         }
+    })
+}
+
+fn sidebar_analysis_run_callback(
+    runtime: &SharedRuntime,
+) -> super::sidebar::SidebarAnalysisRunCallback {
+    let runtime = runtime.clone();
+    Rc::new(move |item, capability| {
+        // The runtime decides accept vs deny (based on the global
+        // setting) and pushes the matching ephemeral notification; we
+        // don't act on the return value.
+        let _ = runtime
+            .borrow_mut()
+            .request_playlist_analysis_run(item, capability);
+    })
+}
+
+fn sidebar_online_run_callback(
+    runtime: &SharedRuntime,
+) -> super::sidebar::SidebarOnlineRunCallback {
+    let runtime = runtime.clone();
+    Rc::new(move |item, capability| {
+        let _ = runtime
+            .borrow_mut()
+            .request_playlist_online_run(item, capability);
     })
 }
 

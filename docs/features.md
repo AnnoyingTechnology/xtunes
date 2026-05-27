@@ -174,6 +174,21 @@ the visible set as `N songs, X hours/minutes/days`. Search filtering
 updates the summary so the count always matches what's drawn below.
 The header hides for folder selections and for empty states.
 
+### Per-playlist analysis & online retrieval — *Sustain-native*
+Right-clicking a playlist or smart playlist exposes six menu items —
+**Analyze BPM**, **Detect Key**, **Generate Waveform**, **Fetch Lyrics**,
+**Fetch Artwork**, **Fetch Missing Tags** — that run the chosen
+capability against that playlist's track set without waiting for the
+background sweep to reach them. Useful for dedicated mix-set
+playlists destined for Pioneer PDB export (waveforms cost a lot of
+decode time on long mixes, so most users keep the global waveform
+toggle off and trigger it per playlist) or for one-shot "fetch lyrics
+on this 'Sing me' playlist" runs. Each item is independently denied
+when its matching global toggle is on — the background sweep is
+already covering those tracks, so the right-click trigger would be
+redundant. Folders don't expose the items: they don't carry tracks of
+their own.
+
 ---
 
 ## Playback

@@ -27,7 +27,7 @@ pub use sustain_domain::{
     TrackMetadata, TrackPlaybackSource, TrackRelativePath, UiSettings, UiViewMode, UserSettings,
     VolumePercent, matching_tracks, track_matches_rule_set,
 };
-use sustain_library_store::LibraryStore;
+use sustain_library_store::{AnalysisCapabilities, LibraryStore, OnlineCapabilities};
 pub use sustain_metadata::MetadataService;
 pub use sustain_metadata_remote::{
     AudioFingerprint, FetchedArtwork, RemoteError, RemoteMetadataService, RemoteResult, TrackMatch,
@@ -1304,6 +1304,177 @@ impl ApplicationRuntime {
             SmartPlaylistTrackStatus::Excluded
         }
     }
+
+    /// Resolve the track IDs of a playlist sidebar entry. Regular
+    /// playlists return their persisted entries; smart playlists
+    /// return the current rule-evaluated track set. Returns `None`
+    /// when the item is a folder, or the supplied id is unknown.
+    /// An empty `Vec` is a valid return value for a known-but-empty
+    /// playlist.
+    pub fn playlist_item_track_ids(&self, item: PlaylistItem) -> Option<Vec<TrackId>> {
+        match item {
+            PlaylistItem::Playlist(id) => self
+                .playlists
+                .iter()
+                .find(|playlist| playlist.id == id)
+                .map(|playlist| {
+                    playlist
+                        .entries
+                        .iter()
+                        .map(|entry| entry.track_id)
+                        .collect()
+                }),
+            PlaylistItem::SmartPlaylist(id) => {
+                let exists = self
+                    .smart_playlists
+                    .iter()
+                    .any(|smart_playlist| smart_playlist.id == id);
+                if !exists {
+                    return None;
+                }
+                Some(
+                    self.smart_playlist_matching_tracks(id)
+                        .into_iter()
+                        .map(|track| track.id)
+                        .collect(),
+                )
+            }
+            PlaylistItem::Folder(_) => None,
+        }
+    }
+
+    /// Request a per-playlist analysis run for a single capability.
+    /// Denied when the corresponding global toggle is on (the
+    /// background sweep is already going to process the playlist's
+    /// tracks). Otherwise dispatches the playlist's track set to the
+    /// analysis scheduler with a capability mask matching the
+    /// selector. In both cases an ephemeral notification is pushed
+    /// so the user has a single source of feedback.
+    pub fn request_playlist_analysis_run(
+        &mut self,
+        item: PlaylistItem,
+        capability: AnalysisCapability,
+    ) -> PerPlaylistRunDecision {
+        let global_on = match capability {
+            AnalysisCapability::Bpm => self.settings.analysis.bpm,
+            AnalysisCapability::Key => self.settings.analysis.key,
+            AnalysisCapability::Waveform => self.settings.analysis.waveform,
+        };
+        if global_on {
+            self.push_ephemeral_notification(
+                NotificationCategory::AnalysisBackground,
+                NotificationSeverity::Info,
+                format!(
+                    "Background {} is enabled. These tracks are already queued by the global sweep.",
+                    capability.label()
+                ),
+            );
+            return PerPlaylistRunDecision::DeniedBackgroundEnabled;
+        }
+        let Some(track_ids) = self.playlist_item_track_ids(item) else {
+            return PerPlaylistRunDecision::PlaylistEmptyOrMissing;
+        };
+        if track_ids.is_empty() {
+            return PerPlaylistRunDecision::PlaylistEmptyOrMissing;
+        }
+        let Some(scheduler) = self.analysis_scheduler.as_ref() else {
+            return PerPlaylistRunDecision::SchedulerUnavailable;
+        };
+        let capabilities = match capability {
+            AnalysisCapability::Bpm => AnalysisCapabilities {
+                bpm: true,
+                key: false,
+                waveform: false,
+            },
+            AnalysisCapability::Key => AnalysisCapabilities {
+                bpm: false,
+                key: true,
+                waveform: false,
+            },
+            AnalysisCapability::Waveform => AnalysisCapabilities {
+                bpm: false,
+                key: false,
+                waveform: true,
+            },
+        };
+        let count = track_ids.len();
+        scheduler.request_explicit_run(track_ids, capabilities);
+        self.push_ephemeral_notification(
+            NotificationCategory::AnalysisBackground,
+            NotificationSeverity::Info,
+            format!(
+                "Queued {count} {} for {}.",
+                if count == 1 { "track" } else { "tracks" },
+                capability.label()
+            ),
+        );
+        PerPlaylistRunDecision::Accepted
+    }
+
+    /// Request a per-playlist online retrieval run for a single
+    /// capability. Same shape as
+    /// [`Self::request_playlist_analysis_run`] but targets the online
+    /// scheduler.
+    pub fn request_playlist_online_run(
+        &mut self,
+        item: PlaylistItem,
+        capability: OnlineCapability,
+    ) -> PerPlaylistRunDecision {
+        let global_on = match capability {
+            OnlineCapability::Lyrics => self.settings.online.lyrics,
+            OnlineCapability::Artwork => self.settings.online.artwork,
+            OnlineCapability::Tags => self.settings.online.tags,
+        };
+        if global_on {
+            self.push_ephemeral_notification(
+                NotificationCategory::OnlineBackground,
+                NotificationSeverity::Info,
+                format!(
+                    "Background {} is enabled. These tracks are already queued by the global sweep.",
+                    capability.label()
+                ),
+            );
+            return PerPlaylistRunDecision::DeniedBackgroundEnabled;
+        }
+        let Some(track_ids) = self.playlist_item_track_ids(item) else {
+            return PerPlaylistRunDecision::PlaylistEmptyOrMissing;
+        };
+        if track_ids.is_empty() {
+            return PerPlaylistRunDecision::PlaylistEmptyOrMissing;
+        }
+        let Some(scheduler) = self.online_scheduler.as_ref() else {
+            return PerPlaylistRunDecision::SchedulerUnavailable;
+        };
+        let capabilities = match capability {
+            OnlineCapability::Lyrics => OnlineCapabilities {
+                lyrics: true,
+                artwork: false,
+                tags: false,
+            },
+            OnlineCapability::Artwork => OnlineCapabilities {
+                lyrics: false,
+                artwork: true,
+                tags: false,
+            },
+            OnlineCapability::Tags => OnlineCapabilities {
+                lyrics: false,
+                artwork: false,
+                tags: true,
+            },
+        };
+        let count = track_ids.len();
+        scheduler.request_explicit_run(track_ids, capabilities);
+        self.push_ephemeral_notification(
+            NotificationCategory::OnlineBackground,
+            NotificationSeverity::Info,
+            format!(
+                "Queued {count} {} for {}.",
+                if count == 1 { "track" } else { "tracks" },
+                capability.label()
+            ),
+        );
+        PerPlaylistRunDecision::Accepted
+    }
 }
 
 /// Outcome of [`ApplicationRuntime::smart_playlist_track_status`].
@@ -1322,6 +1493,71 @@ pub enum SmartPlaylistTrackStatus {
     RequiresFullRebuild,
 }
 
+/// Single-capability selector for
+/// [`ApplicationRuntime::request_playlist_analysis_run`]. The UI's
+/// per-playlist right-click menu has one item per variant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnalysisCapability {
+    Bpm,
+    Key,
+    Waveform,
+}
+
+impl AnalysisCapability {
+    /// Human-readable label for the notification text the runtime
+    /// emits when a per-playlist run is accepted or denied.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bpm => "BPM analysis",
+            Self::Key => "key detection",
+            Self::Waveform => "waveform analysis",
+        }
+    }
+}
+
+/// Single-capability selector for
+/// [`ApplicationRuntime::request_playlist_online_run`]. The UI's
+/// per-playlist right-click menu has one item per variant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OnlineCapability {
+    Lyrics,
+    Artwork,
+    Tags,
+}
+
+impl OnlineCapability {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Lyrics => "lyrics retrieval",
+            Self::Artwork => "artwork retrieval",
+            Self::Tags => "tag enrichment",
+        }
+    }
+}
+
+/// Outcome of a per-playlist run request. The runtime always pushes
+/// an ephemeral notification matching the decision; the value is
+/// returned so callers (UI code, tests) can observe what happened
+/// without having to scrape the notification lane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PerPlaylistRunDecision {
+    /// Submitted to the matching scheduler. The user will see a
+    /// "Queued N tracks..." notification followed by the regular
+    /// background-progress notification while the work runs.
+    Accepted,
+    /// The corresponding global setting toggle is on, so the
+    /// playlist's tracks are already going to be processed by the
+    /// background sweep. The per-playlist trigger is redundant and
+    /// the request is rejected.
+    DeniedBackgroundEnabled,
+    /// The supplied playlist id does not exist, refers to a folder,
+    /// or the playlist exists but has no tracks.
+    PlaylistEmptyOrMissing,
+    /// The matching scheduler has not been started (e.g. headless
+    /// runtime, tests). Nothing to dispatch to.
+    SchedulerUnavailable,
+}
+
 impl Default for ApplicationRuntime {
     fn default() -> Self {
         Self::new()
@@ -1336,7 +1572,9 @@ mod tests {
         sync::{Arc, Mutex, MutexGuard},
     };
 
-    use super::SmartPlaylistTrackStatus;
+    use super::{
+        AnalysisCapability, OnlineCapability, PerPlaylistRunDecision, SmartPlaylistTrackStatus,
+    };
     use sustain_domain::{
         ApplicationCommand, Clock, FieldChange, LibraryManagementMode, PlayStatistics,
         PlaybackCommand, PlaybackOptions, PlaybackState, Playlist, PlaylistFolderId, PlaylistId,
@@ -4703,5 +4941,123 @@ mod tests {
 
     fn _assert_metadata_error_is_public(error: MetadataError) -> MetadataError {
         error
+    }
+
+    #[test]
+    fn request_playlist_run_decides_per_global_setting_and_target() {
+        // The decision tree for the per-playlist right-click actions:
+        //   * matching global toggle on -> DeniedBackgroundEnabled
+        //   * unknown / empty playlist  -> PlaylistEmptyOrMissing
+        //   * scheduler not started     -> SchedulerUnavailable
+        // The Accepted path needs a live scheduler and is covered by
+        // the scheduler's own integration tests.
+        let store = Arc::new(InMemoryLibraryStore::new());
+
+        let track = Track {
+            id: track_id(1),
+            location: track_location("t.flac"),
+            content_hash: None,
+            metadata: TrackMetadata::default(),
+            rating: Rating::unrated(),
+            statistics: PlayStatistics::default(),
+            file_size_bytes: None,
+            has_embedded_artwork: None,
+        };
+        store.save_track(track.clone()).expect("save");
+        let playlist = Playlist {
+            id: PlaylistId::new(1).expect("non-zero"),
+            name: "Mix Set".to_owned(),
+            parent_folder_id: None,
+            position: 0,
+            entries: vec![sustain_domain::PlaylistEntry {
+                playlist_id: PlaylistId::new(1).expect("non-zero"),
+                track_id: track.id,
+                position: 0,
+            }],
+        };
+        store.save_playlist(playlist.clone()).expect("save");
+
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+        // Background analysis off, no scheduler started -> the
+        // scheduler is missing, so we surface that uniformly.
+        assert_eq!(
+            runtime.request_playlist_analysis_run(
+                PlaylistItem::Playlist(playlist.id),
+                AnalysisCapability::Bpm,
+            ),
+            PerPlaylistRunDecision::SchedulerUnavailable
+        );
+
+        // Flip background BPM on -> deny path fires before the
+        // scheduler check (the rule is purely about the global
+        // toggle).
+        let mut settings = runtime.settings().clone();
+        settings.analysis.bpm = true;
+        runtime
+            .handle_command(ApplicationCommand::UpdateSettings(settings.clone()))
+            .expect("apply settings");
+        assert_eq!(
+            runtime.request_playlist_analysis_run(
+                PlaylistItem::Playlist(playlist.id),
+                AnalysisCapability::Bpm,
+            ),
+            PerPlaylistRunDecision::DeniedBackgroundEnabled
+        );
+
+        // Key capability is still off globally -> deny does not
+        // trigger, but the scheduler is still missing.
+        assert_eq!(
+            runtime.request_playlist_analysis_run(
+                PlaylistItem::Playlist(playlist.id),
+                AnalysisCapability::Key,
+            ),
+            PerPlaylistRunDecision::SchedulerUnavailable
+        );
+
+        // Unknown playlist id -> PlaylistEmptyOrMissing, regardless
+        // of which capability the user picked.
+        let phantom = PlaylistId::new(999).expect("non-zero");
+        assert_eq!(
+            runtime.request_playlist_analysis_run(
+                PlaylistItem::Playlist(phantom),
+                AnalysisCapability::Key,
+            ),
+            PerPlaylistRunDecision::PlaylistEmptyOrMissing
+        );
+
+        // Same shape for the online runner.
+        assert_eq!(
+            runtime.request_playlist_online_run(
+                PlaylistItem::Playlist(playlist.id),
+                OnlineCapability::Lyrics,
+            ),
+            PerPlaylistRunDecision::SchedulerUnavailable
+        );
+        let mut settings = runtime.settings().clone();
+        settings.online.lyrics = true;
+        runtime
+            .handle_command(ApplicationCommand::UpdateSettings(settings))
+            .expect("apply settings");
+        assert_eq!(
+            runtime.request_playlist_online_run(
+                PlaylistItem::Playlist(playlist.id),
+                OnlineCapability::Lyrics,
+            ),
+            PerPlaylistRunDecision::DeniedBackgroundEnabled
+        );
+
+        // Folders are never a valid target for the per-track-set
+        // actions.
+        let phantom_folder = sustain_domain::PlaylistFolderId::new(1).expect("non-zero");
+        assert_eq!(
+            runtime.request_playlist_online_run(
+                PlaylistItem::Folder(phantom_folder),
+                OnlineCapability::Artwork,
+            ),
+            PerPlaylistRunDecision::PlaylistEmptyOrMissing
+        );
     }
 }

@@ -9,7 +9,9 @@ use std::{
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 
-use sustain_app_runtime::{PlaylistItem, SmartPlaylistId, TrackId};
+use sustain_app_runtime::{
+    AnalysisCapability, OnlineCapability, PlaylistItem, SmartPlaylistId, TrackId,
+};
 
 use super::{
     SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SharedRuntime,
@@ -33,6 +35,12 @@ pub(crate) type SidebarRenameCallback = Rc<dyn Fn(PlaylistItem, String)>;
 pub(crate) type SidebarDeleteCallback = Rc<dyn Fn(PlaylistItem)>;
 pub(crate) type SidebarTracksDropCallback = Rc<dyn Fn(PlaylistItem, Vec<TrackId>)>;
 pub(crate) type SidebarEditSmartPlaylistCallback = Rc<dyn Fn(SmartPlaylistId)>;
+/// Invoked when the user picks an "Analyze BPM/Key/Waveform" menu
+/// item on a playlist or smart playlist sidebar row.
+pub(crate) type SidebarAnalysisRunCallback = Rc<dyn Fn(PlaylistItem, AnalysisCapability)>;
+/// Invoked when the user picks a "Fetch Lyrics/Artwork/Tags" menu
+/// item on a playlist or smart playlist sidebar row.
+pub(crate) type SidebarOnlineRunCallback = Rc<dyn Fn(PlaylistItem, OnlineCapability)>;
 
 /// One of the sidebar's two selection targets.
 ///
@@ -52,6 +60,8 @@ type RenameCallbackHolder = Rc<RefCell<Option<SidebarRenameCallback>>>;
 type DeleteCallbackHolder = Rc<RefCell<Option<SidebarDeleteCallback>>>;
 type TracksDropCallbackHolder = Rc<RefCell<Option<SidebarTracksDropCallback>>>;
 type EditSmartPlaylistCallbackHolder = Rc<RefCell<Option<SidebarEditSmartPlaylistCallback>>>;
+type AnalysisRunCallbackHolder = Rc<RefCell<Option<SidebarAnalysisRunCallback>>>;
+type OnlineRunCallbackHolder = Rc<RefCell<Option<SidebarOnlineRunCallback>>>;
 
 #[derive(Clone)]
 pub(crate) struct PlaylistSidebar {
@@ -66,6 +76,8 @@ pub(crate) struct PlaylistSidebar {
     on_delete: DeleteCallbackHolder,
     on_tracks_drop: TracksDropCallbackHolder,
     on_edit_smart_playlist: EditSmartPlaylistCallbackHolder,
+    on_analysis_run: AnalysisRunCallbackHolder,
+    on_online_run: OnlineRunCallbackHolder,
     pending_rename: Rc<RefCell<Option<PlaylistItem>>>,
 }
 
@@ -93,6 +105,8 @@ impl PlaylistSidebar {
         let on_delete: DeleteCallbackHolder = Rc::new(RefCell::new(None));
         let on_tracks_drop: TracksDropCallbackHolder = Rc::new(RefCell::new(None));
         let on_edit_smart_playlist: EditSmartPlaylistCallbackHolder = Rc::new(RefCell::new(None));
+        let on_analysis_run: AnalysisRunCallbackHolder = Rc::new(RefCell::new(None));
+        let on_online_run: OnlineRunCallbackHolder = Rc::new(RefCell::new(None));
         let pending_rename: Rc<RefCell<Option<PlaylistItem>>> = Rc::new(RefCell::new(None));
         let list_view = gtk::ListView::new(
             Some(selection.clone()),
@@ -102,6 +116,8 @@ impl PlaylistSidebar {
                 on_delete.clone(),
                 on_tracks_drop.clone(),
                 on_edit_smart_playlist.clone(),
+                on_analysis_run.clone(),
+                on_online_run.clone(),
                 pending_rename.clone(),
             )),
         );
@@ -151,6 +167,8 @@ impl PlaylistSidebar {
             on_delete,
             on_tracks_drop,
             on_edit_smart_playlist,
+            on_analysis_run,
+            on_online_run,
             pending_rename,
         }
     }
@@ -186,6 +204,14 @@ impl PlaylistSidebar {
         callback: SidebarEditSmartPlaylistCallback,
     ) {
         self.on_edit_smart_playlist.replace(Some(callback));
+    }
+
+    pub(crate) fn set_analysis_run_callback(&self, callback: SidebarAnalysisRunCallback) {
+        self.on_analysis_run.replace(Some(callback));
+    }
+
+    pub(crate) fn set_online_run_callback(&self, callback: SidebarOnlineRunCallback) {
+        self.on_online_run.replace(Some(callback));
     }
 
     /// Arm an inline rename for `item` on the next bind that matches it.
@@ -376,12 +402,15 @@ fn connect_selection_signal(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_row_factory(
     on_move: MoveCallbackHolder,
     on_rename: RenameCallbackHolder,
     on_delete: DeleteCallbackHolder,
     on_tracks_drop: TracksDropCallbackHolder,
     on_edit_smart_playlist: EditSmartPlaylistCallbackHolder,
+    on_analysis_run: AnalysisRunCallbackHolder,
+    on_online_run: OnlineRunCallbackHolder,
     pending_rename: Rc<RefCell<Option<PlaylistItem>>>,
 ) -> gtk::SignalListItemFactory {
     let current_indicator: SharedDropIndicator = Rc::new(RefCell::new(None));
@@ -515,6 +544,8 @@ fn build_row_factory(
                 entry: entry.clone(),
                 on_delete: on_delete.clone(),
                 on_edit_smart_playlist: on_edit_smart_playlist.clone(),
+                on_analysis_run: on_analysis_run.clone(),
+                on_online_run: on_online_run.clone(),
             },
         );
         attach_rename_entry_signals(

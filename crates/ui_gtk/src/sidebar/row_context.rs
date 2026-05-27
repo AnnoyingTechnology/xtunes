@@ -3,9 +3,12 @@
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
-use sustain_app_runtime::PlaylistItem;
+use sustain_app_runtime::{AnalysisCapability, OnlineCapability, PlaylistItem};
 
-use super::{DeleteCallbackHolder, EditSmartPlaylistCallbackHolder, RenameCallbackHolder};
+use super::{
+    AnalysisRunCallbackHolder, DeleteCallbackHolder, EditSmartPlaylistCallbackHolder,
+    OnlineRunCallbackHolder, RenameCallbackHolder,
+};
 
 #[derive(Clone)]
 pub(super) struct SidebarRowContext {
@@ -16,6 +19,8 @@ pub(super) struct SidebarRowContext {
     pub(super) entry: gtk::Entry,
     pub(super) on_delete: DeleteCallbackHolder,
     pub(super) on_edit_smart_playlist: EditSmartPlaylistCallbackHolder,
+    pub(super) on_analysis_run: AnalysisRunCallbackHolder,
+    pub(super) on_online_run: OnlineRunCallbackHolder,
 }
 
 pub(super) fn attach_row_context_menu(row: &gtk::Widget, context: SidebarRowContext) {
@@ -89,16 +94,67 @@ fn popup_row_context_menu(anchor: &gtk::Widget, context: SidebarRowContext, x: f
     let delete_button = row_action_button(delete_label_for(context.item));
     let popover_for_delete = popover.clone();
     let anchor_for_delete = anchor.clone();
+    let item_for_delete = context.item;
+    let current_name_for_delete = context.current_name.clone();
+    let on_delete_for_delete = context.on_delete.clone();
     delete_button.connect_clicked(move |_| {
         popover_for_delete.popdown();
         confirm_and_delete(
             &anchor_for_delete,
-            context.item,
-            context.current_name.clone(),
-            context.on_delete.clone(),
+            item_for_delete,
+            current_name_for_delete.clone(),
+            on_delete_for_delete.clone(),
         );
     });
     content.append(&delete_button);
+
+    // Per-playlist analysis + online retrieval actions. Folders
+    // don't carry tracks of their own, so the run actions only show
+    // up for Playlist and SmartPlaylist rows.
+    if matches!(
+        context.item,
+        PlaylistItem::Playlist(_) | PlaylistItem::SmartPlaylist(_)
+    ) {
+        content.append(&row_separator());
+
+        for (label_text, capability) in [
+            ("Analyze BPM", AnalysisCapability::Bpm),
+            ("Detect Key", AnalysisCapability::Key),
+            ("Generate Waveform", AnalysisCapability::Waveform),
+        ] {
+            let button = row_action_button(label_text);
+            let popover_for_run = popover.clone();
+            let item_for_run = context.item;
+            let on_analysis_run = context.on_analysis_run.clone();
+            button.connect_clicked(move |_| {
+                popover_for_run.popdown();
+                if let Some(callback) = on_analysis_run.borrow().as_ref() {
+                    callback(item_for_run, capability);
+                }
+            });
+            content.append(&button);
+        }
+
+        content.append(&row_separator());
+
+        for (label_text, capability) in [
+            ("Fetch Lyrics", OnlineCapability::Lyrics),
+            ("Fetch Artwork", OnlineCapability::Artwork),
+            ("Fetch Missing Tags", OnlineCapability::Tags),
+        ] {
+            let button = row_action_button(label_text);
+            let popover_for_run = popover.clone();
+            let item_for_run = context.item;
+            let on_online_run = context.on_online_run.clone();
+            button.connect_clicked(move |_| {
+                popover_for_run.popdown();
+                if let Some(callback) = on_online_run.borrow().as_ref() {
+                    callback(item_for_run, capability);
+                }
+            });
+            content.append(&button);
+        }
+    }
 
     popover.set_child(Some(&content));
 
@@ -125,6 +181,12 @@ fn row_action_button(label_text: &str) -> gtk::Button {
     button.set_halign(gtk::Align::Fill);
     button.set_hexpand(true);
     button
+}
+
+fn row_separator() -> gtk::Separator {
+    let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+    separator.add_css_class("sidebar-context-menu-separator");
+    separator
 }
 
 fn delete_label_for(item: PlaylistItem) -> &'static str {

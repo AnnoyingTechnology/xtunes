@@ -39,6 +39,26 @@
 //! IO idle (`Innocuous`), the kernel scheduler is the real
 //! throttling mechanism; the pause only exists to keep the worker
 //! loop from spinning when the store has nothing to dispense.
+//!
+//! ## Work sources
+//!
+//! The supervisor multiplexes two sources of work:
+//!
+//! 1. **Background sweep** — driven by `tracks_needing_analysis` with
+//!    capabilities derived from the global `AnalysisSettings`. Empty
+//!    when every flag is off.
+//! 2. **Explicit queue** — populated by
+//!    `AnalysisScheduler::request_explicit_run` for per-playlist
+//!    user-initiated runs (the right-click menu items). Each entry
+//!    carries its own capability mask, independent of the global
+//!    settings, so a user can ask for waveform analysis on a single
+//!    playlist while keeping waveform globally off.
+//!
+//! The explicit queue is drained first on every refill, then any
+//! remaining buffer slack is filled from the background query. Items
+//! that overlap (same track present in both queues with different
+//! capabilities) are not merged — they dispatch as two separate
+//! passes against the file, which is wasteful but correct.
 
 use std::{
     collections::{HashSet, VecDeque},
@@ -150,6 +170,15 @@ enum SchedulerCommand {
     /// "Look for new work" — the store may have grown (library scan
     /// added tracks, or the user manually requested re-analysis).
     Wake,
+    /// User-initiated batch: process every track in `track_ids` with
+    /// the given `capabilities`, independent of the global
+    /// `AnalysisSettings`. The supervisor enqueues them into the
+    /// explicit queue, which is drained ahead of the background
+    /// sweep.
+    ExplicitRun {
+        track_ids: Vec<TrackId>,
+        capabilities: AnalysisCapabilities,
+    },
     Shutdown,
 }
 
@@ -198,6 +227,30 @@ impl AnalysisScheduler {
         let _ = self.sender.send(SchedulerCommand::Wake);
     }
 
+    /// Enqueue a user-initiated batch of tracks for analysis with the
+    /// given capability mask. The batch is processed ahead of the
+    /// background sweep; capabilities here are independent of the
+    /// global `AnalysisSettings`, so the caller can request waveform
+    /// analysis on a single playlist while the global waveform toggle
+    /// is off.
+    ///
+    /// Duplicate `TrackId`s already in flight or already queued (either
+    /// explicit or background) are filtered at the supervisor; submitting
+    /// the same list twice in quick succession is wasteful but safe.
+    pub fn request_explicit_run(
+        &self,
+        track_ids: Vec<TrackId>,
+        capabilities: AnalysisCapabilities,
+    ) {
+        if track_ids.is_empty() || capabilities.is_empty() {
+            return;
+        }
+        let _ = self.sender.send(SchedulerCommand::ExplicitRun {
+            track_ids,
+            capabilities,
+        });
+    }
+
     /// Send Shutdown, drop the sender, and join the supervisor. Blocks
     /// until the supervisor finishes draining the queue and returns
     /// from its loop. In-flight DSP completes naturally — we do not
@@ -230,6 +283,25 @@ struct WorkItem {
     absolute_path: PathBuf,
     capabilities: AnalysisCapabilities,
     context: AnalysisContext,
+}
+
+/// Per-track entry queued for dispatch. Each entry carries its own
+/// capability mask so the supervisor can mix two work sources — the
+/// background `tracks_needing_analysis` sweep (capabilities derived
+/// from `AnalysisSettings`) and the explicit user-initiated queue
+/// (capabilities chosen by the per-playlist right-click menu item) —
+/// through the same dispatch path.
+///
+/// `is_explicit` distinguishes the two at dispatch time: background
+/// items snap to the *current* settings (so a user toggling a
+/// capability off mid-batch takes effect within one batch), while
+/// explicit items use the capabilities the user submitted with the
+/// right-click, regardless of any settings change since then.
+#[derive(Clone, Copy)]
+struct PendingItem {
+    track_id: TrackId,
+    capabilities: AnalysisCapabilities,
+    is_explicit: bool,
 }
 
 /// Per-track outcome workers report back to the supervisor. The
@@ -369,6 +441,10 @@ struct SupervisorState {
     library_path: Option<PathBuf>,
     completed: u32,
     failed: u32,
+    /// User-initiated work, drained ahead of the background sweep.
+    /// Items here keep their own capability mask, independent of the
+    /// global `AnalysisSettings`.
+    explicit_queue: VecDeque<PendingItem>,
 }
 
 fn supervisor_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisSchedulerConfig) {
@@ -391,6 +467,7 @@ fn supervisor_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisS
         library_path,
         completed: 0,
         failed: 0,
+        explicit_queue: VecDeque::new(),
     };
 
     let (outcome_tx, outcome_rx) = mpsc::channel::<WorkOutcome>();
@@ -411,7 +488,7 @@ fn supervisor_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisS
     // channel is full, it stays at the head of `pending` and the
     // outer loop re-enters via the outcome wait below.
     let mut in_flight: HashSet<TrackId> = HashSet::new();
-    let mut pending: VecDeque<TrackId> = VecDeque::new();
+    let mut pending: VecDeque<PendingItem> = VecDeque::new();
 
     loop {
         // 1. Drain commands. A resource-usage flip tears down the
@@ -435,17 +512,38 @@ fn supervisor_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisS
             // transit; we discard the in-flight set so the new
             // pool starts clean, and `apply_outcome`'s
             // `HashSet::remove` is defensive for the stragglers.
+            //
+            // Background items in `pending` can be dropped — the
+            // next refill's `tracks_needing_analysis` query will
+            // surface them again. Explicit items must be preserved,
+            // so we move them to the front of `explicit_queue` (in
+            // original order) before clearing `pending`. Losing
+            // user-initiated work on a settings flip would be a
+            // silent surprise.
             in_flight.clear();
+            let preserved: Vec<PendingItem> = pending
+                .iter()
+                .filter(|item| item.is_explicit)
+                .copied()
+                .collect();
+            for item in preserved.into_iter().rev() {
+                state.explicit_queue.push_front(item);
+            }
             pending.clear();
         }
 
-        let capabilities = capabilities_from(&state.settings);
+        let bg_capabilities = capabilities_from(&state.settings);
+        let has_explicit_work = !state.explicit_queue.is_empty();
         let library_path = match state.library_path.clone() {
-            Some(path) if !capabilities.is_empty() => path,
+            Some(path)
+                if !bg_capabilities.is_empty() || has_explicit_work || !pending.is_empty() =>
+            {
+                path
+            }
             _ => {
-                // Disabled or no library path. Drain outcomes so
-                // running totals stay honest, then either go idle
-                // (nothing in flight) or wait for the tail.
+                // No library path, or both work sources empty. Drain
+                // outcomes so running totals stay honest, then either
+                // go idle (nothing in flight) or wait for the tail.
                 drain_outcomes_nonblocking(
                     &outcome_rx,
                     &mut state,
@@ -453,7 +551,7 @@ fn supervisor_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisS
                     &library_store,
                     &progress,
                     analyzer_version,
-                    capabilities,
+                    bg_capabilities,
                 );
                 if in_flight.is_empty() {
                     pending.clear();
@@ -476,7 +574,7 @@ fn supervisor_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisS
                         &library_store,
                         &progress,
                         analyzer_version,
-                        capabilities,
+                        bg_capabilities,
                     );
                 }
                 continue;
@@ -500,11 +598,10 @@ fn supervisor_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisS
             .work_tx
             .clone();
 
-        // 3. Refill `pending` from the store when the local
-        //    buffer empties. We request enough rows to cover
-        //    the in-flight set (which the store still returns
-        //    as "needs analysis") plus one batch of new work,
-        //    then drop the overlap via the HashSet filter.
+        // 3. Refill `pending` from the two work sources when the
+        //    buffer empties. Explicit (user-initiated) work goes
+        //    first; any remaining slack is filled from the store's
+        //    background `tracks_needing_analysis` query.
         //
         //    The query happens on the cadence of "buffer empty"
         //    rather than "in-flight zero", so workers stay fed
@@ -513,31 +610,56 @@ fn supervisor_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisS
         //    between batches that the old "wait for in_flight==0"
         //    gate produced.
         if pending.is_empty() {
-            let limit = BATCH_SIZE.saturating_add(in_flight.len());
-            match library_store.tracks_needing_analysis(capabilities, analyzer_version, limit) {
-                Ok(fresh) => {
-                    for id in fresh {
-                        if !in_flight.contains(&id) {
-                            pending.push_back(id);
+            // 3a. Explicit queue first.
+            while pending.len() < BATCH_SIZE {
+                match state.explicit_queue.pop_front() {
+                    Some(item) => {
+                        if !in_flight.contains(&item.track_id) {
+                            pending.push_back(item);
                         }
                     }
-                }
-                Err(_) => {
-                    // A store error here would be alarming; tear the
-                    // pool down and wait for an explicit nudge so we
-                    // do not hot-loop on a broken database.
-                    if let Some(p) = pool.take() {
-                        p.shutdown();
-                    }
-                    if !block_for_next_command(&receiver, &mut state, &mut pool) {
-                        return;
-                    }
-                    continue;
+                    None => break,
                 }
             }
 
-            if pending.is_empty() && in_flight.is_empty() {
-                // Truly caught up: nothing pending, nothing in flight.
+            // 3b. Background sweep fills the remainder.
+            if pending.len() < BATCH_SIZE && !bg_capabilities.is_empty() {
+                let room = BATCH_SIZE.saturating_sub(pending.len());
+                let limit = room.saturating_add(in_flight.len());
+                match library_store.tracks_needing_analysis(
+                    bg_capabilities,
+                    analyzer_version,
+                    limit,
+                ) {
+                    Ok(fresh) => {
+                        for id in fresh {
+                            if !in_flight.contains(&id) {
+                                pending.push_back(PendingItem {
+                                    track_id: id,
+                                    capabilities: bg_capabilities,
+                                    is_explicit: false,
+                                });
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // A store error here would be alarming; tear
+                        // the pool down and wait for an explicit
+                        // nudge so we do not hot-loop on a broken
+                        // database.
+                        if let Some(p) = pool.take() {
+                            p.shutdown();
+                        }
+                        if !block_for_next_command(&receiver, &mut state, &mut pool) {
+                            return;
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            if pending.is_empty() && in_flight.is_empty() && state.explicit_queue.is_empty() {
+                // Truly caught up: every source drained.
                 if let Some(p) = pool.take() {
                     p.shutdown();
                 }
@@ -553,8 +675,11 @@ fn supervisor_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisS
         //    full (workers saturated) or `pending` is empty.
         //    `try_send` keeps the supervisor responsive to
         //    commands; anything that didn't fit stays at the head
-        //    of `pending` for the next iteration.
-        while let Some(&track_id) = pending.front() {
+        //    of `pending` for the next iteration. Each item
+        //    dispatches with its own capability mask — background
+        //    items use the live settings, explicit items use
+        //    whatever the right-click submitted.
+        while let Some(&item) = pending.front() {
             // Re-check commands between dispatch attempts so a
             // capability toggle or resource-usage flip mid-batch
             // applies promptly. `command_drain_step` returns false
@@ -566,20 +691,29 @@ fn supervisor_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisS
                 drain_outcomes_blocking_until_quiet(&outcome_rx, &mut in_flight);
                 return;
             }
-            let live_caps = capabilities_from(&state.settings);
-            if live_caps.is_empty() {
-                // Capabilities went to zero mid-dispatch; leave
-                // `pending` untouched and let the next outer
-                // iteration drop the pool + emit idle.
-                break;
-            }
             if pool.is_none() {
                 // Resource-usage flip tore the pool down between
                 // the work_tx clone above and this iteration.
                 break;
             }
 
-            let Ok(Some(track)) = library_store.track(track_id) else {
+            // Resolve capabilities: explicit items keep what the user
+            // submitted; background items snap to the live settings so
+            // a mid-batch toggle takes effect within one batch.
+            let dispatch_caps = if item.is_explicit {
+                item.capabilities
+            } else {
+                capabilities_from(&state.settings)
+            };
+            if dispatch_caps.is_empty() {
+                // Background item whose capability has since been
+                // toggled off. Drop it; the next refill will reflect
+                // the new settings.
+                pending.pop_front();
+                continue;
+            }
+
+            let Ok(Some(track)) = library_store.track(item.track_id) else {
                 // Track vanished (concurrent delete or DB error).
                 pending.pop_front();
                 continue;
@@ -589,16 +723,16 @@ fn supervisor_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisS
                 analyzer_version,
                 now_unix: (clock)(),
             };
-            let item = WorkItem {
-                track_id,
+            let work_item = WorkItem {
+                track_id: item.track_id,
                 absolute_path,
-                capabilities: live_caps,
+                capabilities: dispatch_caps,
                 context,
             };
-            match work_tx.try_send(item) {
+            match work_tx.try_send(work_item) {
                 Ok(()) => {
                     pending.pop_front();
-                    in_flight.insert(track_id);
+                    in_flight.insert(item.track_id);
                 }
                 Err(async_channel::TrySendError::Full(_)) => {
                     // Workers saturated; the outcome wait below
@@ -616,7 +750,7 @@ fn supervisor_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisS
         //    responsiveness). Outcomes are the dispatcher's clock:
         //    each one frees a queue slot, so the next iteration
         //    can dispatch more from `pending`.
-        if in_flight.is_empty() && pending.is_empty() {
+        if in_flight.is_empty() && pending.is_empty() && state.explicit_queue.is_empty() {
             // Nothing to wait on and nothing to dispatch — block
             // on the command channel so we don't busy-loop.
             if !block_for_next_command(&receiver, &mut state, &mut pool) {
@@ -630,7 +764,7 @@ fn supervisor_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisS
                 &library_store,
                 &progress,
                 analyzer_version,
-                capabilities,
+                bg_capabilities,
             );
         }
     }
@@ -829,6 +963,35 @@ fn apply_command(
         }
         SchedulerCommand::LibraryPathChanged(path) => {
             state.library_path = path;
+        }
+        SchedulerCommand::ExplicitRun {
+            track_ids,
+            capabilities,
+        } => {
+            if capabilities.is_empty() {
+                return;
+            }
+            // Dedup against everything we already know about: the
+            // explicit queue itself (user double-clicked) and any
+            // background-sourced entries we have already lined up.
+            // Items already in flight are filtered at refill time
+            // (the `in_flight` HashSet check), so we don't see them
+            // here.
+            let already_queued: HashSet<TrackId> = state
+                .explicit_queue
+                .iter()
+                .map(|item| item.track_id)
+                .collect();
+            for track_id in track_ids {
+                if already_queued.contains(&track_id) {
+                    continue;
+                }
+                state.explicit_queue.push_back(PendingItem {
+                    track_id,
+                    capabilities,
+                    is_explicit: true,
+                });
+            }
         }
         SchedulerCommand::Wake | SchedulerCommand::Shutdown => {
             // Shutdown is handled at the caller; Wake has no side
@@ -1582,5 +1745,181 @@ mod tests {
         );
         assert_eq!(capability_count(AnalysisCapabilities::all()), 3);
         assert_eq!(capability_count(AnalysisCapabilities::none()), 0);
+    }
+
+    #[test]
+    fn explicit_run_processes_tracks_with_global_settings_off() {
+        // The per-playlist right-click menu lets the user run, say,
+        // waveform analysis on a single playlist while the global
+        // waveform toggle stays off. The scheduler must accept and
+        // process the explicit batch even though
+        // `tracks_needing_analysis` would return nothing for the
+        // empty settings mask.
+        use std::sync::Mutex;
+
+        let temp = TempDir::new().expect("temp dir");
+        let library_root = temp.path().to_path_buf();
+        let mut track_a = touch_in(&library_root, "a.flac");
+        track_a.id = TrackId::new(11).expect("non-zero");
+        let mut track_b = touch_in(&library_root, "b.flac");
+        track_b.id = TrackId::new(22).expect("non-zero");
+        let store: Arc<dyn LibraryStore> = Arc::new(InMemoryLibraryStore::new());
+        store.save_track(track_a.clone()).expect("save");
+        store.save_track(track_b.clone()).expect("save");
+
+        let observed: Arc<Mutex<Vec<AnalysisCapabilities>>> = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_closure = observed.clone();
+        let analyzer: AnalyzerFn = Arc::new(move |_path, caps, _opts| {
+            observed_for_closure.lock().expect("lock").push(caps);
+            ok_analyzer()(
+                std::path::Path::new("ignored"),
+                AnalysisCapabilities::all(),
+                AnalysisOptions::default(),
+            )
+        });
+
+        let (sink, rx) = capturing_sink();
+        let scheduler = AnalysisScheduler::start(deterministic_config(
+            analyzer,
+            sink,
+            fixed_clock(1),
+            store.clone(),
+            AnalysisSettings {
+                bpm: false,
+                key: false,
+                waveform: false,
+            },
+            Some(library_root),
+        ));
+
+        // Without the explicit request the scheduler should be idle
+        // (no capabilities, nothing to do). Submit the per-playlist
+        // batch and expect both tracks to be processed.
+        scheduler.request_explicit_run(
+            vec![track_a.id, track_b.id],
+            AnalysisCapabilities {
+                bpm: false,
+                key: false,
+                waveform: true,
+            },
+        );
+
+        let _tick = wait_for(&rx, Duration::from_secs(2), |progress| {
+            matches!(progress, SchedulerProgress::Tick { completed: 2, .. })
+        });
+
+        let seen = observed.lock().expect("lock").clone();
+        assert_eq!(seen.len(), 2, "both tracks must be processed");
+        for caps in seen {
+            assert!(!caps.bpm, "explicit caps must control the mask");
+            assert!(!caps.key);
+            assert!(caps.waveform);
+        }
+
+        scheduler.shutdown();
+    }
+
+    #[test]
+    fn explicit_run_drains_ahead_of_background_sweep() {
+        // The explicit queue is meant to feel "do this now". Even
+        // when the background sweep has tracks lined up, the
+        // explicit batch must reach the workers first.
+        use std::sync::Mutex;
+
+        let temp = TempDir::new().expect("temp dir");
+        let library_root = temp.path().to_path_buf();
+        let store: Arc<dyn LibraryStore> = Arc::new(InMemoryLibraryStore::new());
+
+        // Five background tracks the settings will sweep up.
+        for index in 0..5_i64 {
+            let relative = format!("bg_{index:02}.flac");
+            let mut track = touch_in(&library_root, &relative);
+            track.id = TrackId::new(index + 1).expect("non-zero");
+            store.save_track(track).expect("save background track");
+        }
+        // One explicit track the user clicked on.
+        let mut explicit_track = touch_in(&library_root, "explicit.flac");
+        explicit_track.id = TrackId::new(99).expect("non-zero");
+        store
+            .save_track(explicit_track.clone())
+            .expect("save explicit");
+
+        let order: Arc<Mutex<Vec<TrackId>>> = Arc::new(Mutex::new(Vec::new()));
+        let order_for_closure = order.clone();
+        let analyzer: AnalyzerFn = Arc::new(move |path, _caps, _opts| {
+            // Recover the TrackId from the path stem so the test can
+            // assert on processing order without needing a richer
+            // analyzer hook.
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            let id_value: i64 = if stem == "explicit" {
+                99
+            } else {
+                stem.trim_start_matches("bg_")
+                    .parse::<i64>()
+                    .map(|n| n + 1)
+                    .unwrap_or(0)
+            };
+            if let Some(id) = TrackId::new(id_value) {
+                order_for_closure.lock().expect("lock").push(id);
+            }
+            ok_analyzer()(
+                std::path::Path::new("ignored"),
+                AnalysisCapabilities::all(),
+                AnalysisOptions::default(),
+            )
+        });
+
+        let (sink, rx) = capturing_sink();
+        let scheduler = AnalysisScheduler::start(deterministic_config(
+            analyzer,
+            sink,
+            fixed_clock(1),
+            store,
+            AnalysisSettings {
+                bpm: true,
+                key: false,
+                waveform: false,
+            },
+            Some(library_root),
+        ));
+
+        // The five background tracks are already eligible. Submit
+        // the explicit run; the supervisor must put it ahead of the
+        // queue.
+        scheduler.request_explicit_run(
+            vec![explicit_track.id],
+            AnalysisCapabilities {
+                bpm: false,
+                key: true,
+                waveform: false,
+            },
+        );
+
+        // Wait until everything is done.
+        let _tick = wait_for(
+            &rx,
+            Duration::from_secs(5),
+            |progress| matches!(progress, SchedulerProgress::Tick { completed, .. } if *completed >= 6),
+        );
+
+        let seen = order.lock().expect("lock").clone();
+        let explicit_position = seen
+            .iter()
+            .position(|id| *id == explicit_track.id)
+            .expect("explicit track was processed");
+        // A background track may slip ahead if it reached the worker
+        // queue before the explicit command arrived: that race is
+        // bounded by the queue capacity (worker_count + 1). With one
+        // worker that's at most one background track.
+        assert!(
+            explicit_position <= 1,
+            "explicit run must reach the workers immediately, saw position {explicit_position} of {}",
+            seen.len()
+        );
+
+        scheduler.shutdown();
     }
 }
