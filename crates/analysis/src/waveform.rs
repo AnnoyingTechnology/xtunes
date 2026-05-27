@@ -17,28 +17,25 @@
 //! at 255 and quieter material scales below it — visually consistent
 //! across tracks regardless of their absolute peak level.
 
-use std::path::Path;
-
 use sustain_domain::{
     DETAIL_SEGMENTS_PER_SECOND, PREVIEW_SEGMENT_COUNT, WaveformSegment, WaveformSegments,
 };
 
-use crate::{AnalysisError, bands::ThreeBandSplitter, decode::decode_full};
+use crate::bands::ThreeBandSplitter;
 
-pub(crate) struct WaveformTiers {
-    pub(crate) preview: WaveformSegments,
-    pub(crate) detail: WaveformSegments,
-}
-
-/// Decode the audio file and emit both waveform tiers.
-pub(crate) fn generate(path: &Path) -> Result<WaveformTiers, AnalysisError> {
-    let decoded = decode_full(path)?;
-    Ok(build_tiers(&decoded.samples, decoded.sample_rate))
+/// Both waveform tiers (preview + detail) produced from one decode
+/// pass. Public so that [`crate::Analyzer::waveform`] can hand the
+/// renderer / persistence layer the pair without exposing the
+/// intermediate segmenter accumulators.
+pub struct WaveformTiers {
+    pub preview: WaveformSegments,
+    pub detail: WaveformSegments,
 }
 
 /// Pure builder: input is one mono stream + sample rate, output is
-/// both tiers. Split out from `generate` so the unit tests can drive
-/// it with synthetic samples without touching symphonia.
+/// both tiers. The full-decode entry point used to live in this
+/// module; the Analyzer now owns decoding via its capped/full caches
+/// and calls `build_tiers` directly, so the I/O wrapper is gone.
 pub(crate) fn build_tiers(samples: &[f32], sample_rate: u32) -> WaveformTiers {
     if samples.is_empty() || sample_rate == 0 {
         return empty_tiers(sample_rate);

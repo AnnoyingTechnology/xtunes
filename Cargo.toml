@@ -29,7 +29,13 @@ publish = false
 gtk = { package = "gtk4", version = "0.10", features = ["v4_18"] }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny` rather than `forbid` so a single, audited module
+# (`sustain_app_runtime::priority`) can opt in via `#![allow(unsafe_code)]`
+# to wrap the `setpriority` / `ioprio_set` Linux syscalls in safe Rust.
+# Every other crate and module still rejects `unsafe`; the per-binary
+# `#![forbid(unsafe_code)]` in `crates/app/src/main.rs` reinforces that
+# the application binary itself ships no unsafe code.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 panic = "warn"

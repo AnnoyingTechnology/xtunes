@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-#![forbid(unsafe_code)]
+// The workspace already denies `unsafe_code`; the single audited
+// exception is `crate::priority`, whose module-level
+// `#![allow(unsafe_code)]` wraps three Linux syscalls in a safe API.
 
 use std::{
     path::{Path, PathBuf},
@@ -12,17 +14,18 @@ use std::{
 };
 
 pub use sustain_domain::{
-    ApplicationCommand, ApplicationQuery, Clock, DEFAULT_PLAYBACK_VOLUME_PERCENT, FieldChange,
-    LibraryManagementMode, LibrarySettings, MetadataChange, PlayStatistics, PlaybackCommand,
-    PlaybackOptions, PlaybackQueue, PlaybackQueueRequest, PlaybackQueueSource, PlaybackSession,
-    PlaybackSettings, PlaybackState, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId,
-    PlaylistId, PlaylistItem, Rating, RepeatMode, SmartPlaylist, SmartPlaylistDateField,
-    SmartPlaylistId, SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind,
-    SmartPlaylistNumberField, SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet,
-    SmartPlaylistTextField, SmartPlaylistTextOperator, SystemClock, Track, TrackAvailability,
-    TrackColumnEntry, TrackColumnLayout, TrackColumnLayoutScope, TrackContentHash, TrackId,
-    TrackLocation, TrackMetadata, TrackPlaybackSource, TrackRelativePath, UiSettings, UiViewMode,
-    UserSettings, VolumePercent, matching_tracks,
+    ApplicationCommand, ApplicationQuery, BackgroundJobsSettings, BackgroundResourceUsage, Clock,
+    DEFAULT_PLAYBACK_VOLUME_PERCENT, FieldChange, LibraryManagementMode, LibrarySettings,
+    MetadataChange, PlayStatistics, PlaybackCommand, PlaybackOptions, PlaybackQueue,
+    PlaybackQueueRequest, PlaybackQueueSource, PlaybackSession, PlaybackSettings, PlaybackState,
+    Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId, PlaylistItem, Rating,
+    RepeatMode, SmartPlaylist, SmartPlaylistDateField, SmartPlaylistId, SmartPlaylistLimit,
+    SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistNumberField,
+    SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField,
+    SmartPlaylistTextOperator, SystemClock, Track, TrackAvailability, TrackColumnEntry,
+    TrackColumnLayout, TrackColumnLayoutScope, TrackContentHash, TrackId, TrackLocation,
+    TrackMetadata, TrackPlaybackSource, TrackRelativePath, UiSettings, UiViewMode, UserSettings,
+    VolumePercent, matching_tracks, track_matches_rule_set,
 };
 use sustain_library_store::LibraryStore;
 pub use sustain_metadata::MetadataService;
@@ -38,7 +41,9 @@ pub use sustain_search::{
 use sustain_settings::SettingsStore;
 
 pub mod analysis_scheduler;
+pub mod priority;
 pub use analysis_scheduler::SchedulerProgress as AnalysisProgress;
+pub use priority::{IoPriorityClass, NiceLevel, resolve_worker_count};
 
 /// Watermark stamped into `track_online_status.provider_version` so a
 /// future incompatible change to the online-retrieval pipeline (a
@@ -555,9 +560,61 @@ impl ApplicationRuntime {
             .clone()
             .ok_or(ApplicationRuntimeError::LibraryServicesUnavailable)?;
 
-        // Production analyzer: the real DSP. Tests substitute a stub via
-        // analysis_scheduler::AnalysisScheduler::start directly.
-        let analyzer: analysis_scheduler::AnalyzerFn = Arc::new(sustain_analysis::analyze);
+        // Production analyzer: compose a `sustain_analysis::Analyzer`
+        // per track and call only the band methods the capability mask
+        // selects, so a track scheduled with `bpm: true, key: false,
+        // waveform: false` never pays for chroma extraction or the
+        // full-track waveform decode. Tests substitute a stub via
+        // `analysis_scheduler::AnalysisScheduler::start` directly.
+        let analyzer: analysis_scheduler::AnalyzerFn = Arc::new(|path, capabilities, options| {
+            // Surface a hard error before constructing the lazy
+            // analyzer so the supervisor can route the track to
+            // `record_analysis_attempt_failure` instead of
+            // silently stamping all-None.
+            let _ = std::fs::File::open(path).map_err(|source| {
+                sustain_analysis::AnalysisError::OpenFailed {
+                    path: path.display().to_string(),
+                    source,
+                }
+            })?;
+
+            let analyzer = sustain_analysis::Analyzer::new(path.to_path_buf(), options);
+            let bpm = if capabilities.bpm {
+                analyzer.bpm()
+            } else {
+                None
+            };
+            let key = if capabilities.key {
+                analyzer.key()
+            } else {
+                None
+            };
+            let waveform = if capabilities.waveform {
+                analyzer.waveform()
+            } else {
+                None
+            };
+            let (waveform_preview, waveform_detail) = match waveform {
+                Some(tiers) => (tiers.preview, tiers.detail),
+                None => (
+                    sustain_analysis::WaveformSegments {
+                        segment_duration_ms: 0.0,
+                        segments: Vec::new(),
+                    },
+                    sustain_analysis::WaveformSegments {
+                        segment_duration_ms: 0.0,
+                        segments: Vec::new(),
+                    },
+                ),
+            };
+            Ok(sustain_analysis::TrackAnalysis {
+                bpm,
+                key,
+                beatgrid: None,
+                waveform_preview,
+                waveform_detail,
+            })
+        });
         let clock: analysis_scheduler::UnixClockFn = Arc::new(|| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -596,6 +653,7 @@ impl ApplicationRuntime {
                 clock,
                 library_store,
                 initial_settings: self.settings.analysis,
+                initial_resource_usage: self.settings.background_jobs.resource_usage,
                 library_path: self.settings.library.path.clone(),
                 analyzer_version: sustain_analysis::ANALYZER_VERSION,
                 analysis_options: sustain_analysis::AnalysisOptions::default(),
@@ -1194,6 +1252,67 @@ impl ApplicationRuntime {
             self.clock.now(),
         )
     }
+
+    /// Where a single track stands relative to a smart playlist after
+    /// a background mutation: included, excluded, or
+    /// "indeterminable without a full re-evaluation". The third case
+    /// covers limit-based smart playlists (Top-N), where updating
+    /// track X can evict track Y from the visible set — partial
+    /// inspection of just track X is not enough.
+    ///
+    /// The UI shell uses this to decide whether a track update can
+    /// be applied as an in-place row refresh (preserves scroll and
+    /// selection) or has to fall back to a full table rebuild.
+    /// Calling this with a non-existent smart-playlist id returns
+    /// [`SmartPlaylistTrackStatus::Excluded`] — the track is not in
+    /// the (empty) view.
+    pub fn smart_playlist_track_status(
+        &self,
+        smart_playlist_id: SmartPlaylistId,
+        track_id: TrackId,
+    ) -> SmartPlaylistTrackStatus {
+        let Some(smart_playlist) = self
+            .smart_playlists
+            .iter()
+            .find(|smart_playlist| smart_playlist.id == smart_playlist_id)
+        else {
+            return SmartPlaylistTrackStatus::Excluded;
+        };
+        if smart_playlist.rules.limit.is_some() {
+            // Limit-based: a per-track check cannot capture the
+            // eviction effect, so admit we don't know and let the
+            // caller rebuild.
+            return SmartPlaylistTrackStatus::RequiresFullRebuild;
+        }
+        let Some(track) = self
+            .library_tracks
+            .iter()
+            .find(|track| track.id == track_id)
+        else {
+            return SmartPlaylistTrackStatus::Excluded;
+        };
+        if track_matches_rule_set(track, &smart_playlist.rules, self.clock.now()) {
+            SmartPlaylistTrackStatus::Included
+        } else {
+            SmartPlaylistTrackStatus::Excluded
+        }
+    }
+}
+
+/// Outcome of [`ApplicationRuntime::smart_playlist_track_status`].
+/// Drives the UI shell's decision between an in-place row refresh
+/// and a full table rebuild after a background track mutation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SmartPlaylistTrackStatus {
+    /// The track currently matches the smart playlist's rules.
+    Included,
+    /// The track does not match the smart playlist's rules.
+    Excluded,
+    /// The smart playlist has a limit; partial inspection is not
+    /// sufficient because the limit may evict other tracks when this
+    /// one's data changes. Callers should fall back to a full
+    /// re-evaluation of the playlist.
+    RequiresFullRebuild,
 }
 
 impl Default for ApplicationRuntime {
@@ -1210,13 +1329,14 @@ mod tests {
         sync::{Arc, Mutex, MutexGuard},
     };
 
+    use super::SmartPlaylistTrackStatus;
     use sustain_domain::{
         ApplicationCommand, Clock, FieldChange, LibraryManagementMode, PlayStatistics,
         PlaybackCommand, PlaybackOptions, PlaybackState, Playlist, PlaylistFolderId, PlaylistId,
         PlaylistItem, Rating, RepeatMode, SmartPlaylist, SmartPlaylistDateField, SmartPlaylistId,
-        SmartPlaylistMatchKind, SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField,
-        SmartPlaylistTextOperator, Track, TrackId, TrackLocation, TrackMetadata, UiSettings,
-        UiViewMode, UserSettings, VolumePercent,
+        SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistRule,
+        SmartPlaylistRuleSet, SmartPlaylistTextField, SmartPlaylistTextOperator, Track, TrackId,
+        TrackLocation, TrackMetadata, UiSettings, UiViewMode, UserSettings, VolumePercent,
     };
     use sustain_library_store::{InMemoryLibraryStore, LibraryStore, StoreResult};
     use sustain_metadata::{MetadataChange, MetadataError, MetadataResult};
@@ -3455,6 +3575,98 @@ mod tests {
             })
             .expect("delete smart playlist");
         assert!(runtime.smart_playlists().is_empty());
+    }
+
+    #[test]
+    fn smart_playlist_track_status_distinguishes_included_excluded_and_unknowable() {
+        // Three scenarios in one test:
+        //   1. Limit-less rule, track matches      -> Included.
+        //   2. Limit-less rule, track doesn't      -> Excluded.
+        //   3. Limit-bearing rule, any track       -> RequiresFullRebuild
+        //      (single-track inspection can't reason about eviction).
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+        let store = Arc::new(InMemoryLibraryStore::new());
+
+        let matching = Track {
+            id: track_id(1),
+            location: track_location("portishead.flac"),
+            content_hash: None,
+            metadata: TrackMetadata {
+                artist: Some("Portishead".to_owned()),
+                ..TrackMetadata::default()
+            },
+            rating: Rating::unrated(),
+            statistics: PlayStatistics::default(),
+            file_size_bytes: None,
+            has_embedded_artwork: None,
+        };
+        let non_matching = Track {
+            id: track_id(2),
+            location: track_location("other.flac"),
+            content_hash: None,
+            metadata: TrackMetadata {
+                artist: Some("Some Other Band".to_owned()),
+                ..TrackMetadata::default()
+            },
+            rating: Rating::unrated(),
+            statistics: PlayStatistics::default(),
+            file_size_bytes: None,
+            has_embedded_artwork: None,
+        };
+        store.save_track(matching.clone()).expect("save matching");
+        store.save_track(non_matching.clone()).expect("save other");
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(root))),
+        ))
+        .expect("load settings")
+        .with_library_services(store, Arc::new(TestMetadataService))
+        .expect("library services initialize");
+
+        runtime
+            .handle_command(ApplicationCommand::CreateSmartPlaylist {
+                name: "Portishead-only".to_owned(),
+                parent_folder_id: None,
+                rules: test_rule_set(),
+            })
+            .expect("create smart playlist");
+        let smart_id_value = smart_id(1);
+
+        assert_eq!(
+            runtime.smart_playlist_track_status(smart_id_value, matching.id),
+            SmartPlaylistTrackStatus::Included
+        );
+        assert_eq!(
+            runtime.smart_playlist_track_status(smart_id_value, non_matching.id),
+            SmartPlaylistTrackStatus::Excluded
+        );
+
+        // Re-rule with a limit; even the previously-Included track
+        // must now report RequiresFullRebuild.
+        let limited_rules = SmartPlaylistRuleSet {
+            match_kind: SmartPlaylistMatchKind::All,
+            rules: vec![SmartPlaylistRule::Text {
+                field: SmartPlaylistTextField::Artist,
+                operator: SmartPlaylistTextOperator::Contains,
+                value: "Portishead".to_owned(),
+            }],
+            limit: Some(SmartPlaylistLimit {
+                count: std::num::NonZeroU32::new(5).expect("non-zero"),
+                selection: SmartPlaylistLimitSelection::MostRecentlyAdded,
+            }),
+        };
+        runtime
+            .handle_command(ApplicationCommand::UpdateSmartPlaylist {
+                smart_playlist_id: smart_id_value,
+                name: "Limited".to_owned(),
+                rules: limited_rules,
+            })
+            .expect("update smart playlist");
+        assert_eq!(
+            runtime.smart_playlist_track_status(smart_id_value, matching.id),
+            SmartPlaylistTrackStatus::RequiresFullRebuild
+        );
     }
 
     #[test]

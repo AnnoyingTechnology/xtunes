@@ -11,10 +11,10 @@ use main_window::build_main_window;
 
 pub use sustain_app_runtime::{
     ApplicationCommand, ApplicationQuery, ApplicationRuntime, ApplicationRuntimeError,
-    BackgroundTaskStatus, LibraryConsolidationResult, LibraryConsolidationSummary,
-    LibraryImportResult, LibraryImportSummary, LibraryManagementMode, LibraryScanResult,
-    LibraryScanSummary, UserSettings, run_library_consolidation_task, run_library_import_task,
-    run_library_scan_task,
+    BackgroundResourceUsage, BackgroundTaskStatus, LibraryConsolidationResult,
+    LibraryConsolidationSummary, LibraryImportResult, LibraryImportSummary, LibraryManagementMode,
+    LibraryScanResult, LibraryScanSummary, SmartPlaylistTrackStatus, UserSettings,
+    run_library_consolidation_task, run_library_import_task, run_library_scan_task,
 };
 
 mod accent;

@@ -156,6 +156,30 @@ impl TrackTable {
         false
     }
 
+    /// Whether the underlying store currently holds a row for
+    /// `track_id`. Walks the store but performs no mutation — used by
+    /// the smart-playlist refresh path to decide between an in-place
+    /// row update and a full rebuild without going through
+    /// [`Self::update_row`]'s side-effecting code path.
+    pub(crate) fn contains_track(&self, track_id: TrackId) -> bool {
+        let n_items = self.store.n_items();
+        for position in 0..n_items {
+            let Some(row_object) = self
+                .store
+                .item(position)
+                .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+            else {
+                continue;
+            };
+            if let Ok(row) = row_object.try_borrow::<TrackTableRow>()
+                && row.track_id == Some(track_id)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Walk the underlying store once, refreshing each row's
     /// `is_missing` flag from `lookup`, then repaint the status icon
     /// on whichever rows are currently bound to a visible cell. Never

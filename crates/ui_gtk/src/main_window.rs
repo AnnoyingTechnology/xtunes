@@ -20,8 +20,8 @@ use super::{
     ArtworkFetchResultReceiver, AvailabilityChangedCallback, LibraryChangedCallback,
     LibraryChangedHolder, MetadataWriteResultReceiver, MprisCommandReceiver,
     OnlineProgressReceiver, PLAYLISTS_VIEW, PlaybackChangedCallback, SONGS_VIEW,
-    SharedMprisService, SharedRuntime, ShowAlbumAction, ShowAlbumHolder, TrackRowChangedCallback,
-    TrackRowChangedHolder, TrackUpdatedReceiver,
+    SharedMprisService, SharedRuntime, ShowAlbumAction, ShowAlbumHolder, SmartPlaylistTrackStatus,
+    TrackRowChangedCallback, TrackRowChangedHolder, TrackUpdatedReceiver,
     accent::install_accent_css,
     albums::AlbumsView,
     app_css::install_app_css,
@@ -2234,20 +2234,46 @@ fn track_row_changed_callback(ctx: TrackRowChangedContext<'_>) -> TrackRowChange
         albums_view.replace_tracks(runtime.borrow().library_tracks().to_vec());
 
         match sidebar.current_selection() {
-            Some(SidebarSelection::Item(PlaylistItem::SmartPlaylist(_))) => {
-                // Smart-playlist membership may change with the edit; the
-                // table needs a full rebuild — but only if the user can
-                // actually see it.
-                let search_text = current_search_text.borrow().clone();
-                refresh_playlists_view_if_visible(
-                    &runtime.borrow(),
-                    &content_stack,
-                    &playlists_table,
-                    &playlists_header,
-                    sidebar.current_selection(),
-                    &search_text,
-                    &playlists_dirty,
+            Some(SidebarSelection::Item(PlaylistItem::SmartPlaylist(smart_id))) => {
+                // Smart-playlist *membership* may change with the
+                // edit — but in the overwhelmingly common case
+                // (BPM/key/waveform scan updating a track that
+                // either already matches or already doesn't) the
+                // set is unchanged and only the row's data needs to
+                // repaint. Use the runtime's per-track status check
+                // to tell the two apart and avoid the
+                // `replace_rows` that would scroll the user back to
+                // the top of a large library on every track update.
+                let (status, was_in_table) = {
+                    let runtime_borrow = runtime.borrow();
+                    let status = runtime_borrow.smart_playlist_track_status(smart_id, track_id);
+                    let was_in_table = playlists_table.contains_track(track_id);
+                    (status, was_in_table)
+                };
+                let membership_changed = matches!(
+                    (status, was_in_table),
+                    (SmartPlaylistTrackStatus::Included, false)
+                        | (SmartPlaylistTrackStatus::Excluded, true)
+                        | (SmartPlaylistTrackStatus::RequiresFullRebuild, _)
                 );
+                if membership_changed {
+                    let search_text = current_search_text.borrow().clone();
+                    refresh_playlists_view_if_visible(
+                        &runtime.borrow(),
+                        &content_stack,
+                        &playlists_table,
+                        &playlists_header,
+                        sidebar.current_selection(),
+                        &search_text,
+                        &playlists_dirty,
+                    );
+                } else if was_in_table {
+                    // Membership unchanged and the row is visible —
+                    // refresh the row's data in place.
+                    playlists_table.update_row(track_id, row);
+                }
+                // else: track doesn't match the smart playlist and
+                // isn't on screen anyway; no work needed.
             }
             _ => {
                 // In-place row update is cheap (one row) and idempotent

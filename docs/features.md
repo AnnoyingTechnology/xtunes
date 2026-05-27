@@ -387,8 +387,22 @@ The Preferences window currently exposes:
 - Library folder picker (with validation)
 - Managed-mode tickbox
 - Manual library scan trigger
+- Analysis tab: BPM / Key / Waveform background toggles
+- Online tab: Artwork / Tags / Lyrics background toggles
 
 Settings persist to `~/.config/sustain/settings.toml`.
+
+### Background resource usage slider — *Sustain-native*
+
+A three-stop slider in the Analysis tab — Innocuous / Balanced /
+Aggressive — controls how many worker threads the background analysis
+pool spawns and at what nice + ionice priority they run. The default
+is Balanced (≈ half the available cores, mid-low priority). A caption
+beneath the slider previews the worker count for the current
+selection on this machine. Moving the slider tears down the running
+pool and respawns it under the new preset; in-flight tracks finish
+naturally before the swap. Settings live in the
+`[background_jobs]` section of `settings.toml`.
 
 ---
 

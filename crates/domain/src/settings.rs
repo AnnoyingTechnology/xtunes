@@ -79,6 +79,64 @@ pub struct OnlineSettings {
     pub lyrics: bool,
 }
 
+/// How much of the machine's resources background jobs (audio analysis
+/// today; potentially other long-running workers later) are allowed to
+/// take. The setting controls both the number of worker threads spawned
+/// for these jobs and their CPU/IO scheduling priority — the
+/// `Innocuous` end is intentionally polite (one thread, deeply niced)
+/// so that day-job playback and UI work always win, while `Aggressive`
+/// is closer to "drain the queue as fast as possible". The middle
+/// `Balanced` stop is the maintainer's default: enough parallelism to
+/// chew through a large library overnight while still leaving the
+/// machine usable.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BackgroundResourceUsage {
+    /// One worker, lowest priority. Suitable when the machine is also
+    /// the daily driver and the user prefers absolute zero impact on
+    /// foreground work.
+    Innocuous,
+    /// Default. Roughly half the available cores, mid-low priority.
+    #[default]
+    Balanced,
+    /// All available cores, near-default priority. Suitable for
+    /// dedicated transcoding/analysis sessions.
+    Aggressive,
+}
+
+impl BackgroundResourceUsage {
+    /// Number of worker threads to spawn given the machine's available
+    /// parallelism. Always at least one (a zero-worker scheduler would
+    /// be silently broken). Every preset other than `Innocuous`
+    /// **reserves two cores for the foreground** — playback, UI, and
+    /// the rest of the desktop session — so even `Aggressive` does
+    /// not saturate the machine. The reserved headroom matters more
+    /// than the absolute throughput; a 32-core box running 32 workers
+    /// at +0 nice would still stutter the audio pipeline.
+    pub fn worker_count(self, cores: usize) -> usize {
+        let cores = cores.max(1);
+        // Headroom (in cores) reserved for foreground work. Anything
+        // less than this clamps the preset to a single worker — the
+        // user's day-job CPU time wins over background analysis on
+        // small machines.
+        const HEADROOM: usize = 2;
+        match self {
+            Self::Innocuous => 1,
+            // Half the box, minus headroom; clamped to ≥ 1 so a
+            // 4- or 6-core machine still gets one worker.
+            Self::Balanced => (cores / 2).saturating_sub(HEADROOM).max(1),
+            // Whole box minus headroom; clamped to ≥ 1.
+            Self::Aggressive => cores.saturating_sub(HEADROOM).max(1),
+        }
+    }
+}
+
+/// Settings that govern how background jobs (audio analysis,
+/// long-running scans) share the machine with the foreground app.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BackgroundJobsSettings {
+    pub resource_usage: BackgroundResourceUsage,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UserSettings {
     pub library: LibrarySettings,
@@ -86,6 +144,7 @@ pub struct UserSettings {
     pub ui: UiSettings,
     pub analysis: AnalysisSettings,
     pub online: OnlineSettings,
+    pub background_jobs: BackgroundJobsSettings,
 }
 
 impl UserSettings {
@@ -99,6 +158,7 @@ impl UserSettings {
             ui: UiSettings::default(),
             analysis: AnalysisSettings::default(),
             online: OnlineSettings::default(),
+            background_jobs: BackgroundJobsSettings::default(),
         }
     }
 
@@ -111,7 +171,10 @@ impl UserSettings {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{AnalysisSettings, LibraryManagementMode, OnlineSettings, UserSettings};
+    use super::{
+        AnalysisSettings, BackgroundJobsSettings, BackgroundResourceUsage, LibraryManagementMode,
+        OnlineSettings, UserSettings,
+    };
 
     #[test]
     fn library_path_is_unset_by_default() {
@@ -145,5 +208,66 @@ mod tests {
         assert!(!settings.online.artwork);
         assert!(!settings.online.tags);
         assert!(!settings.online.lyrics);
+    }
+
+    #[test]
+    fn background_jobs_default_to_balanced() {
+        let settings = UserSettings::default();
+
+        assert_eq!(settings.background_jobs, BackgroundJobsSettings::default());
+        assert_eq!(
+            settings.background_jobs.resource_usage,
+            BackgroundResourceUsage::Balanced
+        );
+    }
+
+    #[test]
+    fn background_resource_usage_worker_count_matches_preset() {
+        // 32 cores (Ryzen AI Max+ 395 with SMT): Balanced is half the
+        // box minus 2 headroom cores = 14; Aggressive is the box
+        // minus 2 headroom cores = 30. Even Aggressive leaves room
+        // for playback + UI.
+        assert_eq!(BackgroundResourceUsage::Innocuous.worker_count(32), 1);
+        assert_eq!(BackgroundResourceUsage::Balanced.worker_count(32), 14);
+        assert_eq!(BackgroundResourceUsage::Aggressive.worker_count(32), 30);
+
+        // 24 cores (Ryzen 7900 with SMT): same formula.
+        assert_eq!(BackgroundResourceUsage::Balanced.worker_count(24), 10);
+        assert_eq!(BackgroundResourceUsage::Aggressive.worker_count(24), 22);
+
+        // 16 cores: half = 8, minus 2 = 6.
+        assert_eq!(BackgroundResourceUsage::Balanced.worker_count(16), 6);
+        assert_eq!(BackgroundResourceUsage::Aggressive.worker_count(16), 14);
+
+        // 12 cores: half = 6, minus 2 = 4. Aggressive = 10.
+        assert_eq!(BackgroundResourceUsage::Innocuous.worker_count(12), 1);
+        assert_eq!(BackgroundResourceUsage::Balanced.worker_count(12), 4);
+        assert_eq!(BackgroundResourceUsage::Aggressive.worker_count(12), 10);
+
+        // 8 cores: half = 4, minus 2 = 2. Aggressive = 6.
+        assert_eq!(BackgroundResourceUsage::Balanced.worker_count(8), 2);
+        assert_eq!(BackgroundResourceUsage::Aggressive.worker_count(8), 6);
+
+        // 4 cores: half = 2, minus 2 = 0, clamped to 1. Aggressive
+        // = 4 - 2 = 2 (still leaves the headroom).
+        assert_eq!(BackgroundResourceUsage::Balanced.worker_count(4), 1);
+        assert_eq!(BackgroundResourceUsage::Aggressive.worker_count(4), 2);
+
+        // 3 cores: every non-Innocuous preset clamps to 1 — Balanced's
+        // (3/2)=1 minus 2 saturates to 0, Aggressive's 3-2=1.
+        assert_eq!(BackgroundResourceUsage::Balanced.worker_count(3), 1);
+        assert_eq!(BackgroundResourceUsage::Aggressive.worker_count(3), 1);
+
+        // 1 core: every preset collapses to 1.
+        assert_eq!(BackgroundResourceUsage::Innocuous.worker_count(1), 1);
+        assert_eq!(BackgroundResourceUsage::Balanced.worker_count(1), 1);
+        assert_eq!(BackgroundResourceUsage::Aggressive.worker_count(1), 1);
+
+        // 0 cores (defensive — `available_parallelism` is documented to
+        // never return zero, but the helper still has to round up to a
+        // usable worker).
+        assert_eq!(BackgroundResourceUsage::Innocuous.worker_count(0), 1);
+        assert_eq!(BackgroundResourceUsage::Balanced.worker_count(0), 1);
+        assert_eq!(BackgroundResourceUsage::Aggressive.worker_count(0), 1);
     }
 }

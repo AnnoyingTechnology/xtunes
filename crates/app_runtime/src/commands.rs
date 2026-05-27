@@ -46,6 +46,7 @@ impl ApplicationRuntime {
                 let previous_library_path = self.settings.library.path.clone();
                 let previous_analysis = self.settings.analysis;
                 let previous_online = self.settings.online;
+                let previous_resource_usage = self.settings.background_jobs.resource_usage;
                 if let Some(settings_store) = &self.settings_store {
                     settings_store
                         .save_settings(settings.clone())
@@ -92,6 +93,13 @@ impl ApplicationRuntime {
                     && let Some(scheduler) = self.online_scheduler()
                 {
                     scheduler.set_library_path(self.settings.library.path.clone());
+                }
+                // Resource-usage flips trigger a teardown + respawn of
+                // the analysis worker pool at the new size + priority.
+                if self.settings.background_jobs.resource_usage != previous_resource_usage
+                    && let Some(scheduler) = self.analysis_scheduler()
+                {
+                    scheduler.update_resource_usage(self.settings.background_jobs.resource_usage);
                 }
             }
             ApplicationCommand::ScanLibrary { library_path } => {

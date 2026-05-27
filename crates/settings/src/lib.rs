@@ -13,9 +13,10 @@ use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
 pub use sustain_domain::{
-    AnalysisSettings, DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings,
-    OnlineSettings, PlaybackSettings, PlaylistFolderId, PlaylistId, PlaylistItem, SmartPlaylistId,
-    UiSettings, UiViewMode, UserSettings, VolumePercent,
+    AnalysisSettings, BackgroundJobsSettings, BackgroundResourceUsage,
+    DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings, OnlineSettings,
+    PlaybackSettings, PlaylistFolderId, PlaylistId, PlaylistItem, SmartPlaylistId, UiSettings,
+    UiViewMode, UserSettings, VolumePercent,
 };
 
 pub type SettingsResult<T> = Result<T, SettingsError>;
@@ -127,6 +128,8 @@ struct SettingsDocument {
     analysis: AnalysisSettingsDocument,
     #[serde(default)]
     online: OnlineSettingsDocument,
+    #[serde(default)]
+    background_jobs: BackgroundJobsSettingsDocument,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -175,6 +178,21 @@ struct OnlineSettingsDocument {
     tags: bool,
     #[serde(default)]
     lyrics: bool,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct BackgroundJobsSettingsDocument {
+    #[serde(default)]
+    resource_usage: BackgroundResourceUsageDocument,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BackgroundResourceUsageDocument {
+    Innocuous,
+    #[default]
+    Balanced,
+    Aggressive,
 }
 
 impl Default for PlaybackSettingsDocument {
@@ -246,6 +264,11 @@ impl SettingsDocument {
                 tags: settings.online.tags,
                 lyrics: settings.online.lyrics,
             },
+            background_jobs: BackgroundJobsSettingsDocument {
+                resource_usage: BackgroundResourceUsageDocument::from_domain(
+                    settings.background_jobs.resource_usage,
+                ),
+            },
         }
     }
 
@@ -277,6 +300,27 @@ impl SettingsDocument {
                 tags: self.online.tags,
                 lyrics: self.online.lyrics,
             },
+            background_jobs: BackgroundJobsSettings {
+                resource_usage: self.background_jobs.resource_usage.into_domain(),
+            },
+        }
+    }
+}
+
+impl BackgroundResourceUsageDocument {
+    fn from_domain(usage: BackgroundResourceUsage) -> Self {
+        match usage {
+            BackgroundResourceUsage::Innocuous => Self::Innocuous,
+            BackgroundResourceUsage::Balanced => Self::Balanced,
+            BackgroundResourceUsage::Aggressive => Self::Aggressive,
+        }
+    }
+
+    fn into_domain(self) -> BackgroundResourceUsage {
+        match self {
+            Self::Innocuous => BackgroundResourceUsage::Innocuous,
+            Self::Balanced => BackgroundResourceUsage::Balanced,
+            Self::Aggressive => BackgroundResourceUsage::Aggressive,
         }
     }
 }
@@ -338,9 +382,10 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     use super::{
-        AnalysisSettings, DEFAULT_PLAYBACK_VOLUME_PERCENT, InMemorySettingsStore,
-        LibraryManagementMode, OnlineSettings, PlaylistId, PlaylistItem, SettingsStore,
-        TomlSettingsStore, UiSettings, UiViewMode, UserSettings, VolumePercent,
+        AnalysisSettings, BackgroundJobsSettings, BackgroundResourceUsage,
+        DEFAULT_PLAYBACK_VOLUME_PERCENT, InMemorySettingsStore, LibraryManagementMode,
+        OnlineSettings, PlaylistId, PlaylistItem, SettingsStore, TomlSettingsStore, UiSettings,
+        UiViewMode, UserSettings, VolumePercent,
     };
 
     #[test]
@@ -527,6 +572,60 @@ mod tests {
 
         assert_eq!(store.save_settings(settings.clone()), Ok(()));
         assert_eq!(store.load_settings(), Ok(settings));
+
+        let root = path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .expect("test path has two parents");
+        fs::remove_dir_all(root).expect("remove test settings directory");
+    }
+
+    #[test]
+    fn toml_settings_store_round_trips_background_jobs_resource_usage() {
+        for usage in [
+            BackgroundResourceUsage::Innocuous,
+            BackgroundResourceUsage::Balanced,
+            BackgroundResourceUsage::Aggressive,
+        ] {
+            let path = unique_settings_path();
+            let store = TomlSettingsStore::new(&path);
+            let settings = UserSettings {
+                background_jobs: BackgroundJobsSettings {
+                    resource_usage: usage,
+                },
+                ..UserSettings::default()
+            };
+
+            assert_eq!(store.save_settings(settings.clone()), Ok(()));
+            assert_eq!(store.load_settings(), Ok(settings));
+
+            let root = path
+                .parent()
+                .and_then(|parent| parent.parent())
+                .expect("test path has two parents");
+            fs::remove_dir_all(root).expect("remove test settings directory");
+        }
+    }
+
+    #[test]
+    fn toml_settings_store_defaults_background_jobs_when_section_missing() {
+        let path = unique_settings_path();
+        let store = TomlSettingsStore::new(&path);
+        fs::create_dir_all(path.parent().expect("settings path has parent"))
+            .expect("create settings dir");
+        fs::write(&path, "[library]\npath = \"/music\"\n").expect("write settings");
+
+        let settings = store.load_settings().expect("settings load");
+
+        assert_eq!(
+            settings.background_jobs,
+            BackgroundJobsSettings::default(),
+            "missing section must fall back to Balanced default"
+        );
+        assert_eq!(
+            settings.background_jobs.resource_usage,
+            BackgroundResourceUsage::Balanced
+        );
 
         let root = path
             .parent()

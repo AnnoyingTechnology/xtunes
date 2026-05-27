@@ -13,6 +13,13 @@ path = "src/lib.rs"
 [dependencies]
 async-channel = "2"
 trash = "5"
+# Linux syscall wrappers for `setpriority` and `ioprio_set` used by the
+# background-job scheduler. `ioprio_set` has no glibc/nix/rustix safe
+# wrapper, so we reach it via `libc::syscall`. Once libc is a required
+# dep for that, `setpriority` lives there too — no second crate doing
+# the same job. The unsafe surface is confined to
+# `crates/app_runtime/src/priority.rs`.
+libc = "0.2"
 sustain-analysis = { path = "../analysis" }
 sustain-settings = { path = "../settings" }
 sustain-domain = { path = "../domain" }
@@ -24,6 +31,10 @@ sustain-search = { path = "../search" }
 
 [dev-dependencies]
 tempfile = "3"
+# Same crate as the runtime dep — pulled in here so the integration
+# test in `tests/priority.rs` can read back nice/ioprio values to
+# confirm the wrappers actually wrote them.
+libc = "0.2"
 
 [lints]
 workspace = true
