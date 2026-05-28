@@ -244,6 +244,20 @@ button.preferences-tab-button:checked {
     font-weight: 500;
 }
 
+.about-app-name {
+    /* Product name displayed under the application icon in the About
+       pane — large enough to dominate the pane without needing the
+       headerbar's font-scale. The tagline and details below pick up the
+       existing .preference-helper muted styling. */
+    font-size: 1.6em;
+    font-weight: 600;
+}
+
+.about-app-icon {
+    margin-top: 8px;
+    margin-bottom: 4px;
+}
+
 .status-bar {
     background-color: alpha(@theme_fg_color, 0.04);
 }
