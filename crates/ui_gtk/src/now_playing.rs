@@ -24,7 +24,7 @@ use model::{
 use progress_hit_area::ProgressHitArea;
 use sustain_app_runtime::{
     ApplicationCommand, NotificationCategory, NotificationId, NotificationSeverity, NowPlaying,
-    PlaybackCommand, Track, TrackId,
+    PlaybackCommand, ShuffleMode, Track, TrackId,
 };
 
 mod model;
@@ -546,7 +546,7 @@ impl NowPlayingView {
             self.remaining.set_text("");
             self.hit_area.set_position(0.0, false);
             self.duration.set(Duration::ZERO);
-            sync_playback_option_icon(&self.shuffle_icon, now_playing.options.shuffle_enabled);
+            sync_shuffle_icon(&self.shuffle_icon, now_playing.options.shuffle_mode);
             sync_playback_option_icon(&self.repeat_icon, now_playing.options.repeat_enabled());
             return;
         };
@@ -564,7 +564,7 @@ impl NowPlayingView {
             .set_text(&remaining_time_text(position, duration));
         self.hit_area
             .set_position(progress_fraction(position, duration), true);
-        sync_playback_option_icon(&self.shuffle_icon, now_playing.options.shuffle_enabled);
+        sync_shuffle_icon(&self.shuffle_icon, now_playing.options.shuffle_mode);
         sync_playback_option_icon(&self.repeat_icon, now_playing.options.repeat_enabled());
         self.prefetch_next_artwork();
     }
@@ -606,9 +606,9 @@ fn install_playback_option_controls(
     let command_controller_for_shuffle = command_controller.clone();
     let view_for_shuffle = view.clone();
     view.shuffle_button.connect_clicked(move |_| {
-        if command_controller_for_shuffle
-            .dispatch_succeeded(ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle))
-        {
+        if command_controller_for_shuffle.dispatch_succeeded(ApplicationCommand::Playback(
+            PlaybackCommand::CycleShuffleMode,
+        )) {
             view_for_shuffle.refresh(
                 &command_controller_for_shuffle
                     .runtime()
@@ -984,6 +984,27 @@ fn sync_playback_option_icon(icon: &gtk::Image, enabled: bool) {
         icon.add_css_class("now-playing-side-icon-active");
     } else {
         icon.remove_css_class("now-playing-side-icon-active");
+    }
+}
+
+/// Tri-state visual sync for the shuffle icon. The Active class is
+/// shared with Repeat (full opacity), the Smart class layers an
+/// animated accent-coloured gradient sweep on top — both are
+/// declared in `app.css`. Removing both classes is the Off state.
+fn sync_shuffle_icon(icon: &gtk::Image, mode: ShuffleMode) {
+    match mode {
+        ShuffleMode::Off => {
+            icon.remove_css_class("now-playing-side-icon-active");
+            icon.remove_css_class("now-playing-side-icon-smart");
+        }
+        ShuffleMode::Pure => {
+            icon.add_css_class("now-playing-side-icon-active");
+            icon.remove_css_class("now-playing-side-icon-smart");
+        }
+        ShuffleMode::Smart => {
+            icon.add_css_class("now-playing-side-icon-active");
+            icon.add_css_class("now-playing-side-icon-smart");
+        }
     }
 }
 

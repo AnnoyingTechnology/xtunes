@@ -2007,6 +2007,7 @@ dependencies = [
  "sustain-playback",
  "sustain-search",
  "sustain-settings",
+ "sustain-smart-shuffle",
  "tempfile",
  "trash",
 ]
@@ -2078,6 +2079,15 @@ dependencies = [
  "serde",
  "sustain-domain",
  "toml",
+]
+
+[[package]]
+name = "sustain-smart-shuffle"
+version = "0.1.0-alpha.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sustain-domain",
 ]
 
 [[package]]

@@ -34,8 +34,9 @@ pub use managed_library::{
 pub use metadata::{FieldChange, MetadataChange, TrackMetadata};
 pub use musical_key::MusicalKey;
 pub use playback::{
-    PlaybackCommand, PlaybackOptions, PlaybackQueue, PlaybackQueueRequest, PlaybackQueueSource,
-    PlaybackState, RepeatMode, TrackPlaybackSource, VolumePercent,
+    LazyPickContext, PlaybackCommand, PlaybackOptions, PlaybackQueue, PlaybackQueueRequest,
+    PlaybackQueueSource, PlaybackState, RepeatMode, ShuffleMode, TrackPlaybackSource,
+    VolumePercent,
 };
 pub use playback_session::PlaybackSession;
 pub use playlist::{Playlist, PlaylistEntry};
@@ -45,7 +46,8 @@ pub use rating::Rating;
 pub use settings::{
     AnalysisSettings, BackgroundJobsSettings, BackgroundResourceUsage,
     DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings, OnlineSettings,
-    PlaybackSettings, UiSettings, UiSidebarSelection, UserSettings,
+    PlaybackSettings, SmartShuffleEntropy, SmartShuffleTrainingInterval, UiSettings,
+    UiSidebarSelection, UserSettings,
 };
 pub use smart_playlist::{
     SmartPlaylist, SmartPlaylistDateField, SmartPlaylistLimit, SmartPlaylistLimitSelection,

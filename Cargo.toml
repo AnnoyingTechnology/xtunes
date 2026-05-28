@@ -11,6 +11,7 @@ members = [
   "crates/playback",
   "crates/search",
   "crates/settings",
+  "crates/smart_shuffle",
   "crates/ui_gtk",
 ]
 resolver = "3"

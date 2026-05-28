@@ -10,8 +10,8 @@ use std::{
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use sustain_app_runtime::{
-    ApplicationCommand, PlaybackCommand, PlaybackQueueRequest, PlaybackQueueSource, Track, TrackId,
-    album_matches_search_text,
+    ApplicationCommand, PlaybackCommand, PlaybackQueueRequest, PlaybackQueueSource, ShuffleMode,
+    Track, TrackId, album_matches_search_text,
 };
 
 use super::{
@@ -734,7 +734,12 @@ impl AlbumsView {
         let command_controller_for_shuffle = self.command_controller.clone();
         let playback_changed_for_shuffle = self.playback_changed.clone();
         shuffle_button.connect_clicked(move |_| {
-            set_shuffle_enabled(&command_controller_for_shuffle, true);
+            // Album header's Shuffle button always means "pure
+            // random over this album" — Smart shuffle's discovery
+            // model is meaningless inside a single album, so we
+            // pin the queue's mode to Pure regardless of the
+            // transport setting.
+            set_shuffle_mode(&command_controller_for_shuffle, ShuffleMode::Pure);
             if play_album(&command_controller_for_shuffle, &album_for_shuffle) {
                 playback_changed_for_shuffle();
             }
@@ -1216,12 +1221,12 @@ fn play_album(command_controller: &SharedCommandController, album: &AlbumViewMod
 }
 
 fn ensure_shuffle_disabled(command_controller: &SharedCommandController) {
-    set_shuffle_enabled(command_controller, false);
+    set_shuffle_mode(command_controller, ShuffleMode::Off);
 }
 
-fn set_shuffle_enabled(command_controller: &SharedCommandController, enabled: bool) {
+fn set_shuffle_mode(command_controller: &SharedCommandController, mode: ShuffleMode) {
     let _result = command_controller.dispatch(ApplicationCommand::Playback(
-        PlaybackCommand::SetShuffleEnabled(enabled),
+        PlaybackCommand::SetShuffleMode(mode),
     ));
 }
 

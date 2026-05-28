@@ -11,8 +11,8 @@ mod shuffle;
 mod source;
 mod volume;
 
-pub use options::{PlaybackOptions, RepeatMode};
-pub use queue::{PlaybackQueue, PlaybackQueueRequest, PlaybackQueueSource};
+pub use options::{PlaybackOptions, RepeatMode, ShuffleMode};
+pub use queue::{LazyPickContext, PlaybackQueue, PlaybackQueueRequest, PlaybackQueueSource};
 pub use source::TrackPlaybackSource;
 pub use volume::VolumePercent;
 
@@ -46,10 +46,15 @@ pub enum PlaybackCommand {
     /// already-queued track. Counterpart to [`Self::EnqueueNext`], which
     /// inserts at the head right after the currently playing track.
     EnqueueLast(Vec<TrackId>),
-    ToggleShuffle,
-    /// Explicitly set shuffle without relying on the caller's view of the
-    /// current option state. Used by source-specific Play/Shuffle controls.
-    SetShuffleEnabled(bool),
+    /// Advance to the next mode in the shuffle cycle
+    /// (`Off → Pure → Smart → Off`). The transport's shuffle button
+    /// dispatches this on every click.
+    CycleShuffleMode,
+    /// Explicitly set the shuffle mode without relying on the caller's
+    /// view of the current option state. Used by source-specific Play /
+    /// Shuffle controls that always want a definite outcome (e.g. the
+    /// Album header's "Shuffle" button always wants Pure).
+    SetShuffleMode(ShuffleMode),
     ToggleRepeat,
     Pause,
     Resume,

@@ -69,6 +69,11 @@ pub enum NotificationCategory {
     /// [`Self::AnalysisBackground`] — a persistent notification while
     /// the worker is running, a one-shot summary once it idles.
     OnlineBackground,
+    /// Smart Shuffle model lifecycle — cold-start refusal, training
+    /// success, training failure. Always ephemeral; the model is
+    /// invisible to the user except through these one-shot
+    /// notifications.
+    SmartShuffle,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

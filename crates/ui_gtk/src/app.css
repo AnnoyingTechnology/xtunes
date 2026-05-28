@@ -97,6 +97,27 @@ button.now-playing-side-button:focus {
     opacity: 1;
 }
 
+/* Smart Shuffle indicator. Layered on top of `now-playing-side-icon-active`
+ * (which already pins opacity at 1.0); the keyframed animation rolls the
+ * symbolic icon's foreground colour between two anchors so the glyph
+ * shows a continuous, gentle accent-coloured sweep instead of the flat
+ * theme foreground. Both anchors are derived from @theme_selected_bg_color
+ * with alpha to keep the cycle subtle and theme-aware — light/dark and
+ * the user's preferred accent colour all fall out naturally.
+ *
+ * The icon is restored to its default colour the moment the class is
+ * removed (cycling back to Off or Pure), so no manual cleanup is needed
+ * elsewhere. */
+@keyframes now-playing-shuffle-smart-sweep {
+    0%   { color: alpha(@theme_selected_bg_color, 0.60); }
+    50%  { color: alpha(@theme_selected_bg_color, 1.00); }
+    100% { color: alpha(@theme_selected_bg_color, 0.60); }
+}
+
+.now-playing-side-icon-smart {
+    animation: now-playing-shuffle-smart-sweep 2.7s ease-in-out infinite;
+}
+
 .song-progress-hit-area {
     min-height: 12px;
 }

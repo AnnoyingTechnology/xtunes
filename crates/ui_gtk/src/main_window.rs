@@ -11,7 +11,7 @@ use gtk::prelude::*;
 use gtk::{gdk, glib};
 use sustain_app_runtime::{
     PlaybackCommand, PlaybackQueueRequest, PlaybackQueueSource, Playlist, PlaylistEntry,
-    PlaylistFolder, PlaylistFolderId, PlaylistItem, Rating, Track, TrackColumnLayout,
+    PlaylistFolder, PlaylistFolderId, PlaylistItem, Rating, ShuffleMode, Track, TrackColumnLayout,
     TrackColumnLayoutScope, TrackId, UiSettings, UiSidebarSelection, track_matches_search_text,
 };
 
@@ -2233,9 +2233,17 @@ fn make_playlists_header_play_callback(
     Rc::new(move || {
         // Set shuffle first so subsequent `PlayTrack` builds its queue
         // with the right ordering. Both dispatches are independent —
-        // the runtime does not coalesce them.
+        // the runtime does not coalesce them. The playlist header's
+        // Shuffle button pins the queue to Pure random regardless of
+        // the transport setting — Smart's library-wide signals are
+        // not the right fit for "shuffle this playlist's tracks".
+        let shuffle_mode = if shuffle {
+            ShuffleMode::Pure
+        } else {
+            ShuffleMode::Off
+        };
         let _ = command_controller.dispatch(ApplicationCommand::Playback(
-            PlaybackCommand::SetShuffleEnabled(shuffle),
+            PlaybackCommand::SetShuffleMode(shuffle_mode),
         ));
         let (queue, first_track) = {
             let runtime_borrow = runtime.borrow();

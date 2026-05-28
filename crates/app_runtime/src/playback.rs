@@ -6,9 +6,10 @@ use std::time::{Duration, SystemTime};
 
 use sustain_domain::{
     PlaybackCommand, PlaybackQueue, PlaybackQueueRequest, PlaybackQueueSource, PlaybackSession,
-    PlaybackState, TrackAvailability, TrackId, TrackPlaybackSource,
+    PlaybackState, Track, TrackAvailability, TrackId, TrackPlaybackSource,
 };
 use sustain_playback::PlaybackService;
+use sustain_smart_shuffle::{PickContext, format_debug, pick_next_track};
 
 use crate::{ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult};
 
@@ -18,14 +19,17 @@ impl ApplicationRuntime {
         command: PlaybackCommand,
     ) -> ApplicationRuntimeResult<()> {
         match command {
-            PlaybackCommand::ToggleShuffle => {
-                self.playback_queue.toggle_shuffle(playback_shuffle_seed());
-                self.persist_playback_shuffle()
-            }
-            PlaybackCommand::SetShuffleEnabled(enabled) => {
+            PlaybackCommand::CycleShuffleMode => {
                 self.playback_queue
-                    .set_shuffle_enabled(enabled, playback_shuffle_seed());
-                self.persist_playback_shuffle()
+                    .cycle_shuffle_mode(playback_shuffle_seed());
+                self.on_shuffle_mode_changed();
+                self.persist_playback_shuffle_mode()
+            }
+            PlaybackCommand::SetShuffleMode(mode) => {
+                self.playback_queue
+                    .set_shuffle_mode(mode, playback_shuffle_seed());
+                self.on_shuffle_mode_changed();
+                self.persist_playback_shuffle_mode()
             }
             PlaybackCommand::ToggleRepeat => {
                 self.playback_queue.toggle_repeat_mode();
@@ -247,7 +251,67 @@ impl ApplicationRuntime {
     }
 
     fn play_next_track(&mut self) -> ApplicationRuntimeResult<()> {
+        // Smart Shuffle path: the lazy queue hasn't decided a next
+        // track yet (the picker is consulted on demand). Resolve a
+        // pick first, append it to the queue's history, and feed it
+        // through the same auto-advance machinery used by Eager
+        // playback. Pure / Off shuffle queues short-circuit here
+        // because `needs_lazy_pick` returns false for them.
+        if self.playback_queue.needs_lazy_pick() {
+            if let Some(picked_track_id) = self.pick_smart_shuffle_next() {
+                return self.play_adjacent_track(Some(picked_track_id));
+            }
+        }
         self.play_adjacent_track(self.playback_queue.next_track_id())
+    }
+
+    /// Consult the Smart Shuffle picker for the next track to play,
+    /// then append it to the queue's history. Returns `None` when
+    /// no candidates remain or the queue is not in lazy layout.
+    /// Emits the `SUSTAIN_LOG_SMART_SHUFFLE=1` trace line on stderr
+    /// when the env var is set.
+    fn pick_smart_shuffle_next(&mut self) -> Option<TrackId> {
+        let context = self.playback_queue.lazy_pick_context()?;
+        let seed = self
+            .library_tracks
+            .iter()
+            .find(|track| track.id == context.seed_track_id)?;
+        // Pre-resolve candidate `&Track` references. Filter out
+        // missing files inline so the picker never proposes a
+        // track we cannot actually play.
+        let candidate_refs: Vec<&Track> = context
+            .candidate_pool
+            .iter()
+            .filter_map(|track_id| {
+                self.library_tracks
+                    .iter()
+                    .find(|track| track.id == *track_id)
+            })
+            .filter(|track| !track.location.is_missing())
+            .collect();
+
+        let pick_context = PickContext {
+            seed,
+            candidates: &candidate_refs,
+            played_history: context.played_history,
+            entropy: self.settings.playback.smart_shuffle_entropy,
+            now: self.clock.now(),
+        };
+        let (picked, debug) = pick_next_track(self.smart_shuffle_model.as_ref(), pick_context)?;
+
+        if let Some(debug) = debug {
+            let label = |track_id: TrackId| -> String {
+                self.library_tracks
+                    .iter()
+                    .find(|track| track.id == track_id)
+                    .and_then(|track| track.metadata.title.clone())
+                    .unwrap_or_else(|| format!("#{}", track_id.get()))
+            };
+            eprintln!("{}", format_debug(&debug, label));
+        }
+
+        self.playback_queue.lazy_append_pick(picked.track_id);
+        Some(picked.track_id)
     }
 
     fn play_adjacent_track(&mut self, track_id: Option<TrackId>) -> ApplicationRuntimeResult<()> {

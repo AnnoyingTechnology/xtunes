@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 pub use sustain_domain::{
     AnalysisSettings, BackgroundJobsSettings, BackgroundResourceUsage,
     DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings, OnlineSettings,
-    PlaybackSettings, PlaylistFolderId, PlaylistId, PlaylistItem, SmartPlaylistId, UiSettings,
-    UiSidebarSelection, UserSettings, VolumePercent,
+    PlaybackSettings, PlaylistFolderId, PlaylistId, PlaylistItem, ShuffleMode, SmartPlaylistId,
+    SmartShuffleEntropy, SmartShuffleTrainingInterval, UiSettings, UiSidebarSelection,
+    UserSettings, VolumePercent,
 };
 
 pub type SettingsResult<T> = Result<T, SettingsError>;
@@ -147,7 +148,95 @@ struct PlaybackSettingsDocument {
     #[serde(default = "default_volume_percent")]
     volume_percent: u8,
     #[serde(default)]
-    shuffle_enabled: bool,
+    shuffle_mode: ShuffleModeDocument,
+    #[serde(default)]
+    smart_shuffle_entropy: SmartShuffleEntropyDocument,
+    #[serde(default)]
+    smart_shuffle_training_interval: SmartShuffleTrainingIntervalDocument,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ShuffleModeDocument {
+    #[default]
+    Off,
+    Pure,
+    Smart,
+}
+
+impl ShuffleModeDocument {
+    fn from_domain(mode: ShuffleMode) -> Self {
+        match mode {
+            ShuffleMode::Off => Self::Off,
+            ShuffleMode::Pure => Self::Pure,
+            ShuffleMode::Smart => Self::Smart,
+        }
+    }
+
+    fn into_domain(self) -> ShuffleMode {
+        match self {
+            Self::Off => ShuffleMode::Off,
+            Self::Pure => ShuffleMode::Pure,
+            Self::Smart => ShuffleMode::Smart,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SmartShuffleEntropyDocument {
+    Focused,
+    #[default]
+    Balanced,
+    Adventurous,
+}
+
+impl SmartShuffleEntropyDocument {
+    fn from_domain(value: SmartShuffleEntropy) -> Self {
+        match value {
+            SmartShuffleEntropy::Focused => Self::Focused,
+            SmartShuffleEntropy::Balanced => Self::Balanced,
+            SmartShuffleEntropy::Adventurous => Self::Adventurous,
+        }
+    }
+
+    fn into_domain(self) -> SmartShuffleEntropy {
+        match self {
+            Self::Focused => SmartShuffleEntropy::Focused,
+            Self::Balanced => SmartShuffleEntropy::Balanced,
+            Self::Adventurous => SmartShuffleEntropy::Adventurous,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SmartShuffleTrainingIntervalDocument {
+    Off,
+    Hourly,
+    #[default]
+    Daily,
+    Weekly,
+}
+
+impl SmartShuffleTrainingIntervalDocument {
+    fn from_domain(value: SmartShuffleTrainingInterval) -> Self {
+        match value {
+            SmartShuffleTrainingInterval::Off => Self::Off,
+            SmartShuffleTrainingInterval::Hourly => Self::Hourly,
+            SmartShuffleTrainingInterval::Daily => Self::Daily,
+            SmartShuffleTrainingInterval::Weekly => Self::Weekly,
+        }
+    }
+
+    fn into_domain(self) -> SmartShuffleTrainingInterval {
+        match self {
+            Self::Off => SmartShuffleTrainingInterval::Off,
+            Self::Hourly => SmartShuffleTrainingInterval::Hourly,
+            Self::Daily => SmartShuffleTrainingInterval::Daily,
+            Self::Weekly => SmartShuffleTrainingInterval::Weekly,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -201,7 +290,9 @@ impl Default for PlaybackSettingsDocument {
     fn default() -> Self {
         Self {
             volume_percent: DEFAULT_PLAYBACK_VOLUME_PERCENT,
-            shuffle_enabled: false,
+            shuffle_mode: ShuffleModeDocument::default(),
+            smart_shuffle_entropy: SmartShuffleEntropyDocument::default(),
+            smart_shuffle_training_interval: SmartShuffleTrainingIntervalDocument::default(),
         }
     }
 }
@@ -244,7 +335,13 @@ impl SettingsDocument {
             },
             playback: PlaybackSettingsDocument {
                 volume_percent: settings.playback.volume.get(),
-                shuffle_enabled: settings.playback.shuffle_enabled,
+                shuffle_mode: ShuffleModeDocument::from_domain(settings.playback.shuffle_mode),
+                smart_shuffle_entropy: SmartShuffleEntropyDocument::from_domain(
+                    settings.playback.smart_shuffle_entropy,
+                ),
+                smart_shuffle_training_interval: SmartShuffleTrainingIntervalDocument::from_domain(
+                    settings.playback.smart_shuffle_training_interval,
+                ),
             },
             ui: UiSettingsDocument {
                 search_text: settings.ui.search_text,
@@ -280,7 +377,12 @@ impl SettingsDocument {
             },
             playback: PlaybackSettings {
                 volume: VolumePercent::from_clamped(self.playback.volume_percent),
-                shuffle_enabled: self.playback.shuffle_enabled,
+                shuffle_mode: self.playback.shuffle_mode.into_domain(),
+                smart_shuffle_entropy: self.playback.smart_shuffle_entropy.into_domain(),
+                smart_shuffle_training_interval: self
+                    .playback
+                    .smart_shuffle_training_interval
+                    .into_domain(),
             },
             ui: UiSettings {
                 search_text: self.ui.search_text,
@@ -385,8 +487,9 @@ mod tests {
     use super::{
         AnalysisSettings, BackgroundJobsSettings, BackgroundResourceUsage,
         DEFAULT_PLAYBACK_VOLUME_PERCENT, InMemorySettingsStore, LibraryManagementMode,
-        OnlineSettings, PlaylistId, PlaylistItem, SettingsStore, TomlSettingsStore, UiSettings,
-        UiSidebarSelection, UserSettings, VolumePercent,
+        OnlineSettings, PlaylistId, PlaylistItem, SettingsStore, ShuffleMode, SmartShuffleEntropy,
+        SmartShuffleTrainingInterval, TomlSettingsStore, UiSettings, UiSidebarSelection,
+        UserSettings, VolumePercent,
     };
 
     #[test]
@@ -453,7 +556,9 @@ mod tests {
         let path = unique_settings_path();
         let store = TomlSettingsStore::new(&path);
         let mut settings = UserSettings::default();
-        settings.playback.shuffle_enabled = true;
+        settings.playback.shuffle_mode = ShuffleMode::Smart;
+        settings.playback.smart_shuffle_entropy = SmartShuffleEntropy::Adventurous;
+        settings.playback.smart_shuffle_training_interval = SmartShuffleTrainingInterval::Weekly;
 
         assert_eq!(store.save_settings(settings.clone()), Ok(()));
         assert_eq!(store.load_settings(), Ok(settings));

@@ -15,14 +15,15 @@ use std::{
 
 pub use sustain_domain::{
     ApplicationCommand, ApplicationQuery, BackgroundJobsSettings, BackgroundResourceUsage, Clock,
-    DEFAULT_PLAYBACK_VOLUME_PERCENT, FieldChange, LibraryManagementMode, LibrarySettings,
-    MetadataChange, PlayStatistics, PlaybackCommand, PlaybackOptions, PlaybackQueue,
-    PlaybackQueueRequest, PlaybackQueueSource, PlaybackSession, PlaybackSettings, PlaybackState,
-    Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId, PlaylistItem, Rating,
-    RepeatMode, SmartPlaylist, SmartPlaylistDateField, SmartPlaylistId, SmartPlaylistLimit,
-    SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistNumberField,
-    SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField,
-    SmartPlaylistTextOperator, SystemClock, Track, TrackAvailability, TrackColumnEntry,
+    DEFAULT_PLAYBACK_VOLUME_PERCENT, FieldChange, LazyPickContext, LibraryManagementMode,
+    LibrarySettings, MetadataChange, PlayStatistics, PlaybackCommand, PlaybackOptions,
+    PlaybackQueue, PlaybackQueueRequest, PlaybackQueueSource, PlaybackSession, PlaybackSettings,
+    PlaybackState, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId,
+    PlaylistItem, Rating, RepeatMode, ShuffleMode, SmartPlaylist, SmartPlaylistDateField,
+    SmartPlaylistId, SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind,
+    SmartPlaylistNumberField, SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet,
+    SmartPlaylistTextField, SmartPlaylistTextOperator, SmartShuffleEntropy,
+    SmartShuffleTrainingInterval, SystemClock, Track, TrackAvailability, TrackColumnEntry,
     TrackColumnLayout, TrackColumnLayoutScope, TrackContentHash, TrackId, TrackLocation,
     TrackMetadata, TrackPlaybackSource, TrackRelativePath, UiSettings, UiSidebarSelection,
     UserSettings, VolumePercent, matching_tracks, track_matches_rule_set,
@@ -76,6 +77,12 @@ mod playlist_folders;
 mod playlist_items;
 mod playlists;
 mod smart_playlists;
+pub mod smart_shuffle_scheduler;
+pub use smart_shuffle_scheduler::{SmartShuffleScheduler, SmartShuffleTrainingResult};
+pub use sustain_smart_shuffle::{
+    FEATURE_SCHEMA_VERSION as SMART_SHUFFLE_FEATURE_SCHEMA_VERSION, MIN_LABELED_TRACKS, PickMode,
+    SmartShuffleError, SmartShuffleModel, TrainingOutcome,
+};
 
 pub use artwork_fetcher::{ArtworkFetchOutcome, ArtworkFetchResult};
 pub use library_scan::run_library_scan_task;
@@ -266,6 +273,25 @@ pub struct ApplicationRuntime {
     online_scheduler: Option<online_scheduler::OnlineScheduler>,
     online_progress_sink: Option<async_channel::Sender<online_scheduler::SchedulerProgress>>,
     online_notification_id: Option<NotificationId>,
+    // Background worker for Smart Shuffle model training. Owns
+    // the thread spawn + result channel; the model itself lives
+    // here in the runtime so the picker can borrow it without
+    // crossing thread boundaries.
+    smart_shuffle_scheduler: SmartShuffleScheduler,
+    /// In-memory copy of the trained Smart Shuffle engagement model.
+    /// `None` when no model has been trained yet (cold start) or
+    /// when the persisted blob's feature schema doesn't match the
+    /// current extractor.
+    smart_shuffle_model: Option<SmartShuffleModel>,
+    /// Bookkeeping carried alongside the model so the Preferences
+    /// "last trained at" caption and the cold-start refusal
+    /// notification can reach it without reading the blob.
+    smart_shuffle_metadata: Option<SmartShuffleModelMetadata>,
+    /// Set after the runtime has surfaced the cold-start
+    /// notification once in the current process. Prevents the
+    /// notification from re-firing on every Smart Shuffle toggle
+    /// in the same session.
+    smart_shuffle_cold_start_notified: bool,
     // Channel handed to background workers that mutate the persisted
     // copy of a track behind the runtime's back (analysis fills BPM /
     // key, online lyrics/tags writes a row). Workers push the touched
@@ -319,6 +345,18 @@ pub type TrackAvailabilityObserver = Box<dyn Fn()>;
 /// defer back-into-runtime work onto the main loop.
 pub type TrackDataObserver = Box<dyn Fn(TrackId)>;
 
+/// Cached bookkeeping for the live Smart Shuffle model, mirroring
+/// the columns of [`sustain_library_store::StoredSmartShuffleModel`]
+/// minus the blob (the blob is materialised into
+/// `smart_shuffle_model` once it has been deserialised). Used by the
+/// Preferences "last trained" caption and by the cold-start logic.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SmartShuffleModelMetadata {
+    pub positive_label_count: u32,
+    pub negative_label_count: u32,
+    pub trained_at: std::time::SystemTime,
+}
+
 impl ApplicationRuntime {
     pub fn new() -> Self {
         Self {
@@ -355,6 +393,10 @@ impl ApplicationRuntime {
             online_scheduler: None,
             online_progress_sink: None,
             online_notification_id: None,
+            smart_shuffle_scheduler: SmartShuffleScheduler::new(),
+            smart_shuffle_model: None,
+            smart_shuffle_metadata: None,
+            smart_shuffle_cold_start_notified: false,
             track_updated_sink: None,
             clock: Arc::new(SystemClock),
             notifications: NotificationCenter::new(),
@@ -372,7 +414,7 @@ impl ApplicationRuntime {
             .map_err(|_| ApplicationRuntimeError::SettingsLoadFailed)?;
 
         let initial_playback_queue = PlaybackQueue::empty(PlaybackOptions {
-            shuffle_enabled: settings.playback.shuffle_enabled,
+            shuffle_mode: settings.playback.shuffle_mode,
             repeat_mode: RepeatMode::Off,
         });
         Ok(Self {
@@ -409,6 +451,10 @@ impl ApplicationRuntime {
             online_scheduler: None,
             online_progress_sink: None,
             online_notification_id: None,
+            smart_shuffle_scheduler: SmartShuffleScheduler::new(),
+            smart_shuffle_model: None,
+            smart_shuffle_metadata: None,
+            smart_shuffle_cold_start_notified: false,
             track_updated_sink: None,
             clock: Arc::new(SystemClock),
             notifications: NotificationCenter::new(),
@@ -1187,15 +1233,193 @@ impl ApplicationRuntime {
         Ok(())
     }
 
-    /// Mirror the current playback queue's shuffle flag into the persisted
-    /// user settings. Called from the shuffle command handler so the choice
-    /// survives a restart, the same way [`Self::save_playback_volume`] does.
-    pub(crate) fn persist_playback_shuffle(&mut self) -> ApplicationRuntimeResult<()> {
-        let shuffle_enabled = self.playback_queue.options().shuffle_enabled;
-        if self.settings.playback.shuffle_enabled == shuffle_enabled {
+    /// Result channel the UI shell drains on idle ticks to receive
+    /// completed Smart Shuffle training outcomes.
+    pub fn smart_shuffle_training_result_receiver(
+        &self,
+    ) -> async_channel::Receiver<SmartShuffleTrainingResult> {
+        self.smart_shuffle_scheduler.result_receiver()
+    }
+
+    pub fn smart_shuffle_is_training(&self) -> bool {
+        self.smart_shuffle_scheduler.is_training()
+    }
+
+    pub fn smart_shuffle_metadata(&self) -> Option<SmartShuffleModelMetadata> {
+        self.smart_shuffle_metadata
+    }
+
+    pub fn smart_shuffle_model_is_loaded(&self) -> bool {
+        self.smart_shuffle_model.is_some()
+    }
+
+    /// Try to load the persisted Smart Shuffle model from the
+    /// library store. Called once during runtime setup; silently
+    /// drops a blob whose feature schema no longer matches the
+    /// current extractor so we never feed mismatched inputs to the
+    /// model.
+    pub fn load_smart_shuffle_model_from_store(&mut self) -> ApplicationRuntimeResult<()> {
+        let Some(store) = self.library_store.as_ref() else {
+            return Ok(());
+        };
+        let stored = store
+            .load_smart_shuffle_model()
+            .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
+        let Some(stored) = stored else {
+            return Ok(());
+        };
+        if stored.feature_schema_version != SMART_SHUFFLE_FEATURE_SCHEMA_VERSION {
+            // Stale shape — clear so we can rebuild cleanly.
+            let _ = store.clear_smart_shuffle_model();
             return Ok(());
         }
-        self.settings.playback.shuffle_enabled = shuffle_enabled;
+        match SmartShuffleModel::from_blob(&stored.model_blob) {
+            Ok(model) => {
+                self.smart_shuffle_model = Some(model);
+                self.smart_shuffle_metadata = Some(SmartShuffleModelMetadata {
+                    positive_label_count: stored.positive_label_count,
+                    negative_label_count: stored.negative_label_count,
+                    trained_at: std::time::UNIX_EPOCH
+                        + std::time::Duration::from_secs(stored.trained_at_unix.max(0) as u64),
+                });
+            }
+            Err(_) => {
+                let _ = store.clear_smart_shuffle_model();
+            }
+        }
+        Ok(())
+    }
+
+    /// Schedule a fresh Smart Shuffle training run on the
+    /// background worker. Returns `false` when the scheduler is
+    /// already busy or there is no library to train from. The
+    /// result is delivered through the channel exposed by
+    /// [`Self::smart_shuffle_training_result_receiver`] and applied
+    /// via [`Self::apply_smart_shuffle_training_result`].
+    pub fn request_smart_shuffle_training(&mut self) -> bool {
+        if self.library_tracks.is_empty() {
+            return false;
+        }
+        let tracks = self.library_tracks.clone();
+        let now = self.clock.now();
+        self.smart_shuffle_scheduler.request_training(tracks, now)
+    }
+
+    /// Apply a completed training outcome. On success: store the
+    /// model in the library store and adopt it in memory. On
+    /// failure: surface the cold-start notification if it has not
+    /// already been shown this session.
+    pub fn apply_smart_shuffle_training_result(&mut self, result: SmartShuffleTrainingResult) {
+        match result.outcome {
+            Ok(outcome) => {
+                let trained_at_unix = result
+                    .trained_at
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let Ok(blob) = outcome.model.to_blob() else {
+                    self.notifications.push_ephemeral(
+                        NotificationCategory::SmartShuffle,
+                        NotificationSeverity::Warning,
+                        "Smart Shuffle: failed to serialise trained model.".to_owned(),
+                    );
+                    return;
+                };
+                let stored = sustain_library_store::StoredSmartShuffleModel {
+                    model_blob: blob,
+                    feature_schema_version: SMART_SHUFFLE_FEATURE_SCHEMA_VERSION,
+                    positive_label_count: outcome.positive_label_count,
+                    negative_label_count: outcome.negative_label_count,
+                    trained_at_unix,
+                };
+                if let Some(store) = self.library_store.as_ref()
+                    && store.save_smart_shuffle_model(&stored).is_err()
+                {
+                    self.notifications.push_ephemeral(
+                        NotificationCategory::SmartShuffle,
+                        NotificationSeverity::Warning,
+                        "Smart Shuffle: failed to persist trained model.".to_owned(),
+                    );
+                    return;
+                }
+                self.smart_shuffle_metadata = Some(SmartShuffleModelMetadata {
+                    positive_label_count: outcome.positive_label_count,
+                    negative_label_count: outcome.negative_label_count,
+                    trained_at: result.trained_at,
+                });
+                self.smart_shuffle_model = Some(outcome.model);
+                self.smart_shuffle_cold_start_notified = false;
+                self.notifications.push_ephemeral(
+                    NotificationCategory::SmartShuffle,
+                    NotificationSeverity::Info,
+                    "Smart Shuffle: model trained.".to_owned(),
+                );
+            }
+            Err(SmartShuffleError::InsufficientTrainingData {
+                positives,
+                negatives,
+            }) => {
+                self.notify_smart_shuffle_cold_start(positives, negatives);
+            }
+            Err(_) => {
+                self.notifications.push_ephemeral(
+                    NotificationCategory::SmartShuffle,
+                    NotificationSeverity::Warning,
+                    "Smart Shuffle: training failed.".to_owned(),
+                );
+            }
+        }
+    }
+
+    pub(crate) fn notify_smart_shuffle_cold_start(&mut self, positives: u32, negatives: u32) {
+        if self.smart_shuffle_cold_start_notified {
+            return;
+        }
+        self.smart_shuffle_cold_start_notified = true;
+        let body = format!(
+            "Smart Shuffle: model not trained yet — keep listening (currently {positives} liked and {negatives} skipped tracks; need at least {min} labelled total).",
+            min = MIN_LABELED_TRACKS,
+        );
+        self.notifications.push_ephemeral(
+            NotificationCategory::SmartShuffle,
+            NotificationSeverity::Info,
+            body,
+        );
+    }
+
+    /// Hook invoked from the shuffle-mode command handler so the
+    /// runtime can react to the user picking Smart for the first
+    /// time without a model. On the very first cold-start enable,
+    /// kicks off a training run so the user gets a model on the
+    /// next listening session — synchronous failures still surface
+    /// the cold-start notification.
+    pub(crate) fn on_shuffle_mode_changed(&mut self) {
+        let mode = self.playback_queue.options().shuffle_mode;
+        if !matches!(mode, ShuffleMode::Smart) {
+            return;
+        }
+        if self.smart_shuffle_model.is_some() {
+            return;
+        }
+        // No model yet — request a training run. If the library
+        // does not have enough labelled tracks the worker will
+        // emit InsufficientTrainingData, which `apply_smart_
+        // shuffle_training_result` translates into the cold-start
+        // notification.
+        if !self.smart_shuffle_scheduler.is_training() {
+            self.request_smart_shuffle_training();
+        }
+    }
+
+    /// Mirror the current playback queue's shuffle mode into the persisted
+    /// user settings. Called from the shuffle command handler so the choice
+    /// survives a restart, the same way [`Self::save_playback_volume`] does.
+    pub(crate) fn persist_playback_shuffle_mode(&mut self) -> ApplicationRuntimeResult<()> {
+        let shuffle_mode = self.playback_queue.options().shuffle_mode;
+        if self.settings.playback.shuffle_mode == shuffle_mode {
+            return Ok(());
+        }
+        self.settings.playback.shuffle_mode = shuffle_mode;
         if let Some(store) = self.settings_store.as_ref() {
             store
                 .save_settings(self.settings.clone())
@@ -1732,10 +1956,11 @@ mod tests {
     use sustain_domain::{
         ApplicationCommand, Clock, FieldChange, LibraryManagementMode, PlayStatistics,
         PlaybackCommand, PlaybackOptions, PlaybackState, Playlist, PlaylistFolderId, PlaylistId,
-        PlaylistItem, Rating, RepeatMode, SmartPlaylist, SmartPlaylistDateField, SmartPlaylistId,
-        SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistRule,
-        SmartPlaylistRuleSet, SmartPlaylistTextField, SmartPlaylistTextOperator, Track, TrackId,
-        TrackLocation, TrackMetadata, UiSettings, UiSidebarSelection, UserSettings, VolumePercent,
+        PlaylistItem, Rating, RepeatMode, ShuffleMode, SmartPlaylist, SmartPlaylistDateField,
+        SmartPlaylistId, SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind,
+        SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField, SmartPlaylistTextOperator,
+        Track, TrackId, TrackLocation, TrackMetadata, UiSettings, UiSidebarSelection, UserSettings,
+        VolumePercent,
     };
     use sustain_library_store::{InMemoryLibraryStore, LibraryStore, StoreResult};
     use sustain_metadata::{MetadataChange, MetadataError, MetadataResult};
@@ -1794,11 +2019,11 @@ mod tests {
                 Ok(()),
             ),
             (
-                ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle),
+                ApplicationCommand::Playback(PlaybackCommand::CycleShuffleMode),
                 Ok(()),
             ),
             (
-                ApplicationCommand::Playback(PlaybackCommand::SetShuffleEnabled(false)),
+                ApplicationCommand::Playback(PlaybackCommand::SetShuffleMode(ShuffleMode::Off)),
                 Ok(()),
             ),
             (
@@ -2909,78 +3134,102 @@ mod tests {
     }
 
     #[test]
-    fn runtime_toggles_shuffle_without_playback_service() {
+    fn runtime_cycles_shuffle_mode_without_playback_service() {
         let mut runtime = ApplicationRuntime::new();
 
         assert_eq!(runtime.playback_options(), PlaybackOptions::default());
         assert_eq!(
-            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle)),
+            runtime.handle_command(ApplicationCommand::Playback(
+                PlaybackCommand::CycleShuffleMode
+            )),
             Ok(())
         );
 
         assert_eq!(
             runtime.playback_options(),
             PlaybackOptions {
-                shuffle_enabled: true,
+                shuffle_mode: ShuffleMode::Pure,
                 repeat_mode: RepeatMode::Off,
             }
         );
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(
+                PlaybackCommand::CycleShuffleMode
+            )),
+            Ok(())
+        );
+        assert_eq!(runtime.playback_options().shuffle_mode, ShuffleMode::Smart);
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(
+                PlaybackCommand::CycleShuffleMode
+            )),
+            Ok(())
+        );
+        assert_eq!(runtime.playback_options().shuffle_mode, ShuffleMode::Off);
     }
 
     #[test]
-    fn runtime_persists_shuffle_toggle_to_settings_store() {
+    fn runtime_persists_shuffle_cycle_to_settings_store() {
         let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
             TestSettingsStore::new(UserSettings::default()),
         ))
         .expect("load settings from test store");
 
-        assert!(!runtime.settings().playback.shuffle_enabled);
         assert_eq!(
-            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle)),
-            Ok(())
+            runtime.settings().playback.shuffle_mode,
+            ShuffleMode::Off,
+            "fresh settings start with shuffle off"
         );
-        assert!(runtime.settings().playback.shuffle_enabled);
-
         assert_eq!(
             runtime.handle_command(ApplicationCommand::Playback(
-                PlaybackCommand::SetShuffleEnabled(false)
+                PlaybackCommand::CycleShuffleMode
             )),
             Ok(())
         );
-        assert!(!runtime.settings().playback.shuffle_enabled);
+        assert_eq!(runtime.settings().playback.shuffle_mode, ShuffleMode::Pure);
+
+        assert_eq!(
+            runtime.handle_command(ApplicationCommand::Playback(
+                PlaybackCommand::SetShuffleMode(ShuffleMode::Off)
+            )),
+            Ok(())
+        );
+        assert_eq!(runtime.settings().playback.shuffle_mode, ShuffleMode::Off);
     }
 
     #[test]
     fn runtime_restores_persisted_shuffle_at_startup() {
         let mut initial_settings = UserSettings::default();
-        initial_settings.playback.shuffle_enabled = true;
+        initial_settings.playback.shuffle_mode = ShuffleMode::Smart;
         let runtime = ApplicationRuntime::with_settings_store(Box::new(TestSettingsStore::new(
             initial_settings,
         )))
         .expect("load settings from test store");
 
-        assert!(runtime.playback_options().shuffle_enabled);
+        assert_eq!(runtime.playback_options().shuffle_mode, ShuffleMode::Smart);
     }
 
     #[test]
-    fn runtime_sets_shuffle_without_playback_service() {
+    fn runtime_sets_shuffle_mode_without_playback_service() {
         let mut runtime = ApplicationRuntime::new();
 
         assert_eq!(
             runtime.handle_command(ApplicationCommand::Playback(
-                PlaybackCommand::SetShuffleEnabled(true)
+                PlaybackCommand::SetShuffleMode(ShuffleMode::Pure)
             )),
             Ok(())
         );
-        assert!(runtime.playback_options().shuffle_enabled);
+        assert_eq!(runtime.playback_options().shuffle_mode, ShuffleMode::Pure);
 
         assert_eq!(
             runtime.handle_command(ApplicationCommand::Playback(
-                PlaybackCommand::SetShuffleEnabled(false)
+                PlaybackCommand::SetShuffleMode(ShuffleMode::Off)
             )),
             Ok(())
         );
-        assert!(!runtime.playback_options().shuffle_enabled);
+        assert_eq!(runtime.playback_options().shuffle_mode, ShuffleMode::Off);
     }
 
     #[test]
@@ -2995,7 +3244,7 @@ mod tests {
         assert_eq!(
             runtime.playback_options(),
             PlaybackOptions {
-                shuffle_enabled: false,
+                shuffle_mode: ShuffleMode::Off,
                 repeat_mode: RepeatMode::All,
             }
         );
@@ -3006,14 +3255,16 @@ mod tests {
         let mut runtime = ApplicationRuntime::new();
 
         assert_eq!(
-            runtime.handle_command(ApplicationCommand::Playback(PlaybackCommand::ToggleShuffle)),
+            runtime.handle_command(ApplicationCommand::Playback(
+                PlaybackCommand::CycleShuffleMode
+            )),
             Ok(())
         );
 
         assert_eq!(
             runtime.now_playing().options,
             PlaybackOptions {
-                shuffle_enabled: true,
+                shuffle_mode: ShuffleMode::Pure,
                 repeat_mode: RepeatMode::Off,
             }
         );

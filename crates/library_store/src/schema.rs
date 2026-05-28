@@ -178,6 +178,20 @@ CREATE TABLE IF NOT EXISTS track_synced_lyrics (
     source     TEXT NOT NULL
 );
 
+-- Smart Shuffle's trained engagement model. A singleton row (id = 1)
+-- holding the serialised model blob plus enough bookkeeping for the
+-- preferences UI to surface "last trained at" / "what's in the
+-- model" and for the runtime to skip-load a stale shape after the
+-- feature schema is bumped.
+CREATE TABLE IF NOT EXISTS smart_shuffle_model (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    model_blob BLOB NOT NULL,
+    feature_schema_version INTEGER NOT NULL,
+    positive_label_count INTEGER NOT NULL,
+    negative_label_count INTEGER NOT NULL,
+    trained_at_unix INTEGER NOT NULL
+);
+
 -- Per-track bookkeeping for network-bound retrievals (artwork, tag
 -- enrichment, lyrics). Same shape as track_analysis: a NULL
 -- *_attempted_at_unix means "not yet tried at the current
@@ -486,6 +500,34 @@ LIMIT ?5
 ///   ?3 = include_waveform   (1 or 0)
 ///   ?4 = current analyzer_version
 ///   ?5 = LIMIT
+pub(super) const UPSERT_SMART_SHUFFLE_MODEL_SQL: &str = r#"
+INSERT INTO smart_shuffle_model (
+    id,
+    model_blob,
+    feature_schema_version,
+    positive_label_count,
+    negative_label_count,
+    trained_at_unix
+)
+VALUES (1, ?1, ?2, ?3, ?4, ?5)
+ON CONFLICT(id) DO UPDATE SET
+    model_blob = excluded.model_blob,
+    feature_schema_version = excluded.feature_schema_version,
+    positive_label_count = excluded.positive_label_count,
+    negative_label_count = excluded.negative_label_count,
+    trained_at_unix = excluded.trained_at_unix
+"#;
+
+pub(super) const SELECT_SMART_SHUFFLE_MODEL_SQL: &str = r#"
+SELECT model_blob, feature_schema_version, positive_label_count,
+       negative_label_count, trained_at_unix
+FROM smart_shuffle_model
+WHERE id = 1
+"#;
+
+pub(super) const DELETE_SMART_SHUFFLE_MODEL_SQL: &str =
+    r#"DELETE FROM smart_shuffle_model WHERE id = 1"#;
+
 pub(super) const SELECT_TRACKS_NEEDING_ANALYSIS_SQL: &str = r#"
 SELECT t.id
 FROM tracks t

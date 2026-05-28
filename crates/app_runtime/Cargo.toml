@@ -28,6 +28,7 @@ sustain-metadata = { path = "../metadata" }
 sustain-metadata-remote = { path = "../metadata_remote" }
 sustain-playback = { path = "../playback" }
 sustain-search = { path = "../search" }
+sustain-smart-shuffle = { path = "../smart_shuffle" }
 
 [dev-dependencies]
 tempfile = "3"

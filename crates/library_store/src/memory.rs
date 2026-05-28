@@ -11,8 +11,8 @@ use sustain_domain::TrackAnalysis;
 use crate::{
     AnalysisCapabilities, AnalysisContext, LibraryStore, OnlineCapabilities, OnlineContext,
     Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, SmartPlaylist, SmartPlaylistId,
-    StoreError, StoreResult, StoredSyncedLyrics, StoredWaveform, SyncedLyrics, Track,
-    TrackColumnLayout, TrackColumnLayoutScope, TrackId,
+    StoreError, StoreResult, StoredSmartShuffleModel, StoredSyncedLyrics, StoredWaveform,
+    SyncedLyrics, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
 };
 
 #[derive(Debug, Default)]
@@ -28,6 +28,7 @@ pub struct InMemoryLibraryStore {
     waveforms: Mutex<BTreeMap<TrackId, StoredWaveform>>,
     synced_lyrics: Mutex<BTreeMap<TrackId, StoredSyncedLyrics>>,
     online_bookkeeping: Mutex<BTreeMap<TrackId, OnlineBookkeeping>>,
+    smart_shuffle_model: Mutex<Option<StoredSmartShuffleModel>>,
 }
 
 /// In-memory mirror of one `track_analysis` row. Mirrors the SQLite
@@ -537,6 +538,30 @@ impl LibraryStore for InMemoryLibraryStore {
             .lock()
             .map_err(|_| StoreError::StoreUnavailable)?
             .remove(&track_id);
+        Ok(())
+    }
+
+    fn save_smart_shuffle_model(&self, model: &StoredSmartShuffleModel) -> StoreResult<()> {
+        *self
+            .smart_shuffle_model
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)? = Some(model.clone());
+        Ok(())
+    }
+
+    fn load_smart_shuffle_model(&self) -> StoreResult<Option<StoredSmartShuffleModel>> {
+        Ok(self
+            .smart_shuffle_model
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .clone())
+    }
+
+    fn clear_smart_shuffle_model(&self) -> StoreResult<()> {
+        *self
+            .smart_shuffle_model
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)? = None;
         Ok(())
     }
 

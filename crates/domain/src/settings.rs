@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{PlaylistItem, VolumePercent};
+use crate::{PlaylistItem, ShuffleMode, VolumePercent};
 
 /// Volume picked the first time the app runs, before any persisted value
 /// exists. 80% matches the previous UI-side constant and is loud enough to
@@ -28,15 +28,83 @@ pub struct PlaybackSettings {
     pub volume: VolumePercent,
     /// Persisted shuffle preference. Restored at startup into the
     /// runtime's initial `PlaybackQueue::options()` so a user who
-    /// closed the app with shuffle on reopens with shuffle on.
-    pub shuffle_enabled: bool,
+    /// closed the app with Smart shuffle on reopens with it on. The
+    /// tri-state enum replaces the old `shuffle_enabled: bool` —
+    /// `ShuffleMode::Off` is the silent default, `ShuffleMode::Pure`
+    /// is the legacy Fisher-Yates behaviour, `ShuffleMode::Smart`
+    /// defers next-track choice to the trained engagement model.
+    pub shuffle_mode: ShuffleMode,
+    /// Smart-shuffle entropy slider (focused / balanced /
+    /// adventurous), exposed in the Shuffle preferences tab.
+    /// Controls the softmax temperature applied to candidate scores;
+    /// has no effect when Pure shuffle is active.
+    pub smart_shuffle_entropy: SmartShuffleEntropy,
+    /// Cadence at which the background trainer rebuilds the
+    /// engagement model. `Off` disables automatic retraining; the
+    /// user can still hit "Retrain now" from the preferences tab.
+    pub smart_shuffle_training_interval: SmartShuffleTrainingInterval,
 }
 
 impl Default for PlaybackSettings {
     fn default() -> Self {
         Self {
             volume: VolumePercent::from_clamped(DEFAULT_PLAYBACK_VOLUME_PERCENT),
-            shuffle_enabled: false,
+            shuffle_mode: ShuffleMode::Off,
+            smart_shuffle_entropy: SmartShuffleEntropy::default(),
+            smart_shuffle_training_interval: SmartShuffleTrainingInterval::default(),
+        }
+    }
+}
+
+/// User-facing entropy preset for Smart Shuffle. The three stops on
+/// the preferences slider map onto softmax temperatures; higher
+/// entropy widens the distribution, giving lower-scoring candidates
+/// more chance of being chosen.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SmartShuffleEntropy {
+    Focused,
+    #[default]
+    Balanced,
+    Adventurous,
+}
+
+impl SmartShuffleEntropy {
+    /// Softmax temperature applied to the candidate score
+    /// distribution. Higher = flatter (more exploration); lower =
+    /// peakier (more exploitation of the top-scoring candidate).
+    /// Calibrated empirically — the absolute values are not load-
+    /// bearing, only their order matters.
+    pub const fn temperature(self) -> f32 {
+        match self {
+            Self::Focused => 0.35,
+            Self::Balanced => 0.7,
+            Self::Adventurous => 1.4,
+        }
+    }
+}
+
+/// How often the smart-shuffle trainer rebuilds the engagement
+/// model in the background. `Off` is intentionally available — the
+/// user can train once via the "Retrain now" button and then leave
+/// the model frozen while iterating on their library.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SmartShuffleTrainingInterval {
+    Off,
+    Hourly,
+    #[default]
+    Daily,
+    Weekly,
+}
+
+impl SmartShuffleTrainingInterval {
+    /// Number of seconds between automatic retrains, or `None` when
+    /// retraining is disabled.
+    pub const fn interval_secs(self) -> Option<u64> {
+        match self {
+            Self::Off => None,
+            Self::Hourly => Some(60 * 60),
+            Self::Daily => Some(24 * 60 * 60),
+            Self::Weekly => Some(7 * 24 * 60 * 60),
         }
     }
 }
