@@ -52,6 +52,23 @@ modules:
   - name: sustain
     buildsystem: simple
     build-commands:
+      # flatpak-cargo-generator drops the crate archives at
+      # `cargo/vendor/<crate>-<version>/` and emits its own
+      # `cargo/config` describing them, but cargo's config-discovery
+      # only looks at `$CARGO_HOME/config*` and `.cargo/config*` in
+      # CWD and its parents — neither of which matches the generator's
+      # placement. Writing a `.cargo/config.toml` here with an
+      # absolute path to the vendor tree sidesteps that mismatch and
+      # is robust against generator-layout changes.
+      - |
+        mkdir -p .cargo
+        cat > .cargo/config.toml <<EOF
+        [source.vendored-sources]
+        directory = "$PWD/cargo/vendor"
+
+        [source.crates-io]
+        replace-with = "vendored-sources"
+        EOF
       - cargo --offline build --release --locked -p sustain-app
       - install -Dm755 target/release/sustain ${FLATPAK_DEST}/bin/sustain
       - install -Dm644 data/io.github.open_sustain.sustain.desktop
