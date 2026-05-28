@@ -279,6 +279,7 @@ impl ComposedRemoteMetadataService {
             .musicbrainz
             .lookup_recording(&best.recording_mbid)?
             .unwrap_or(best);
+        let detailed = self.enrich_genres_with_fallbacks(detailed)?;
         Ok(Some(recording_to_match(
             detailed,
             TrackMatchSource::MusicBrainzTags,
@@ -312,6 +313,7 @@ impl ComposedRemoteMetadataService {
         // carry no releases and would silently produce no artwork.
         for recording_mbid in &best.recording_mbids {
             if let Some(resolved) = self.musicbrainz.lookup_recording(recording_mbid)? {
+                let resolved = self.enrich_genres_with_fallbacks(resolved)?;
                 return Ok(Some(recording_to_match(
                     resolved,
                     TrackMatchSource::AcoustIdFingerprint,
@@ -320,6 +322,73 @@ impl ComposedRemoteMetadataService {
         }
         Ok(None)
     }
+
+    /// Walk the MusicBrainz genre hierarchy for `recording`, filling
+    /// the `genres` field from the first non-empty source. The walk
+    /// is recording → each release-group (in MB-supplied order) →
+    /// primary artist. Most MusicBrainz tracks carry no curated
+    /// genres at the recording level, so without this fallback even
+    /// perfectly identified famous tracks (Pink Floyd's "Money",
+    /// Queen's "Bohemian Rhapsody") would surface with an empty
+    /// genre list. The waterfall mirrors how MusicBrainz Picard
+    /// resolves genres by default.
+    ///
+    /// Short-circuits on the first non-empty hit to keep the request
+    /// count bounded — a worst-case enrichment is one search, one
+    /// recording lookup, one release-group lookup, one artist
+    /// lookup, all serialised by the per-host rate limiter.
+    fn enrich_genres_with_fallbacks(
+        &self,
+        recording: RecordingMatch,
+    ) -> RemoteResult<RecordingMatch> {
+        if !recording.genres.is_empty() {
+            return Ok(recording);
+        }
+        for release in &recording.releases {
+            let Some(release_group_mbid) = release.release_group_mbid.as_deref() else {
+                continue;
+            };
+            let genres = self
+                .musicbrainz
+                .lookup_release_group_genres(release_group_mbid)?;
+            if !genres.is_empty() {
+                return Ok(RecordingMatch {
+                    genres,
+                    ..recording
+                });
+            }
+        }
+        if let Some(artist_mbid) = recording.primary_artist_mbid.as_deref() {
+            let genres = self.musicbrainz.lookup_artist_genres(artist_mbid)?;
+            if !genres.is_empty() {
+                return Ok(RecordingMatch {
+                    genres,
+                    ..recording
+                });
+            }
+        }
+        Ok(recording)
+    }
+}
+
+/// Pure policy: pick the first non-empty genre source in the
+/// (recording, release-group, artist) waterfall. Extracted so the
+/// fallback ordering can be exercised without an HTTP mock; the real
+/// `enrich_genres_with_fallbacks` short-circuits on each I/O step
+/// rather than fetching all three sources up-front.
+#[cfg(test)]
+fn pick_genre_source(
+    recording: Vec<crate::musicbrainz::GenreVote>,
+    release_group: Vec<crate::musicbrainz::GenreVote>,
+    artist: Vec<crate::musicbrainz::GenreVote>,
+) -> Vec<crate::musicbrainz::GenreVote> {
+    if !recording.is_empty() {
+        return recording;
+    }
+    if !release_group.is_empty() {
+        return release_group;
+    }
+    artist
 }
 
 impl RemoteMetadataService for ComposedRemoteMetadataService {
@@ -437,7 +506,49 @@ mod tests {
                 track_total: Some(10),
                 disc_number: Some(1),
             }],
+            primary_artist_mbid: None,
         }
+    }
+
+    fn vote(name: &str, count: u32) -> crate::musicbrainz::GenreVote {
+        crate::musicbrainz::GenreVote {
+            name: name.to_owned(),
+            vote_count: count,
+        }
+    }
+
+    #[test]
+    fn pick_genre_source_prefers_recording_when_present() {
+        let recording = vec![vote("electronic", 5)];
+        let release_group = vec![vote("ambient", 10)];
+        let artist = vec![vote("synth-pop", 20)];
+        let chosen = pick_genre_source(recording, release_group, artist);
+        let names: Vec<_> = chosen.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["electronic"]);
+    }
+
+    #[test]
+    fn pick_genre_source_falls_back_to_release_group_when_recording_empty() {
+        let recording = Vec::new();
+        let release_group = vec![vote("progressive rock", 41)];
+        let artist = vec![vote("rock", 100)];
+        let chosen = pick_genre_source(recording, release_group, artist);
+        assert_eq!(chosen[0].name, "progressive rock");
+    }
+
+    #[test]
+    fn pick_genre_source_falls_back_to_artist_when_recording_and_release_group_empty() {
+        let recording = Vec::new();
+        let release_group = Vec::new();
+        let artist = vec![vote("progressive rock", 55)];
+        let chosen = pick_genre_source(recording, release_group, artist);
+        assert_eq!(chosen[0].name, "progressive rock");
+    }
+
+    #[test]
+    fn pick_genre_source_returns_empty_when_no_source_has_data() {
+        let chosen = pick_genre_source(Vec::new(), Vec::new(), Vec::new());
+        assert!(chosen.is_empty());
     }
 
     #[test]

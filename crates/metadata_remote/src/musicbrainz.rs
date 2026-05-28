@@ -33,14 +33,22 @@ use crate::mbid::is_well_formed;
 
 const SEARCH_BASE: &str = "https://musicbrainz.org/ws/2/recording/";
 const LOOKUP_BASE: &str = "https://musicbrainz.org/ws/2/recording";
+const RELEASE_GROUP_LOOKUP_BASE: &str = "https://musicbrainz.org/ws/2/release-group";
+const ARTIST_LOOKUP_BASE: &str = "https://musicbrainz.org/ws/2/artist";
 /// Includes for the lookup-by-id endpoint. Release-level details
 /// (and the release-group MBID) drive Cover Art Archive fallbacks;
-/// artist credit comes along for the read-back display; `genres`
+/// artist credit comes along for the read-back display and exposes
+/// the primary artist MBID for the genre-fallback walk; `genres`
 /// carries community-voted genre tags so tag enrichment can surface
 /// a primary genre. Search hits don't carry these extra fields, so
 /// the composed service is expected to promote any text-search winner
 /// to a follow-up lookup before handing the match to callers.
 const LOOKUP_INCLUDES: &str = "releases+release-groups+artist-credits+media+genres";
+/// Includes for the genre-fallback lookups on release-group and
+/// artist endpoints. Sustain only consumes the curated `genres`
+/// array; broader user-applied tags are intentionally left alone to
+/// avoid pulling moods, years, and country tags into the genre field.
+const GENRE_LOOKUP_INCLUDES: &str = "genres";
 
 /// Number of recordings the search asks MusicBrainz for. Five is
 /// enough to disambiguate noisy tags (a track with no album, several
@@ -94,6 +102,13 @@ pub struct RecordingMatch {
     /// associated with any release — those are skipped by Cover Art
     /// Archive lookup.
     pub releases: Vec<RecordingRelease>,
+    /// MusicBrainz MBID of the recording's primary (first) artist
+    /// credit. Used by the service layer as a genre-fallback source —
+    /// most MusicBrainz genre tags live at the artist level, not the
+    /// recording level. `None` when only the search endpoint was hit
+    /// (search hits omit artist IDs) or when the artist-credit was
+    /// empty or malformed.
+    pub primary_artist_mbid: Option<String>,
 }
 
 /// One community-voted genre tag attached to a recording.
@@ -130,6 +145,19 @@ impl MusicBrainzClient {
     /// Search MusicBrainz for recordings matching the given terms.
     /// Returns an empty vector if the terms carry no usable text;
     /// MusicBrainz would otherwise reject the query as malformed.
+    ///
+    /// Terms are normalised before they reach the Lucene query: the
+    /// artist string is collapsed to its primary segment (so a tag
+    /// like `"A, B, C"` becomes `"A"`), and parenthesised feature
+    /// credits are stripped from the title. This is the only path
+    /// the service layer uses for text identification, and the
+    /// normalisation policy is identical regardless of caller.
+    ///
+    /// One resilience retry: if the fully-constrained query (with an
+    /// album) returns no hits, the album clause is dropped and the
+    /// search is reissued. Album titles drift the most across editions
+    /// and reissues, and dropping the constraint costs at most one
+    /// additional MusicBrainz request when the first attempt failed.
     pub fn search_recordings(
         &self,
         terms: &RecordingSearchTerms,
@@ -137,13 +165,30 @@ impl MusicBrainzClient {
         if !terms.is_usable() {
             return Ok(Vec::new());
         }
+        let normalised = normalize_search_terms(terms);
+        if !normalised.is_usable() {
+            return Ok(Vec::new());
+        }
+        let mut hits = self.run_recording_search(&normalised)?;
+        if hits.is_empty() && normalised.album.is_some() {
+            let no_album = RecordingSearchTerms {
+                album: None,
+                ..normalised.clone()
+            };
+            hits = self.run_recording_search(&no_album)?;
+        }
+        Ok(hits)
+    }
 
+    fn run_recording_search(
+        &self,
+        terms: &RecordingSearchTerms,
+    ) -> RemoteResult<Vec<RecordingMatch>> {
         let query = build_search_query(terms);
         let url = format!(
             "{SEARCH_BASE}?query={query}&fmt=json&limit={SEARCH_LIMIT}",
             query = url_encode(&query),
         );
-
         let payload: SearchPayload = self.http.get_json(&url)?;
         Ok(payload
             .recordings
@@ -178,6 +223,171 @@ impl MusicBrainzClient {
         };
         Ok(into_recording_match(recording))
     }
+
+    /// Fetch the community-voted genre tags attached to a release-
+    /// group. Used by the service layer as the first fallback when a
+    /// recording itself carries no curated genres. Returns an empty
+    /// vector for 404 responses (recordings can reference release-
+    /// groups that have since been merged or removed); other errors
+    /// propagate so the caller can decide whether to retry.
+    pub fn lookup_release_group_genres(
+        &self,
+        release_group_mbid: &str,
+    ) -> RemoteResult<Vec<GenreVote>> {
+        self.lookup_entity_genres(RELEASE_GROUP_LOOKUP_BASE, release_group_mbid)
+    }
+
+    /// Fetch the community-voted genre tags attached to an artist.
+    /// Used as the final fallback when neither the recording nor any
+    /// of its release-groups carry curated genres. Same 404 handling
+    /// as [`Self::lookup_release_group_genres`].
+    pub fn lookup_artist_genres(&self, artist_mbid: &str) -> RemoteResult<Vec<GenreVote>> {
+        self.lookup_entity_genres(ARTIST_LOOKUP_BASE, artist_mbid)
+    }
+
+    fn lookup_entity_genres(&self, base_url: &str, mbid: &str) -> RemoteResult<Vec<GenreVote>> {
+        if !is_well_formed(mbid) {
+            return Ok(Vec::new());
+        }
+        let url = format!("{base_url}/{mbid}?inc={GENRE_LOOKUP_INCLUDES}&fmt=json");
+        let payload: GenrePayload = match self.http.get_json(&url) {
+            Ok(value) => value,
+            Err(crate::error::RemoteError::BadStatus(404)) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        Ok(sort_genres(payload.genres.unwrap_or_default()))
+    }
+}
+
+/// Apply Sustain's normalisation policy to the raw search terms
+/// before they reach Lucene. Comma-and-feat-style multi-artist
+/// strings collapse to their primary artist; parenthesised feature
+/// credits drop out of titles. The album field is preserved as-is —
+/// any retry without it is handled by [`MusicBrainzClient::search_recordings`].
+fn normalize_search_terms(terms: &RecordingSearchTerms) -> RecordingSearchTerms {
+    RecordingSearchTerms {
+        artist: terms.artist.as_deref().and_then(primary_artist),
+        title: terms
+            .title
+            .as_deref()
+            .map(clean_recording_title)
+            .filter(|value| !value.is_empty()),
+        album: terms.album.as_deref().and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }),
+        duration_ms: terms.duration_ms,
+    }
+}
+
+/// Reduce a multi-artist tag string to its primary (first) artist.
+///
+/// Music files commonly store collaborative credits as a single
+/// flat string — `"A, B"`, `"A feat. B"`, `"A & B"`, `"A x B"` —
+/// because most tag editors do not support structured multi-artist
+/// values. MusicBrainz's search, by contrast, expects a literal
+/// artist name; a Lucene phrase like `artist:"A, B"` matches zero
+/// MusicBrainz artists because no MB entity has that exact name.
+/// Picking the first segment is the closest thing to a "primary
+/// artist" we can recover without changing the library's storage
+/// model. Returns `None` if the input has no usable text.
+pub(crate) fn primary_artist(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let primary = split_primary_artist(trimmed);
+    let cleaned = primary.trim();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.to_owned())
+    }
+}
+
+/// Return the slice of `input` up to (but not including) the first
+/// multi-artist separator. The padding spaces in the word-shaped
+/// separators are deliberate — they prevent matching inside a single
+/// word (e.g. the `x` in "Charli xcx" or the `&` in an HTML-escaped
+/// string).
+fn split_primary_artist(input: &str) -> &str {
+    const WORD_SEPS: &[&str] = &[
+        " feat. ",
+        " feat ",
+        " featuring ",
+        " ft. ",
+        " ft ",
+        " vs. ",
+        " vs ",
+        " versus ",
+        " x ",
+        " / ",
+        " & ",
+        " + ",
+    ];
+    let lower = input.to_ascii_lowercase();
+    let comma_pos = lower.find(',');
+    let word_pos = WORD_SEPS.iter().filter_map(|sep| lower.find(sep)).min();
+    let earliest = match (comma_pos, word_pos) {
+        (Some(c), Some(w)) => Some(c.min(w)),
+        (Some(c), None) => Some(c),
+        (None, Some(w)) => Some(w),
+        (None, None) => None,
+    };
+    match earliest {
+        Some(pos) => &input[..pos],
+        None => input,
+    }
+}
+
+/// Strip parenthesised or bracketed feature credits from a recording
+/// title. `"Flowerz (feat. Roland Clark)"` becomes `"Flowerz"`, which
+/// matches the canonical title MusicBrainz stores. Other parenthetical
+/// segments (`"(Live)"`, `"(Remastered 2011)"`, `"(Original Mix)"`)
+/// are kept verbatim: they distinguish meaningfully different
+/// recordings, and dropping them would hurt precision more than the
+/// feat-strip helps.
+pub(crate) fn clean_recording_title(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut output: Vec<char> = Vec::with_capacity(chars.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        let close = match ch {
+            '(' => Some(')'),
+            '[' => Some(']'),
+            _ => None,
+        };
+        if let Some(closer) = close
+            && let Some(end_offset) = chars[i + 1..].iter().position(|c| *c == closer)
+        {
+            let inner: String = chars[i + 1..i + 1 + end_offset].iter().collect();
+            if is_featured_credit(&inner) {
+                i += end_offset + 2;
+                while output.last() == Some(&' ') {
+                    output.pop();
+                }
+                continue;
+            }
+        }
+        output.push(ch);
+        i += 1;
+    }
+    let result: String = output.into_iter().collect();
+    result.trim().to_owned()
+}
+
+fn is_featured_credit(inner: &str) -> bool {
+    let lower = inner.trim().to_ascii_lowercase();
+    const PREFIXES: &[&str] = &["feat.", "feat ", "featuring ", "ft.", "ft ", "with "];
+    if matches!(lower.as_str(), "feat" | "ft" | "featuring") {
+        return true;
+    }
+    PREFIXES.iter().any(|prefix| lower.starts_with(prefix))
 }
 
 /// Construct the Lucene query MusicBrainz expects. Each field is
@@ -264,6 +474,14 @@ fn into_recording_match(raw: RawRecording) -> Option<RecordingMatch> {
         .collect();
     let first_release_year = raw.first_release_date.as_deref().and_then(parse_year);
     let genres = sort_genres(raw.genres.unwrap_or_default());
+    let primary_artist_mbid = raw
+        .artist_credit
+        .as_deref()
+        .and_then(|credits| credits.first())
+        .and_then(|credit| credit.artist.as_ref())
+        .and_then(|artist| artist.id.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.to_owned());
     Some(RecordingMatch {
         recording_mbid: raw.id,
         title: raw.title.filter(|value| is_non_blank(value)),
@@ -277,6 +495,7 @@ fn into_recording_match(raw: RawRecording) -> Option<RecordingMatch> {
         first_release_year,
         genres,
         releases,
+        primary_artist_mbid,
     })
 }
 
@@ -440,7 +659,15 @@ struct RawArtistCredit {
 #[derive(Deserialize)]
 struct RawArtist {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GenrePayload {
+    #[serde(default)]
+    genres: Option<Vec<RawGenre>>,
 }
 
 #[derive(Deserialize)]
@@ -596,6 +823,7 @@ mod tests {
                 name: None,
                 joinphrase: Some(" & ".to_owned()),
                 artist: Some(RawArtist {
+                    id: None,
                     name: Some("Simon".to_owned()),
                 }),
             },
@@ -609,5 +837,191 @@ mod tests {
             format_artist_credit(&credits).as_deref(),
             Some("Simon & Garfunkel")
         );
+    }
+
+    #[test]
+    fn primary_artist_strips_secondary_credits() {
+        assert_eq!(
+            primary_artist("Armand Van Helden, Roland Clark").as_deref(),
+            Some("Armand Van Helden")
+        );
+        assert_eq!(
+            primary_artist("2nd Exit, Alfa Mist, Lester Duval").as_deref(),
+            Some("2nd Exit")
+        );
+        assert_eq!(
+            primary_artist("Simon & Garfunkel").as_deref(),
+            Some("Simon")
+        );
+        assert_eq!(
+            primary_artist("Daft Punk feat. Pharrell Williams").as_deref(),
+            Some("Daft Punk")
+        );
+        assert_eq!(
+            primary_artist("Daft Punk featuring Pharrell Williams").as_deref(),
+            Some("Daft Punk")
+        );
+        assert_eq!(primary_artist("Diplo x Skrillex").as_deref(), Some("Diplo"));
+        assert_eq!(
+            primary_artist("Run-D.M.C. vs. Jason Nevins").as_deref(),
+            Some("Run-D.M.C.")
+        );
+        assert_eq!(
+            primary_artist("Pharrell Williams + Daft Punk").as_deref(),
+            Some("Pharrell Williams")
+        );
+    }
+
+    #[test]
+    fn primary_artist_preserves_single_artist_strings() {
+        assert_eq!(primary_artist("Queen").as_deref(), Some("Queen"));
+        assert_eq!(primary_artist("AC/DC").as_deref(), Some("AC/DC"));
+        assert_eq!(primary_artist("Run-D.M.C.").as_deref(), Some("Run-D.M.C."));
+        // "Charli xcx" contains 'x' but not a " x " separator.
+        assert_eq!(primary_artist("Charli xcx").as_deref(), Some("Charli xcx"));
+        // "Earth, Wind & Fire" — band names containing commas exist
+        // but are rare; we accept the loss because comma in tag fields
+        // overwhelmingly means "multiple artists". The user can edit
+        // the tag to use a non-comma separator if MB identification
+        // matters for that specific track.
+        assert_eq!(
+            primary_artist("Earth, Wind & Fire").as_deref(),
+            Some("Earth")
+        );
+    }
+
+    #[test]
+    fn primary_artist_handles_blank_input() {
+        assert_eq!(primary_artist(""), None);
+        assert_eq!(primary_artist("   "), None);
+        // Leading separator produces an empty primary segment.
+        assert_eq!(primary_artist(", B"), None);
+    }
+
+    #[test]
+    fn clean_recording_title_strips_feat_parens() {
+        assert_eq!(
+            clean_recording_title("Flowerz (feat. Roland Clark)"),
+            "Flowerz"
+        );
+        assert_eq!(
+            clean_recording_title("Get Lucky (featuring Pharrell Williams)"),
+            "Get Lucky"
+        );
+        assert_eq!(clean_recording_title("Title [feat. X]"), "Title");
+        assert_eq!(clean_recording_title("Track (ft. Guest)"), "Track");
+        assert_eq!(clean_recording_title("Track (with Guest)"), "Track");
+    }
+
+    #[test]
+    fn clean_recording_title_preserves_version_parens() {
+        assert_eq!(
+            clean_recording_title("Stairway to Heaven (Live)"),
+            "Stairway to Heaven (Live)"
+        );
+        assert_eq!(
+            clean_recording_title("Money (Remastered 2011)"),
+            "Money (Remastered 2011)"
+        );
+        assert_eq!(
+            clean_recording_title("Flowerz (feat. Roland Clark) (Original Mix)"),
+            "Flowerz (Original Mix)"
+        );
+    }
+
+    #[test]
+    fn clean_recording_title_handles_titles_without_parens() {
+        assert_eq!(
+            clean_recording_title("Bohemian Rhapsody"),
+            "Bohemian Rhapsody"
+        );
+        assert_eq!(clean_recording_title(""), "");
+    }
+
+    #[test]
+    fn normalize_search_terms_applies_both_helpers() {
+        let raw = RecordingSearchTerms {
+            artist: Some("Armand Van Helden, Roland Clark".to_owned()),
+            title: Some("Flowerz (feat. Roland Clark)".to_owned()),
+            album: Some("2 Future 4 U".to_owned()),
+            duration_ms: Some(200_000),
+        };
+        let normalised = normalize_search_terms(&raw);
+        assert_eq!(normalised.artist.as_deref(), Some("Armand Van Helden"));
+        assert_eq!(normalised.title.as_deref(), Some("Flowerz"));
+        assert_eq!(normalised.album.as_deref(), Some("2 Future 4 U"));
+        assert_eq!(normalised.duration_ms, Some(200_000));
+    }
+
+    #[test]
+    fn normalize_search_terms_drops_blanks() {
+        let raw = RecordingSearchTerms {
+            artist: Some("   ".to_owned()),
+            title: Some("(feat. Solo)".to_owned()),
+            album: Some(" ".to_owned()),
+            duration_ms: None,
+        };
+        let normalised = normalize_search_terms(&raw);
+        assert_eq!(normalised.artist, None);
+        // Title was nothing but a feat-paren — drops to empty, which
+        // the filter then strips.
+        assert_eq!(normalised.title, None);
+        assert_eq!(normalised.album, None);
+    }
+
+    #[test]
+    fn into_recording_match_captures_primary_artist_mbid() {
+        let raw = RawRecording {
+            id: "rec-1".to_owned(),
+            title: Some("Song".to_owned()),
+            length: Some(180_000),
+            score: Some(95),
+            first_release_date: Some("1973".to_owned()),
+            artist_credit: Some(vec![
+                RawArtistCredit {
+                    name: None,
+                    joinphrase: Some(" feat. ".to_owned()),
+                    artist: Some(RawArtist {
+                        id: Some("artist-primary".to_owned()),
+                        name: Some("Primary".to_owned()),
+                    }),
+                },
+                RawArtistCredit {
+                    name: Some("Guest".to_owned()),
+                    joinphrase: None,
+                    artist: Some(RawArtist {
+                        id: Some("artist-guest".to_owned()),
+                        name: Some("Guest".to_owned()),
+                    }),
+                },
+            ]),
+            releases: None,
+            genres: None,
+        };
+        let matched = into_recording_match(raw).expect("match builds");
+        assert_eq!(
+            matched.primary_artist_mbid.as_deref(),
+            Some("artist-primary")
+        );
+    }
+
+    #[test]
+    fn into_recording_match_handles_missing_artist_id() {
+        let raw = RawRecording {
+            id: "rec-1".to_owned(),
+            title: Some("Song".to_owned()),
+            length: None,
+            score: Some(80),
+            first_release_date: None,
+            artist_credit: Some(vec![RawArtistCredit {
+                name: Some("Solo".to_owned()),
+                joinphrase: None,
+                artist: None,
+            }]),
+            releases: None,
+            genres: None,
+        };
+        let matched = into_recording_match(raw).expect("match builds");
+        assert_eq!(matched.primary_artist_mbid, None);
     }
 }
