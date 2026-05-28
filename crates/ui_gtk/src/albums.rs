@@ -589,7 +589,9 @@ impl AlbumsView {
             ALBUM_TILE_COVER_SIZE
         };
 
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        // Per-label margins instead of a uniform box spacing so the
+        // title→artist gap can be tighter than the cover→title gap.
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.set_width_request(cover_size);
         content.set_halign(gtk::Align::Center);
         content.set_overflow(gtk::Overflow::Hidden);
@@ -624,6 +626,7 @@ impl AlbumsView {
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
         title.set_xalign(0.0);
         title.set_halign(gtk::Align::Start);
+        title.set_margin_top(6);
         content.append(&title);
 
         let artist = gtk::Label::new(Some(&album.artist));
@@ -632,6 +635,7 @@ impl AlbumsView {
         artist.set_ellipsize(gtk::pango::EllipsizeMode::End);
         artist.set_xalign(0.0);
         artist.set_halign(gtk::Align::Start);
+        artist.set_margin_top(1);
         content.append(&artist);
 
         let button = gtk::Button::new();
