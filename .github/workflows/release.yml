@@ -155,10 +155,16 @@ jobs:
       - name: Install the matching .deb
         run: |
           set -euo pipefail
-          DEB=$(find artifacts -name "sustain_*_${{ matrix.arch }}.deb" -print -quit)
+          # `actions/download-artifact` lays each artifact out as
+          # `artifacts/<artifact-name>/<file>`, where the artifact name
+          # is the .deb's basename — so a `find` without `-type f` would
+          # match the directory instead of the file. Anchor on files
+          # only, and prefix the path with `./` so apt-get treats it as
+          # a local .deb rather than parsing it as a package spec.
+          DEB=$(find artifacts -type f -name "sustain_*_${{ matrix.arch }}.deb" -print -quit)
           test -n "${DEB}" || { echo "No sustain_*_${{ matrix.arch }}.deb artifact found"; exit 1; }
-          echo "Installing ${DEB}"
-          apt-get install -y --no-install-recommends "${DEB}"
+          echo "Installing ./${DEB}"
+          apt-get install -y --no-install-recommends "./${DEB}"
 
       - name: Verify install layout
         run: |
@@ -215,10 +221,17 @@ jobs:
   # both verification and the Flatpak build have passed. That way a
   # broken .deb or a failed install verification cannot land an
   # artifact on a published release.
+  #
+  # Fires on either a tag push (normal path) or a workflow_dispatch
+  # whose `inputs.ref` is a tag name (recovery path — when a prior
+  # run died on a transient failure, the same release can be retried
+  # without recutting the tag). When dispatched against a non-tag
+  # ref (e.g. testing the build from a branch), publish-release is
+  # skipped so the workflow can't accidentally create a release.
   publish-release:
     name: Attach artifacts to GitHub Release
     needs: [verify-ubuntu, flatpak]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.ref, 'v')
     runs-on: ubuntu-24.04
     steps:
       - name: Download all artifacts
@@ -241,3 +254,7 @@ jobs:
           files: release/*
           generate_release_notes: true
           fail_on_unmatched_files: true
+          # On tag push, `github.ref_name` is the tag (e.g. v0.1.0). On
+          # workflow_dispatch, `github.ref_name` is the branch we
+          # dispatched from, so we must pull the tag from inputs.ref.
+          tag_name: ${{ inputs.ref || github.ref_name }}
