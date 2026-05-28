@@ -3,15 +3,19 @@
   Sustain
 </h1>
 
-![Sustain interface screenshot dark](.github/assets/screenshot-dark.png)
 
-![Sustain interface screenshot light](.github/assets/screenshot-light.png)
+![Sustain interface screenshot light](.github/assets/screenshot-light-albums.png)
 
-![Sustain interface screenshot settings library](.github/assets/settings-library.png)
+<p align="center">
+	<img src=".github/assets/screenshot-dark-albums.png" alt="Sustain interface screenshot album view dark" width="49%" />
+	<img src=".github/assets/screenshot-light-songs.png" alt="Sustain interface screenshot songs view light" width="49%" />
+</p>
 
-![Sustain interface screenshot settings analysis](.github/assets/settings-analysis.png)
-
-![Sustain interface screenshot settings online](.github/assets/settings-online.png)
+<p align="center">
+  <img src=".github/assets/settings-library.png" alt="Sustain interface screenshot settings library" width="32%" />
+  <img src=".github/assets/settings-analysis.png" alt="Sustain interface screenshot settings analysis" width="32%" />
+  <img src=".github/assets/settings-online.png" alt="Sustain interface screenshot settings online" width="32%" />
+</p>
 
 Sustain (`open-sustain/sustain`) is a Linux music player heavily inspired by old iTunes builds.
 
@@ -73,6 +77,25 @@ Implemented:
 - Duplicates consolidation (preserve the best audio version, aggregate tags)
 - Artwork and ID3 backfill
 - Sync to Android / Export to [XDJ](https://github.com/AnnoyingTechnology/rhythmbox-to-pioneer-xdj-exporter)
+
+## Install
+
+Pre-built artefacts are attached to each [GitHub release](https://github.com/open-sustain/sustain/releases).
+
+**Debian / Ubuntu (amd64 or arm64)** — the same `.deb` is built against Debian trixie's GTK 4.18 and is verified to install cleanly on Ubuntu 25.10 and Ubuntu 26.04 LTS.
+
+```sh
+sudo apt install ./sustain_<version>_<arch>.deb
+```
+
+**Any other Linux distribution (Fedora, openSUSE, Elementary, Zorin, Mint, …)** — install the Flatpak bundle from the same release. It runs against the `org.gnome.Platform//48` runtime and brings its own GTK 4 / GStreamer stack.
+
+```sh
+flatpak install --user ./sustain.flatpak
+flatpak run io.github.open_sustain.sustain
+```
+
+A Flathub submission will follow once the application stabilises.
 
 ## Key locations
 
