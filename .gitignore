@@ -15,3 +15,14 @@
 # Local clone of the upstream Pioneer/Rhythmbox exporter the analysis
 # crate cherry-picks DSP from. Not part of Sustain; kept out of the repo.
 /rhythmbox-to-pioneer-xdj-exporter/
+
+# Flatpak cargo sources are regenerated from Cargo.lock at build time by
+# `flatpak-cargo-generator.py`. The file is multi-megabyte generated
+# content that must stay in lock-step with Cargo.lock; deriving it at
+# build time is cleaner than committing it.
+/packaging/flatpak/cargo-sources.json
+/.flatpak-builder/
+/packaging/flatpak/.flatpak-builder/
+/packaging/flatpak/build-dir/
+/packaging/flatpak/repo/
+/packaging/flatpak/*.flatpak

@@ -26,8 +26,13 @@ jobs:
   # Build inside debian:trixie-slim so the .deb links against Debian's
   # GTK 4.18 / glibc, matching the target platform. Ubuntu 24.04 ships
   # GTK 4.14 which is too old for the workspace's `v4_18` feature.
-  deb:
-    name: Build .deb (debian-trixie-amd64)
+  #
+  # The amd64 and arm64 jobs differ only in the GitHub-hosted runner
+  # they sit on (`ubuntu-24.04` vs `ubuntu-24.04-arm`); both pull the
+  # multi-arch `debian:trixie-slim` image so Debian's packaging policy
+  # is identical across architectures.
+  deb-amd64:
+    name: Build .deb (debian-trixie / amd64)
     runs-on: ubuntu-24.04
     container:
       image: debian:trixie-slim
@@ -69,10 +74,170 @@ jobs:
           path: ${{ steps.artifact.outputs.path }}
           if-no-files-found: error
 
+  deb-arm64:
+    name: Build .deb (debian-trixie / arm64)
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: debian:trixie-slim
+    steps:
+      - name: Install prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libgtk-4-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+
+      - name: Build release .deb
+        run: cargo deb -p sustain-app --locked
+
+      - name: Locate artifact
+        id: artifact
+        run: |
+          DEB=$(ls target/debian/*.deb | head -n1)
+          echo "path=${DEB}" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "${DEB}")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact (workflow)
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ steps.artifact.outputs.path }}
+          if-no-files-found: error
+
+  # Verify the Debian-trixie .deb installs cleanly on Ubuntu's two
+  # supported targets: the current interim release (25.10) and the
+  # current LTS (26.04). `apt-get install ./pkg.deb` performs full
+  # dependency resolution against the target distro's archives, so a
+  # successful run here proves the Trixie-built package is consumable
+  # by Ubuntu without a per-release rebuild. If a future Ubuntu
+  # release ships an incompatible GTK 4 ABI, this job fails and we
+  # then know to add a per-Ubuntu builder.
+  verify-ubuntu:
+    name: Verify install (${{ matrix.distro }} / ${{ matrix.arch }})
+    needs: [deb-amd64, deb-arm64]
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        distro: ['ubuntu:25.10', 'ubuntu:26.04']
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ${{ matrix.distro }}
+    steps:
+      - name: Install verification tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates
+
+      - name: Download .deb artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+
+      - name: Install the matching .deb
+        run: |
+          set -euo pipefail
+          DEB=$(find artifacts -name "sustain_*_${{ matrix.arch }}.deb" -print -quit)
+          test -n "${DEB}" || { echo "No sustain_*_${{ matrix.arch }}.deb artifact found"; exit 1; }
+          echo "Installing ${DEB}"
+          apt-get install -y --no-install-recommends "${DEB}"
+
+      - name: Verify install layout
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/sustain
+          test -f /usr/share/applications/io.github.open_sustain.sustain.desktop
+          test -f /usr/share/metainfo/io.github.open_sustain.sustain.metainfo.xml
+          test -f /usr/share/icons/hicolor/128x128/apps/io.github.open_sustain.sustain.png
+          dpkg -s sustain | grep -E '^(Package|Version|Architecture|Status):'
+
+  # Distro-agnostic build for users on Elementary / Zorin / Mint /
+  # Fedora / openSUSE / etc. Targets the org.gnome.Platform//48
+  # runtime (GTK 4.18+). Cargo source pinning is regenerated from
+  # Cargo.lock at build time via flatpak-cargo-generator.py so the
+  # offline cargo build inside flatpak-builder is reproducible and
+  # locked to the same revisions cargo would pick on a developer
+  # machine.
+  flatpak:
+    name: Build Flatpak bundle (amd64)
+    runs-on: ubuntu-24.04
+    container:
+      image: bilelmoussaoui/flatpak-github-actions:gnome-48
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install cargo-sources generator dependencies
+        run: |
+          dnf install -y python3-pip python3-aiohttp python3-pyyaml python3-toml
+
+      - name: Fetch flatpak-cargo-generator
+        run: |
+          curl --proto '=https' --tlsv1.2 -fL \
+            https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py \
+            -o /tmp/flatpak-cargo-generator.py
+
+      - name: Generate cargo-sources.json
+        run: |
+          python3 /tmp/flatpak-cargo-generator.py \
+            Cargo.lock \
+            -o packaging/flatpak/cargo-sources.json
+
+      - uses: flathub-infra/flatpak-github-actions/flatpak-builder@master
+        with:
+          bundle: sustain.flatpak
+          manifest-path: packaging/flatpak/io.github.open_sustain.sustain.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+          upload-artifact: true
+
+  # Single point of release attachment. Builders publish workflow
+  # artifacts only; this job downloads them and attaches the lot once
+  # both verification and the Flatpak build have passed. That way a
+  # broken .deb or a failed install verification cannot land an
+  # artifact on a published release.
+  publish-release:
+    name: Attach artifacts to GitHub Release
+    needs: [verify-ubuntu, flatpak]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+
+      - name: Collect release files
+        id: collect
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts -type f \( -name '*.deb' -o -name '*.flatpak' \) \
+            -exec cp -v {} release/ \;
+          ls -la release/
+
       - name: Attach to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
-          files: ${{ steps.artifact.outputs.path }}
+          files: release/*
           generate_release_notes: true
           fail_on_unmatched_files: true

@@ -1,0 +1,78 @@
+# Sustain — Flatpak manifest
+#
+# Built and bundled by `.github/workflows/release.yml` as `sustain.flatpak`
+# and attached to each tagged GitHub release. Targets the GNOME 48
+# platform runtime, which ships GTK 4.18+ (matching the workspace's
+# `gtk4 = { features = ["v4_18"] }` requirement) and a recent GStreamer
+# that covers the audio codecs Sustain consumes (MP3, FLAC, Ogg, Opus,
+# MP4/AAC).
+#
+# Cargo sources are pinned from `Cargo.lock` by `flatpak-cargo-generator.py`
+# into `cargo-sources.json` at CI time; the cargo build itself runs
+# `--offline --locked` so the sandboxed build is reproducible against the
+# same crate revisions a developer machine would resolve.
+
+id: io.github.open_sustain.sustain
+runtime: org.gnome.Platform
+runtime-version: '48'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: sustain
+
+finish-args:
+  # Display and input.
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Audio output. PulseAudio is the canonical socket; PipeWire's
+  # pulse compatibility layer plugs in transparently on modern
+  # GNOME / KDE systems.
+  - --socket=pulseaudio
+  # Network access for MusicBrainz, Cover Art Archive, and AcoustID.
+  - --share=network
+  # The user-picked library folder can live anywhere under the user's
+  # home directory. The file-chooser portal handles the actual UI;
+  # this grant ensures Sustain can read tags from and write tag updates
+  # back to the picked path.
+  - --filesystem=home
+  # MPRIS / media-key integration: own the well-known bus name so
+  # `playerctl`, gnome-shell's media widget, and lock-screen players
+  # drive Sustain transparently. Matches `BUS_NAME` in
+  # `crates/desktop/src/mpris.rs`.
+  - --own-name=org.mpris.MediaPlayer2.sustain
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/sustain/cargo-home
+
+modules:
+  - name: sustain
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release --locked -p sustain-app
+      - install -Dm755 target/release/sustain ${FLATPAK_DEST}/bin/sustain
+      - install -Dm644 data/io.github.open_sustain.sustain.desktop
+          ${FLATPAK_DEST}/share/applications/io.github.open_sustain.sustain.desktop
+      - install -Dm644 data/io.github.open_sustain.sustain.metainfo.xml
+          ${FLATPAK_DEST}/share/metainfo/io.github.open_sustain.sustain.metainfo.xml
+      - |
+        for size in 16 24 32 48 64 128 256 512; do
+          install -Dm644 \
+            "data/icons/hicolor/${size}x${size}/apps/io.github.open_sustain.sustain.png" \
+            "${FLATPAK_DEST}/share/icons/hicolor/${size}x${size}/apps/io.github.open_sustain.sustain.png"
+        done
+    sources:
+      # The full repository checkout drives the build. This manifest
+      # lives two levels deep under `packaging/flatpak/`, so the source
+      # tree is at `../..`.
+      - type: dir
+        path: ../..
+      # Pinned cargo sources, regenerated from `Cargo.lock` by CI before
+      # the Flatpak build runs. Not committed — the file is megabytes of
+      # generated content that must stay perfectly in sync with
+      # `Cargo.lock`, so deriving it at build time keeps the repository
+      # lean and the two definitions in lock-step.
+      - cargo-sources.json
