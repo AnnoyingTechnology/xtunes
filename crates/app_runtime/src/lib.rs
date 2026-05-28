@@ -1381,14 +1381,18 @@ impl ApplicationRuntime {
     ///     sweep is already going to process every track that needs
     ///     this capability, the per-set trigger would be redundant).
     ///   * Empty track set -> [`RunDecision::TargetEmpty`].
+    ///   * Library store not installed -> [`RunDecision::SchedulerUnavailable`]
+    ///     (we cannot filter, so we refuse to dispatch).
+    ///   * Track set non-empty but the filter prunes every track
+    ///     (all requested capabilities are already cached) ->
+    ///     [`RunDecision::AlreadyComplete`].
     ///   * Scheduler not started -> [`RunDecision::SchedulerUnavailable`].
-    ///   * Otherwise -> [`RunDecision::Accepted`] and the request is
-    ///     dispatched to the analysis scheduler.
+    ///   * Otherwise -> [`RunDecision::Accepted`] and the filtered
+    ///     subset is dispatched.
     ///
     /// `All` always submits the full BPM+key+waveform mask regardless
-    /// of which global toggles are on; the worker pool's inflight
-    /// dedup and the scheduler's "needs analysis" filter keep that
-    /// from doing duplicate work.
+    /// of which global toggles are on; the filter still applies so
+    /// re-running `All` on a fully-analyzed playlist is a no-op.
     pub fn request_tracks_analysis_run(
         &mut self,
         track_ids: Vec<TrackId>,
@@ -1415,27 +1419,45 @@ impl ApplicationRuntime {
         if track_ids.is_empty() {
             return RunDecision::TargetEmpty;
         }
+        let capabilities = request.capabilities();
+        let Some(library_store) = self.library_store.clone() else {
+            return RunDecision::SchedulerUnavailable;
+        };
+        let original_count = track_ids.len();
+        let filtered = match library_store.filter_tracks_needing_analysis(
+            &track_ids,
+            capabilities,
+            sustain_analysis::ANALYZER_VERSION,
+        ) {
+            Ok(filtered) => filtered,
+            Err(_) => return RunDecision::SchedulerUnavailable,
+        };
+        if filtered.is_empty() {
+            self.push_ephemeral_notification(
+                NotificationCategory::AnalysisBackground,
+                NotificationSeverity::Info,
+                already_complete_text(original_count, request.label()),
+            );
+            return RunDecision::AlreadyComplete;
+        }
         let Some(scheduler) = self.analysis_scheduler.as_ref() else {
             return RunDecision::SchedulerUnavailable;
         };
-        let capabilities = request.capabilities();
-        let count = track_ids.len();
-        scheduler.request_explicit_run(track_ids, capabilities);
+        let count = filtered.len();
+        scheduler.request_explicit_run(filtered, capabilities);
         self.push_ephemeral_notification(
             NotificationCategory::AnalysisBackground,
             NotificationSeverity::Info,
-            format!(
-                "Queued {count} {} for {}.",
-                if count == 1 { "track" } else { "tracks" },
-                request.label()
-            ),
+            queued_text(count, request.label()),
         );
         RunDecision::Accepted
     }
 
     /// Request an online retrieval run for an explicit set of track
     /// ids. Symmetric to [`Self::request_tracks_analysis_run`] but
-    /// targets the online scheduler.
+    /// targets the online scheduler. The filter also handles the
+    /// "track already has embedded artwork" guard via
+    /// [`LibraryStore::filter_tracks_needing_online`].
     pub fn request_tracks_online_run(
         &mut self,
         track_ids: Vec<TrackId>,
@@ -1462,22 +1484,53 @@ impl ApplicationRuntime {
         if track_ids.is_empty() {
             return RunDecision::TargetEmpty;
         }
+        let capabilities = request.capabilities();
+        let Some(library_store) = self.library_store.clone() else {
+            return RunDecision::SchedulerUnavailable;
+        };
+        let original_count = track_ids.len();
+        let filtered = match library_store.filter_tracks_needing_online(
+            &track_ids,
+            capabilities,
+            ONLINE_PROVIDER_VERSION,
+        ) {
+            Ok(filtered) => filtered,
+            Err(_) => return RunDecision::SchedulerUnavailable,
+        };
+        if filtered.is_empty() {
+            self.push_ephemeral_notification(
+                NotificationCategory::OnlineBackground,
+                NotificationSeverity::Info,
+                already_complete_text(original_count, request.label()),
+            );
+            return RunDecision::AlreadyComplete;
+        }
         let Some(scheduler) = self.online_scheduler.as_ref() else {
             return RunDecision::SchedulerUnavailable;
         };
-        let capabilities = request.capabilities();
-        let count = track_ids.len();
-        scheduler.request_explicit_run(track_ids, capabilities);
+        let count = filtered.len();
+        scheduler.request_explicit_run(filtered, capabilities);
         self.push_ephemeral_notification(
             NotificationCategory::OnlineBackground,
             NotificationSeverity::Info,
-            format!(
-                "Queued {count} {} for {}.",
-                if count == 1 { "track" } else { "tracks" },
-                request.label()
-            ),
+            queued_text(count, request.label()),
         );
         RunDecision::Accepted
+    }
+}
+
+fn queued_text(count: usize, label: &str) -> String {
+    format!(
+        "Queued {count} {noun} for {label}.",
+        noun = if count == 1 { "track" } else { "tracks" },
+    )
+}
+
+fn already_complete_text(count: usize, label: &str) -> String {
+    if count == 1 {
+        format!("That track already has {label} — nothing to queue.")
+    } else {
+        format!("All {count} tracks already have {label} — nothing to queue.")
     }
 }
 
@@ -1646,6 +1699,13 @@ pub enum RunDecision {
     /// The supplied target resolves to no tracks (folder row, unknown
     /// playlist id, empty playlist, or empty explicit Vec).
     TargetEmpty,
+    /// The supplied target had tracks, but every one of them already
+    /// has the requested capability cached (BPM/key/waveform for
+    /// analysis; tag/artwork/lyrics for online). Nothing is queued.
+    /// The user sees a notification distinguishing this from the
+    /// `Accepted` path so a no-op click on a fully-analyzed playlist
+    /// is visible.
+    AlreadyComplete,
     /// The matching scheduler has not been started (e.g. headless
     /// runtime, tests). Nothing to dispatch to.
     SchedulerUnavailable,
@@ -5196,6 +5256,123 @@ mod tests {
                 AnalysisRunRequest::Single(AnalysisCapability::Key),
             ),
             RunDecision::DeniedBackgroundEnabled
+        );
+    }
+
+    #[test]
+    fn request_run_skips_tracks_whose_capability_is_already_cached() {
+        // A re-run of BPM analysis on a track that already has BPM
+        // recorded must NOT queue the track. The same rule applies
+        // to every analysis/online capability; we sample BPM and
+        // lyrics here as representatives. The scheduler is never
+        // started in this test — if the filter were skipped, the
+        // dispatch would surface SchedulerUnavailable. AlreadyComplete
+        // proves the filter caught the work before the scheduler
+        // would have run.
+        use sustain_library_store::{
+            AnalysisCapabilities, AnalysisContext, OnlineCapabilities, OnlineContext,
+        };
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let track = Track {
+            id: track_id(1),
+            location: track_location("t.flac"),
+            content_hash: None,
+            metadata: TrackMetadata::default(),
+            rating: Rating::unrated(),
+            statistics: PlayStatistics::default(),
+            file_size_bytes: None,
+            has_embedded_artwork: None,
+        };
+        store.save_track(track.clone()).expect("save");
+
+        // Stamp BPM analysis and lyrics retrieval as already complete
+        // at the current versions used by the runtime.
+        let empty_analysis = sustain_domain::TrackAnalysis {
+            bpm: None,
+            key: None,
+            beatgrid: None,
+            waveform_preview: sustain_domain::WaveformSegments {
+                segment_duration_ms: 0.0,
+                segments: Vec::new(),
+            },
+            waveform_detail: sustain_domain::WaveformSegments {
+                segment_duration_ms: 0.0,
+                segments: Vec::new(),
+            },
+        };
+        store
+            .record_analysis(
+                track.id,
+                &empty_analysis,
+                AnalysisCapabilities {
+                    bpm: true,
+                    key: false,
+                    waveform: false,
+                },
+                AnalysisContext {
+                    now_unix: 100,
+                    analyzer_version: sustain_analysis::ANALYZER_VERSION,
+                },
+            )
+            .expect("record bpm");
+        store
+            .record_online_attempt(
+                track.id,
+                OnlineCapabilities {
+                    artwork: false,
+                    tags: false,
+                    lyrics: true,
+                },
+                OnlineContext {
+                    now_unix: 100,
+                    provider_version: super::ONLINE_PROVIDER_VERSION,
+                },
+            )
+            .expect("record lyrics attempt");
+
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+        // BPM is cached -> AlreadyComplete, no SchedulerUnavailable.
+        assert_eq!(
+            runtime.request_tracks_analysis_run(
+                vec![track.id],
+                AnalysisRunRequest::Single(AnalysisCapability::Bpm),
+            ),
+            RunDecision::AlreadyComplete
+        );
+        // Key has never been analyzed -> filter passes, scheduler
+        // check then fires.
+        assert_eq!(
+            runtime.request_tracks_analysis_run(
+                vec![track.id],
+                AnalysisRunRequest::Single(AnalysisCapability::Key),
+            ),
+            RunDecision::SchedulerUnavailable
+        );
+        // `All` finds at least one missing capability (key, waveform)
+        // -> filter passes the track through.
+        assert_eq!(
+            runtime.request_tracks_analysis_run(vec![track.id], AnalysisRunRequest::All),
+            RunDecision::SchedulerUnavailable
+        );
+        // Lyrics is cached -> AlreadyComplete on the online side too.
+        assert_eq!(
+            runtime.request_tracks_online_run(
+                vec![track.id],
+                OnlineRunRequest::Single(OnlineCapability::Lyrics),
+            ),
+            RunDecision::AlreadyComplete
+        );
+        // Artwork / tags were never attempted -> filter passes.
+        assert_eq!(
+            runtime.request_tracks_online_run(
+                vec![track.id],
+                OnlineRunRequest::Single(OnlineCapability::Artwork),
+            ),
+            RunDecision::SchedulerUnavailable
         );
     }
 }

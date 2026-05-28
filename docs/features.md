@@ -199,6 +199,13 @@ the currently-selected tracks instead of a whole playlist. Naming,
 menu shape, and insensitive-when-globally-covered semantics match
 the per-playlist version exactly.
 
+Both surfaces filter the input through the library store before
+dispatching, so a re-run on a target whose tracks already have the
+requested data is a no-op. The user sees a distinct
+"All N tracks already have X — nothing to queue." notification
+instead of the regular "Queued N tracks" message, so a no-op click
+is never silent.
+
 ---
 
 ## Playback

@@ -453,6 +453,45 @@ impl LibraryStore for InMemoryLibraryStore {
         Ok(out)
     }
 
+    fn filter_tracks_needing_analysis(
+        &self,
+        track_ids: &[TrackId],
+        capabilities: AnalysisCapabilities,
+        analyzer_version: u32,
+    ) -> StoreResult<Vec<TrackId>> {
+        if capabilities.is_empty() || track_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tracks = self.tracks_guard()?;
+        let bookkeeping = self
+            .analysis_bookkeeping
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?;
+        let mut out = Vec::with_capacity(track_ids.len());
+        for track_id in track_ids {
+            let Some(track) = tracks.get(track_id) else {
+                continue;
+            };
+            if track.location.is_missing() {
+                continue;
+            }
+            let book = bookkeeping.get(track_id).copied().unwrap_or_default();
+            let needs_bpm = capabilities.bpm
+                && (book.bpm_attempted_at_unix.is_none()
+                    || book.analyzer_version < analyzer_version);
+            let needs_key = capabilities.key
+                && (book.key_attempted_at_unix.is_none()
+                    || book.analyzer_version < analyzer_version);
+            let needs_waveform = capabilities.waveform
+                && (book.waveform_attempted_at_unix.is_none()
+                    || book.analyzer_version < analyzer_version);
+            if needs_bpm || needs_key || needs_waveform {
+                out.push(*track_id);
+            }
+        }
+        Ok(out)
+    }
+
     fn load_waveform(&self, track_id: TrackId) -> StoreResult<Option<StoredWaveform>> {
         Ok(self
             .waveforms
@@ -555,6 +594,47 @@ impl LibraryStore for InMemoryLibraryStore {
             // picture is excluded from the artwork-needs clause, even
             // at a fresh `provider_version`. `None` is treated as
             // "not yet scanned" → still a candidate.
+            let has_artwork = track.has_embedded_artwork.unwrap_or(false);
+            let needs_artwork = capabilities.artwork
+                && !has_artwork
+                && (book.artwork_attempted_at_unix.is_none()
+                    || book.provider_version < provider_version);
+            let needs_tags = capabilities.tags
+                && (book.tags_attempted_at_unix.is_none()
+                    || book.provider_version < provider_version);
+            let needs_lyrics = capabilities.lyrics
+                && (book.lyrics_attempted_at_unix.is_none()
+                    || book.provider_version < provider_version);
+            if needs_artwork || needs_tags || needs_lyrics {
+                out.push(*track_id);
+            }
+        }
+        Ok(out)
+    }
+
+    fn filter_tracks_needing_online(
+        &self,
+        track_ids: &[TrackId],
+        capabilities: OnlineCapabilities,
+        provider_version: u32,
+    ) -> StoreResult<Vec<TrackId>> {
+        if capabilities.is_empty() || track_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tracks = self.tracks_guard()?;
+        let bookkeeping = self
+            .online_bookkeeping
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?;
+        let mut out = Vec::with_capacity(track_ids.len());
+        for track_id in track_ids {
+            let Some(track) = tracks.get(track_id) else {
+                continue;
+            };
+            if track.location.is_missing() {
+                continue;
+            }
+            let book = bookkeeping.get(track_id).copied().unwrap_or_default();
             let has_artwork = track.has_embedded_artwork.unwrap_or(false);
             let needs_artwork = capabilities.artwork
                 && !has_artwork

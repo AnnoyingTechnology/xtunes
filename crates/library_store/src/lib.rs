@@ -4,12 +4,12 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::Path,
     sync::{Mutex, MutexGuard},
 };
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, params, params_from_iter, types::Value as SqlValue};
 use sustain_domain::SmartPlaylistRuleSet;
 pub use sustain_domain::{
     LibraryQuery, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, Rating, SmartPlaylist,
@@ -281,6 +281,19 @@ pub trait LibraryStore: Send + Sync {
         limit: usize,
     ) -> StoreResult<Vec<TrackId>>;
 
+    /// Filter `track_ids` down to the subset that still needs at
+    /// least one of the requested capabilities run, preserving input
+    /// order. Same predicate as [`Self::tracks_needing_analysis`]
+    /// (also excludes tracks marked missing). Used by the per-set
+    /// explicit run path so re-analyzing a playlist whose tracks are
+    /// already cached is a no-op.
+    fn filter_tracks_needing_analysis(
+        &self,
+        track_ids: &[TrackId],
+        capabilities: AnalysisCapabilities,
+        analyzer_version: u32,
+    ) -> StoreResult<Vec<TrackId>>;
+
     /// Load the stored waveform for a track, if any. Returns `None`
     /// when the track has not been waveform-analyzed yet (or analysis
     /// failed).
@@ -329,6 +342,18 @@ pub trait LibraryStore: Send + Sync {
         capabilities: OnlineCapabilities,
         provider_version: u32,
         limit: usize,
+    ) -> StoreResult<Vec<TrackId>>;
+
+    /// Filter `track_ids` down to the subset that still needs at
+    /// least one of the requested online capabilities attempted,
+    /// preserving input order. Same predicate as
+    /// [`Self::tracks_needing_online`] (the artwork branch still
+    /// excludes tracks with embedded artwork).
+    fn filter_tracks_needing_online(
+        &self,
+        track_ids: &[TrackId],
+        capabilities: OnlineCapabilities,
+        provider_version: u32,
     ) -> StoreResult<Vec<TrackId>>;
 
     fn tracks_matching(&self, query: LibraryQuery) -> StoreResult<Vec<Track>> {
@@ -1183,6 +1208,45 @@ impl LibraryStore for SqliteLibraryStore {
         Ok(ids)
     }
 
+    fn filter_tracks_needing_analysis(
+        &self,
+        track_ids: &[TrackId],
+        capabilities: AnalysisCapabilities,
+        analyzer_version: u32,
+    ) -> StoreResult<Vec<TrackId>> {
+        if capabilities.is_empty() || track_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = self.connection_guard()?;
+        let mut needing: HashSet<TrackId> = HashSet::with_capacity(track_ids.len());
+        for chunk in track_ids.chunks(FILTER_IN_LIST_CHUNK_SIZE) {
+            let sql = build_filter_tracks_needing_analysis_sql(chunk.len());
+            let mut statement = connection.prepare(&sql).map_err(StoreError::from)?;
+            let mut params: Vec<SqlValue> =
+                chunk.iter().map(|id| SqlValue::Integer(id.get())).collect();
+            params.push(SqlValue::Integer(i64::from(capabilities.bpm)));
+            params.push(SqlValue::Integer(i64::from(capabilities.key)));
+            params.push(SqlValue::Integer(i64::from(capabilities.waveform)));
+            params.push(SqlValue::Integer(i64::from(analyzer_version)));
+            let mut rows = statement
+                .query(params_from_iter(params.iter()))
+                .map_err(StoreError::from)?;
+            while let Some(row) = rows.next().map_err(StoreError::from)? {
+                let raw: i64 = row.get(0).map_err(StoreError::from)?;
+                let id = TrackId::new(raw).ok_or(StoreError::InvalidStoredId(raw))?;
+                needing.insert(id);
+            }
+        }
+        // Preserve caller order — playlist order is what the user
+        // sees, and downstream FIFO dispatch carries that order
+        // through to the scheduler.
+        Ok(track_ids
+            .iter()
+            .copied()
+            .filter(|id| needing.contains(id))
+            .collect())
+    }
+
     fn load_waveform(&self, track_id: TrackId) -> StoreResult<Option<StoredWaveform>> {
         let connection = self.connection_guard()?;
         let mut statement = connection
@@ -1318,6 +1382,98 @@ impl LibraryStore for SqliteLibraryStore {
         }
         Ok(ids)
     }
+
+    fn filter_tracks_needing_online(
+        &self,
+        track_ids: &[TrackId],
+        capabilities: OnlineCapabilities,
+        provider_version: u32,
+    ) -> StoreResult<Vec<TrackId>> {
+        if capabilities.is_empty() || track_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = self.connection_guard()?;
+        let mut needing: HashSet<TrackId> = HashSet::with_capacity(track_ids.len());
+        for chunk in track_ids.chunks(FILTER_IN_LIST_CHUNK_SIZE) {
+            let sql = build_filter_tracks_needing_online_sql(chunk.len());
+            let mut statement = connection.prepare(&sql).map_err(StoreError::from)?;
+            let mut params: Vec<SqlValue> =
+                chunk.iter().map(|id| SqlValue::Integer(id.get())).collect();
+            params.push(SqlValue::Integer(i64::from(capabilities.artwork)));
+            params.push(SqlValue::Integer(i64::from(capabilities.tags)));
+            params.push(SqlValue::Integer(i64::from(capabilities.lyrics)));
+            params.push(SqlValue::Integer(i64::from(provider_version)));
+            let mut rows = statement
+                .query(params_from_iter(params.iter()))
+                .map_err(StoreError::from)?;
+            while let Some(row) = rows.next().map_err(StoreError::from)? {
+                let raw: i64 = row.get(0).map_err(StoreError::from)?;
+                let id = TrackId::new(raw).ok_or(StoreError::InvalidStoredId(raw))?;
+                needing.insert(id);
+            }
+        }
+        Ok(track_ids
+            .iter()
+            .copied()
+            .filter(|id| needing.contains(id))
+            .collect())
+    }
+}
+
+/// Per-call chunk size for the `t.id IN (?, ?, ...)` clause used by
+/// the two filter queries. Stays well under SQLite's default 32k
+/// bound-variable cap (each chunk binds N IDs + 4 fixed params).
+const FILTER_IN_LIST_CHUNK_SIZE: usize = 500;
+
+fn build_filter_tracks_needing_analysis_sql(id_count: usize) -> String {
+    debug_assert!(id_count > 0);
+    let id_placeholders = (1..=id_count)
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let bpm = id_count + 1;
+    let key = id_count + 2;
+    let waveform = id_count + 3;
+    let version = id_count + 4;
+    format!(
+        "SELECT t.id FROM tracks t
+LEFT JOIN track_analysis ta ON ta.track_id = t.id
+WHERE t.is_missing = 0
+  AND t.id IN ({id_placeholders})
+  AND (
+        (?{bpm} = 1 AND (ta.bpm_attempted_at_unix      IS NULL OR ta.analyzer_version < ?{version}))
+     OR (?{key} = 1 AND (ta.key_attempted_at_unix      IS NULL OR ta.analyzer_version < ?{version}))
+     OR (?{waveform} = 1 AND (ta.waveform_attempted_at_unix IS NULL OR ta.analyzer_version < ?{version}))
+      )"
+    )
+}
+
+fn build_filter_tracks_needing_online_sql(id_count: usize) -> String {
+    debug_assert!(id_count > 0);
+    let id_placeholders = (1..=id_count)
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let artwork = id_count + 1;
+    let tags = id_count + 2;
+    let lyrics = id_count + 3;
+    let version = id_count + 4;
+    // Mirrors `SELECT_TRACKS_NEEDING_ONLINE_SQL`: the artwork branch
+    // still excludes tracks with embedded artwork so we never fetch a
+    // remote picture for a file that already carries one.
+    format!(
+        "SELECT t.id FROM tracks t
+LEFT JOIN track_online_status s ON s.track_id = t.id
+WHERE t.is_missing = 0
+  AND t.id IN ({id_placeholders})
+  AND (
+        (?{artwork} = 1
+            AND COALESCE(t.has_embedded_artwork, 0) = 0
+            AND (s.artwork_attempted_at_unix IS NULL OR s.provider_version < ?{version}))
+     OR (?{tags}    = 1 AND (s.tags_attempted_at_unix   IS NULL OR s.provider_version < ?{version}))
+     OR (?{lyrics}  = 1 AND (s.lyrics_attempted_at_unix IS NULL OR s.provider_version < ?{version}))
+      )"
+    )
 }
 
 /// Shared upsert helper for [`SqliteLibraryStore::record_analysis`] and
@@ -2133,6 +2289,116 @@ mod tests {
         run_tracks_needing_analysis_lists_only_un_attempted(&InMemoryLibraryStore::new());
     }
 
+    fn run_filter_tracks_needing_analysis_drops_cached_and_missing(store: &dyn LibraryStore) {
+        // Same setup as `run_tracks_needing_analysis_lists_only_un_attempted`
+        // but exercised through the bulk-filter path: caller passes the
+        // full set of ids it cares about (mirroring a per-playlist
+        // explicit run) and the store returns only the ones that still
+        // need at least one of the requested capabilities.
+        let alpha = track(1, "alpha.flac");
+        let mut beta = track(2, "beta.flac");
+        beta.location = beta
+            .location
+            .with_availability(sustain_domain::TrackAvailability::Missing);
+        let gamma = track(3, "gamma.flac");
+        for t in [&alpha, &beta, &gamma] {
+            store.save_track(t.clone()).expect("save");
+        }
+
+        store
+            .record_analysis(
+                gamma.id,
+                &sample_analysis(None, None),
+                AnalysisCapabilities {
+                    bpm: false,
+                    key: false,
+                    waveform: true,
+                },
+                ctx(1_700_000_000),
+            )
+            .expect("record waveform for gamma");
+
+        let all_ids = vec![alpha.id, beta.id, gamma.id];
+
+        // Only waveform requested: alpha needs it (never attempted),
+        // beta is missing, gamma is already attempted at v1. Filter
+        // returns only alpha.
+        let filtered = store
+            .filter_tracks_needing_analysis(
+                &all_ids,
+                AnalysisCapabilities {
+                    bpm: false,
+                    key: false,
+                    waveform: true,
+                },
+                1,
+            )
+            .expect("filter");
+        assert_eq!(filtered, vec![alpha.id]);
+
+        // BPM requested: alpha and gamma both qualify (neither was
+        // BPM-attempted), beta is still missing. Order matches input
+        // order so playlist sequencing survives downstream.
+        let filtered_bpm = store
+            .filter_tracks_needing_analysis(
+                &all_ids,
+                AnalysisCapabilities {
+                    bpm: true,
+                    key: false,
+                    waveform: false,
+                },
+                1,
+            )
+            .expect("filter");
+        assert_eq!(filtered_bpm, vec![alpha.id, gamma.id]);
+
+        // Empty capability mask -> empty result, regardless of input.
+        let filtered_empty = store
+            .filter_tracks_needing_analysis(&all_ids, AnalysisCapabilities::default(), 1)
+            .expect("filter");
+        assert!(filtered_empty.is_empty());
+
+        // Empty input id list -> empty result.
+        let filtered_no_ids = store
+            .filter_tracks_needing_analysis(
+                &[],
+                AnalysisCapabilities {
+                    bpm: true,
+                    key: true,
+                    waveform: true,
+                },
+                1,
+            )
+            .expect("filter");
+        assert!(filtered_no_ids.is_empty());
+
+        // Version bump re-enrolls cached tracks: gamma now needs
+        // waveform again (its stamp is at version 1).
+        let filtered_v2 = store
+            .filter_tracks_needing_analysis(
+                &all_ids,
+                AnalysisCapabilities {
+                    bpm: false,
+                    key: false,
+                    waveform: true,
+                },
+                2,
+            )
+            .expect("filter");
+        assert_eq!(filtered_v2, vec![alpha.id, gamma.id]);
+    }
+
+    #[test]
+    fn sqlite_filter_tracks_needing_analysis_drops_cached_and_missing() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory");
+        run_filter_tracks_needing_analysis_drops_cached_and_missing(&store);
+    }
+
+    #[test]
+    fn in_memory_filter_tracks_needing_analysis_drops_cached_and_missing() {
+        run_filter_tracks_needing_analysis_drops_cached_and_missing(&InMemoryLibraryStore::new());
+    }
+
     fn run_failed_attempt_prevents_immediate_retry(store: &dyn LibraryStore) {
         let track = track(1, "a.flac");
         store.save_track(track.clone()).expect("save");
@@ -2567,6 +2833,97 @@ mod tests {
     #[test]
     fn in_memory_record_online_attempt_marks_only_requested_capabilities() {
         run_record_online_attempt_marks_only_requested_capabilities(&InMemoryLibraryStore::new());
+    }
+
+    fn run_filter_tracks_needing_online_drops_attempted_missing_and_embedded(
+        store: &dyn LibraryStore,
+    ) {
+        // 4 tracks:
+        //   alpha   - never attempted, no embedded artwork
+        //   beta    - missing on disk
+        //   gamma   - has embedded artwork (artwork branch must skip)
+        //   delta   - already lyrics-attempted at v1
+        let alpha = track(1, "alpha.flac");
+        let mut beta = track(2, "beta.flac");
+        beta.location = beta
+            .location
+            .with_availability(sustain_domain::TrackAvailability::Missing);
+        let mut gamma = track(3, "gamma.flac");
+        gamma.has_embedded_artwork = Some(true);
+        let delta = track(4, "delta.flac");
+        for t in [&alpha, &beta, &gamma, &delta] {
+            store.save_track(t.clone()).expect("save");
+        }
+
+        store
+            .record_online_attempt(
+                delta.id,
+                OnlineCapabilities {
+                    artwork: false,
+                    tags: false,
+                    lyrics: true,
+                },
+                online_ctx(1_000),
+            )
+            .expect("record lyrics for delta");
+
+        let all_ids = vec![alpha.id, beta.id, gamma.id, delta.id];
+
+        // Lyrics only: alpha + gamma still need it (delta was
+        // attempted, beta is missing).
+        let needs_lyrics = store
+            .filter_tracks_needing_online(
+                &all_ids,
+                OnlineCapabilities {
+                    artwork: false,
+                    tags: false,
+                    lyrics: true,
+                },
+                1,
+            )
+            .expect("filter");
+        assert_eq!(needs_lyrics, vec![alpha.id, gamma.id]);
+
+        // Artwork only: gamma is excluded by the embedded-artwork
+        // guard; beta by the missing guard; delta never attempted
+        // artwork so it still needs it. Result preserves input order.
+        let needs_artwork = store
+            .filter_tracks_needing_online(
+                &all_ids,
+                OnlineCapabilities {
+                    artwork: true,
+                    tags: false,
+                    lyrics: false,
+                },
+                1,
+            )
+            .expect("filter");
+        assert_eq!(needs_artwork, vec![alpha.id, delta.id]);
+
+        // Empty capability mask -> empty result.
+        let none = store
+            .filter_tracks_needing_online(&all_ids, OnlineCapabilities::default(), 1)
+            .expect("filter");
+        assert!(none.is_empty());
+
+        // Empty input -> empty result.
+        let none = store
+            .filter_tracks_needing_online(&[], OnlineCapabilities::all(), 1)
+            .expect("filter");
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn sqlite_filter_tracks_needing_online_drops_attempted_missing_and_embedded() {
+        let store = SqliteLibraryStore::open_in_memory().expect("open in-memory");
+        run_filter_tracks_needing_online_drops_attempted_missing_and_embedded(&store);
+    }
+
+    #[test]
+    fn in_memory_filter_tracks_needing_online_drops_attempted_missing_and_embedded() {
+        run_filter_tracks_needing_online_drops_attempted_missing_and_embedded(
+            &InMemoryLibraryStore::new(),
+        );
     }
 
     fn run_online_attempts_partial_capability_preserves_other(store: &dyn LibraryStore) {
