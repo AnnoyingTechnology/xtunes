@@ -17,10 +17,12 @@ use cells::{
     build_text_cell_factory,
 };
 use columns::{TRACK_TABLE_COLUMNS, TrackTableColumn};
+use empty_row_painter::EmptyRowPainter;
 pub(crate) use row::TrackTableRow;
 
 mod cells;
 mod columns;
+mod empty_row_painter;
 mod row;
 
 pub(crate) type TrackActivatedCallback = Rc<dyn Fn(TrackId)>;
@@ -63,7 +65,7 @@ struct ManagedColumn {
 
 #[derive(Clone)]
 pub(crate) struct TrackTable {
-    scroller: gtk::ScrolledWindow,
+    painter: EmptyRowPainter,
     table: gtk::ColumnView,
     store: gio::ListStore,
     selection: gtk::MultiSelection,
@@ -89,8 +91,8 @@ pub(crate) struct TrackTable {
 const LAYOUT_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl TrackTable {
-    pub(crate) fn widget(&self) -> gtk::ScrolledWindow {
-        self.scroller.clone()
+    pub(crate) fn widget(&self) -> gtk::Widget {
+        self.painter.clone().upcast()
     }
 
     pub(crate) fn replace_rows(&self, rows: Vec<TrackTableRow>) {
@@ -582,8 +584,25 @@ pub(crate) fn build_track_table(
     table.set_model(Some(&selection));
 
     scroller.set_child(Some(&table));
+
+    // Wrap the scroller in a custom widget that paints empty striped rows
+    // below the last real row when the table does not fill the viewport.
+    // The painter owns no model state; it only needs the row count, which
+    // we seed now and refresh on every `gio::ListModel::items-changed`
+    // from the underlying store. The store is the truth here — no filter
+    // chain sits between it and the selection model, so `n_items` matches
+    // what the user sees on screen.
+    let painter = EmptyRowPainter::new(&scroller, &table);
+    painter.set_row_count(store.n_items());
+    let painter_for_store = painter.downgrade();
+    store.connect_items_changed(move |store, _position, _removed, _added| {
+        if let Some(painter) = painter_for_store.upgrade() {
+            painter.set_row_count(store.n_items());
+        }
+    });
+
     TrackTable {
-        scroller,
+        painter,
         table,
         store,
         selection,
