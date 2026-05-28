@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 AnnoyingTechnology
+#
+# Sustain release helper. See RELEASING.md for the full flow and the
+# rules used to compute the next version.
+
+set -Eeuo pipefail
+
+# ----------------------------------------------------------------------------
+# Locations.
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+WORKSPACE_CARGO="Cargo.toml"
+METAINFO="data/io.github.open_sustain.sustain.metainfo.xml"
+
+# ----------------------------------------------------------------------------
+# Output helpers.
+
+if [[ -t 1 ]]; then
+  C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_BLU=$'\033[34m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
+else
+  C_RED=""; C_GRN=""; C_BLU=""; C_DIM=""; C_OFF=""
+fi
+
+die()  { printf '%serror:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
+note() { printf '%s::%s %s\n'    "$C_BLU" "$C_OFF" "$*"; }
+ok()   { printf '%s✓%s %s\n'     "$C_GRN" "$C_OFF" "$*"; }
+
+usage() {
+  cat <<'EOF'
+Usage: ./release <bump> <track> [--dry-run] [--skip-gate]
+
+  bump   one of:  patch | minor | major
+  track  one of:  alpha | beta  | stable
+
+Computes the next semver from `[workspace.package].version`, runs the
+full CI gate, edits Cargo.toml + Cargo.lock + the AppStream metainfo,
+commits, tags vX.Y.Z[-track.N], and pushes commit + tag to origin.
+The Release workflow then builds .deb / Flatpak and publishes the
+GitHub release.
+
+Flags:
+  --dry-run     Edit the files, show the staged diff, then reset. No
+                commit, no tag, no push.
+  --skip-gate   Skip the local fmt / clippy / test / doc gate. Only use
+                this if you have just run it yourself.
+  -h, --help    Show this help.
+
+See RELEASING.md for version-track rules, examples, and the full flow.
+EOF
+}
+
+# ----------------------------------------------------------------------------
+# Argument parsing.
+
+BUMP=""
+TRACK=""
+DRY_RUN=0
+SKIP_GATE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    patch|minor|major) BUMP="$1"; shift;;
+    alpha|beta|stable) TRACK="$1"; shift;;
+    --dry-run)         DRY_RUN=1; shift;;
+    --skip-gate)       SKIP_GATE=1; shift;;
+    -h|--help)         usage; exit 0;;
+    *) usage; die "unrecognized argument: $1";;
+  esac
+done
+
+[[ -n "$BUMP"  ]] || { usage; die "missing <bump>  (patch | minor | major)"; }
+[[ -n "$TRACK" ]] || { usage; die "missing <track> (alpha | beta  | stable)"; }
+
+# ----------------------------------------------------------------------------
+# Read the current workspace version.
+
+CURRENT=$(awk '
+  /^\[workspace\.package\]/ { in_block = 1; next }
+  /^\[/                     { in_block = 0 }
+  in_block && /^version[[:space:]]*=/ {
+    match($0, /"[^"]+"/)
+    print substr($0, RSTART+1, RLENGTH-2)
+    exit
+  }
+' "$WORKSPACE_CARGO")
+
+[[ -n "$CURRENT" ]] || die "could not find [workspace.package].version in $WORKSPACE_CARGO"
+
+note "current version:  $CURRENT"
+
+# Parse: X.Y.Z optionally followed by -alpha.N or -beta.N.
+if [[ "$CURRENT" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-(alpha|beta)\.([0-9]+))?$ ]]; then
+  CUR_MAJOR="${BASH_REMATCH[1]}"
+  CUR_MINOR="${BASH_REMATCH[2]}"
+  CUR_PATCH="${BASH_REMATCH[3]}"
+  CUR_TRACK="${BASH_REMATCH[5]:-stable}"
+  CUR_COUNTER="${BASH_REMATCH[6]:-}"
+else
+  die "current version '$CURRENT' does not match X.Y.Z[-(alpha|beta).N]"
+fi
+
+# ----------------------------------------------------------------------------
+# Compute the target X.Y.Z.
+#
+# Rule of thumb: if the current version is a pre-release, the X.Y.Z it
+# is targeting hasn't shipped yet. `patch` keeps cycling on the same
+# X.Y.Z; `minor` / `major` advance to the next minor / major target.
+# If the current version is stable, every bump kind advances X.Y.Z.
+
+if [[ "$CUR_TRACK" == "stable" ]]; then
+  case "$BUMP" in
+    patch) NEW_MAJOR=$CUR_MAJOR; NEW_MINOR=$CUR_MINOR;       NEW_PATCH=$((CUR_PATCH+1));;
+    minor) NEW_MAJOR=$CUR_MAJOR; NEW_MINOR=$((CUR_MINOR+1)); NEW_PATCH=0;;
+    major) NEW_MAJOR=$((CUR_MAJOR+1)); NEW_MINOR=0;          NEW_PATCH=0;;
+  esac
+else
+  case "$BUMP" in
+    patch) NEW_MAJOR=$CUR_MAJOR;       NEW_MINOR=$CUR_MINOR;       NEW_PATCH=$CUR_PATCH;;
+    minor) NEW_MAJOR=$CUR_MAJOR;       NEW_MINOR=$((CUR_MINOR+1)); NEW_PATCH=0;;
+    major) NEW_MAJOR=$((CUR_MAJOR+1)); NEW_MINOR=0;                NEW_PATCH=0;;
+  esac
+fi
+
+NEW_BASE="${NEW_MAJOR}.${NEW_MINOR}.${NEW_PATCH}"
+
+SAME_BASE=0
+if [[ "$NEW_MAJOR" == "$CUR_MAJOR" && "$NEW_MINOR" == "$CUR_MINOR" && "$NEW_PATCH" == "$CUR_PATCH" ]]; then
+  SAME_BASE=1
+fi
+
+# Apply the requested track.
+case "$TRACK" in
+  stable)
+    NEW="$NEW_BASE"
+    ;;
+  beta)
+    if [[ $SAME_BASE -eq 1 && "$CUR_TRACK" == "beta" ]]; then
+      COUNTER=$((CUR_COUNTER+1))
+    else
+      COUNTER=1
+    fi
+    NEW="${NEW_BASE}-beta.${COUNTER}"
+    ;;
+  alpha)
+    if [[ $SAME_BASE -eq 1 && "$CUR_TRACK" == "beta" ]]; then
+      die "cannot move from beta back to alpha on the same X.Y.Z ($CURRENT -> alpha on $NEW_BASE). Pick beta or stable, or bump minor/major."
+    fi
+    if [[ $SAME_BASE -eq 1 && "$CUR_TRACK" == "alpha" ]]; then
+      COUNTER=$((CUR_COUNTER+1))
+    else
+      COUNTER=1
+    fi
+    NEW="${NEW_BASE}-alpha.${COUNTER}"
+    ;;
+esac
+
+if [[ "$NEW" == "$CURRENT" ]]; then
+  die "computed new version equals current ($NEW); nothing to release"
+fi
+
+TAG="v${NEW}"
+note "new version:      $NEW"
+note "tag:              $TAG"
+
+# ----------------------------------------------------------------------------
+# Git-state guards.
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+[[ "$BRANCH" == "main" ]] || die "must be on branch main (currently: $BRANCH)"
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  die "working tree is not clean; commit or stash WIP first"
+fi
+
+note "fetching origin to verify branch is up-to-date..."
+git fetch --quiet origin main
+
+LOCAL=$(git rev-parse HEAD)
+REMOTE=$(git rev-parse origin/main)
+if [[ "$LOCAL" != "$REMOTE" ]]; then
+  AHEAD=$(git rev-list --count "$REMOTE..$LOCAL")
+  BEHIND=$(git rev-list --count "$LOCAL..$REMOTE")
+  die "local main is not in sync with origin/main (ahead: $AHEAD, behind: $BEHIND). Push or pull first."
+fi
+
+if git rev-parse "$TAG" >/dev/null 2>&1; then
+  die "tag $TAG already exists locally"
+fi
+if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+  die "tag $TAG already exists on origin"
+fi
+
+ok "git state clean; $TAG is fresh on local and origin"
+
+# ----------------------------------------------------------------------------
+# Run the full CI gate (unless explicitly skipped).
+
+if [[ "$SKIP_GATE" -eq 0 ]]; then
+  note "running CI gate (fmt / clippy / test / doc)..."
+  cargo fmt --all -- --check
+  cargo clippy --workspace --all-targets --locked -- -D warnings
+  cargo test --workspace --locked --no-fail-fast
+  RUSTDOCFLAGS="-D warnings" cargo doc --workspace --locked --no-deps --document-private-items
+  ok "gate passed"
+else
+  note "skipping CI gate (--skip-gate)"
+fi
+
+# ----------------------------------------------------------------------------
+# Plan + confirmation.
+
+TODAY=$(date -u +%F)
+case "$TRACK" in
+  stable)     RELEASE_TYPE="stable";;
+  alpha|beta) RELEASE_TYPE="development";;
+esac
+
+printf '\n'
+printf 'Plan:\n'
+printf '  1. Bump version: %s%s%s -> %s%s%s\n' "$C_DIM" "$CURRENT" "$C_OFF" "$C_GRN" "$NEW" "$C_OFF"
+printf '  2. Update %s (workspace.package.version)\n' "$WORKSPACE_CARGO"
+printf '  3. Refresh Cargo.lock\n'
+printf '  4. Prepend <release version="%s" date="%s" type="%s" /> in %s\n' "$NEW" "$TODAY" "$RELEASE_TYPE" "$METAINFO"
+printf '  5. git commit -m "Release: bump workspace to %s"\n' "$NEW"
+printf '  6. git tag -a %s\n' "$TAG"
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  printf '  7. %s[dry-run]%s skip push; reset edits\n' "$C_DIM" "$C_OFF"
+else
+  printf '  7. git push origin main && git push origin %s\n' "$TAG"
+fi
+printf '\n'
+
+read -r -p "Proceed with edits? [y/N] " REPLY
+[[ "$REPLY" =~ ^[yY]([eE][sS])?$ ]] || die "aborted"
+
+# ----------------------------------------------------------------------------
+# Apply edits.
+
+note "editing $WORKSPACE_CARGO..."
+awk -v new="$NEW" '
+  /^\[workspace\.package\]/ { in_block = 1; print; next }
+  /^\[/                     { in_block = 0 }
+  in_block && /^version[[:space:]]*=/ {
+    print "version = \"" new "\""
+    next
+  }
+  { print }
+' "$WORKSPACE_CARGO" > "$WORKSPACE_CARGO.tmp"
+mv "$WORKSPACE_CARGO.tmp" "$WORKSPACE_CARGO"
+
+note "editing $METAINFO..."
+# Prepend a new <release> entry on the line right after <releases>,
+# keeping prior entries as historical release notes (AppStream convention).
+awk -v ver="$NEW" -v date="$TODAY" -v type="$RELEASE_TYPE" '
+  /<releases>/ && !inserted {
+    print
+    print "    <release version=\"" ver "\" date=\"" date "\" type=\"" type "\" />"
+    inserted = 1
+    next
+  }
+  { print }
+' "$METAINFO" > "$METAINFO.tmp"
+mv "$METAINFO.tmp" "$METAINFO"
+
+note "refreshing Cargo.lock..."
+# `cargo update --workspace` rewrites the workspace-member entries in
+# Cargo.lock to match the new Cargo.toml versions. Offline first so the
+# common case stays fast and air-gappable; fall back to a networked run
+# if the offline cache is missing anything.
+if ! cargo update --workspace --offline >/dev/null 2>&1; then
+  cargo update --workspace
+fi
+
+# ----------------------------------------------------------------------------
+# Show the diff and confirm again before any commit/tag/push happens.
+
+git add "$WORKSPACE_CARGO" Cargo.lock "$METAINFO"
+
+printf '\n'
+note "staged diff:"
+git --no-pager diff --cached --stat
+printf '\n'
+git --no-pager diff --cached
+printf '\n'
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  note "dry-run complete; reverting edits."
+  git restore --staged --worktree -- "$WORKSPACE_CARGO" Cargo.lock "$METAINFO"
+  ok "dry-run done. Nothing was committed."
+  exit 0
+fi
+
+read -r -p "Commit, tag, and push? [y/N] " REPLY
+if [[ ! "$REPLY" =~ ^[yY]([eE][sS])?$ ]]; then
+  note "aborted; reverting edits."
+  git restore --staged --worktree -- "$WORKSPACE_CARGO" Cargo.lock "$METAINFO"
+  die "release aborted at confirmation"
+fi
+
+# ----------------------------------------------------------------------------
+# Commit, tag, push.
+
+git commit -m "Release: bump workspace to ${NEW}"
+git tag -a "$TAG" -m "Sustain ${NEW}"
+
+note "pushing main..."
+git push origin main
+note "pushing tag $TAG..."
+git push origin "$TAG"
+
+ok "released $NEW"
+
+REMOTE_URL=$(git config --get remote.origin.url | sed -E 's#(git@|https://)github\.com[:/]([^/]+/[^/]+)(\.git)?#https://github.com/\2#' | sed 's/\.git$//')
+printf '\n'
+printf 'The Release workflow is now building artifacts.\n'
+printf 'Watch: %s/actions\n' "$REMOTE_URL"
