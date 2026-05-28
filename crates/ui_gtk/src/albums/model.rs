@@ -116,6 +116,30 @@ pub(super) fn group_albums(tracks: &[Track]) -> Vec<AlbumViewModel> {
         .collect()
 }
 
+/// Locate the album holding `track_id` and replace that track's row in
+/// place. Returns the album's key so callers can re-render exactly the
+/// row that needs it; `None` when no album currently holds the track.
+///
+/// The track list is re-sorted with [`compare_album_tracks`] because a
+/// metadata update can move a track within its album (e.g. a Tags
+/// retrieval populating a missing track number). The track's album
+/// itself never moves — every Sustain feature is existing-tag-preserving,
+/// so the album grouping key (artist + title) is stable across updates.
+pub(super) fn replace_track_in_album(
+    albums: &mut [AlbumViewModel],
+    track_id: TrackId,
+    new_track: &AlbumTrackViewModel,
+) -> Option<AlbumKey> {
+    for album in albums.iter_mut() {
+        if let Some(slot) = album.tracks.iter_mut().find(|track| track.id == track_id) {
+            *slot = new_track.clone();
+            album.tracks.sort_by(compare_album_tracks);
+            return Some(album.key.clone());
+        }
+    }
+    None
+}
+
 pub(super) fn album_subtitle(album: &AlbumViewModel) -> String {
     match album.year {
         Some(year) => format!("{} ({year})", album.artist),
@@ -143,7 +167,7 @@ pub(super) fn duration_text(duration_seconds: u64) -> String {
     }
 }
 
-fn album_track(track: &Track) -> AlbumTrackViewModel {
+pub(super) fn album_track(track: &Track) -> AlbumTrackViewModel {
     AlbumTrackViewModel {
         id: track.id,
         file_path: track.location.path().to_path_buf(),
@@ -159,7 +183,7 @@ fn album_track(track: &Track) -> AlbumTrackViewModel {
     }
 }
 
-fn compare_album_tracks(
+pub(super) fn compare_album_tracks(
     left: &AlbumTrackViewModel,
     right: &AlbumTrackViewModel,
 ) -> std::cmp::Ordering {
@@ -283,7 +307,9 @@ mod tests {
         PlayStatistics, Rating, Track, TrackId, TrackLocation, TrackMetadata, TrackRelativePath,
     };
 
-    use super::{AlbumTrackViewModel, duration_text, group_albums, track_number_text};
+    use super::{
+        AlbumTrackViewModel, duration_text, group_albums, replace_track_in_album, track_number_text,
+    };
 
     #[test]
     fn groups_tracks_by_album_artist_and_album_title() {
@@ -459,6 +485,61 @@ mod tests {
     fn duration_text_uses_hours_when_needed() {
         assert_eq!(duration_text(245), "4:05");
         assert_eq!(duration_text(3_904), "1:05:04");
+    }
+
+    #[test]
+    fn replace_track_in_album_updates_target_and_re_sorts() {
+        let mut albums = group_albums(&[
+            track(1, "b.flac", "Album", "Artist", Some(2), Some(2000)),
+            track(2, "a.flac", "Album", "Artist", Some(1), Some(2000)),
+            track(3, "other.flac", "Other", "Artist", Some(1), None),
+        ]);
+        assert_eq!(
+            albums[0]
+                .tracks
+                .iter()
+                .map(|track| track.id.get())
+                .collect::<Vec<_>>(),
+            vec![2, 1],
+        );
+
+        // Promote track 1 from position 2 to position 0; the album's
+        // track vector must re-sort and the function must report the
+        // album whose row needs repainting.
+        let mut replacement =
+            super::album_track(&track(1, "b.flac", "Album", "Artist", Some(1), Some(2000)));
+        replacement.track_number = Some(0);
+        let key = replace_track_in_album(&mut albums, track_id(1), &replacement);
+
+        let updated_album = albums
+            .iter()
+            .find(|album| album.title == "Album")
+            .expect("Album bucket present");
+        assert_eq!(key.as_ref(), Some(&updated_album.key));
+        assert_eq!(
+            updated_album
+                .tracks
+                .iter()
+                .map(|track| track.id.get())
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+        );
+    }
+
+    #[test]
+    fn replace_track_in_album_returns_none_when_track_absent() {
+        let mut albums = group_albums(&[track(1, "a.flac", "Album", "Artist", Some(1), None)]);
+        let ghost = AlbumTrackViewModel {
+            id: track_id(99),
+            file_path: PathBuf::from("ghost.flac"),
+            title: "Ghost".to_owned(),
+            disc_number: None,
+            track_number: None,
+            duration_seconds: 0,
+            is_missing: false,
+        };
+
+        assert!(replace_track_in_album(&mut albums, track_id(99), &ghost).is_none());
     }
 
     fn track(

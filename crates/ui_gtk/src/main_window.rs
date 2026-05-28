@@ -2370,7 +2370,11 @@ fn track_row_changed_callback(ctx: TrackRowChangedContext<'_>) -> TrackRowChange
         };
 
         songs_table.update_row(track_id, row.clone());
-        albums_view.replace_tracks(runtime.borrow().library_tracks().to_vec());
+        // In-place per-track refresh — never `replace_tracks`. A single
+        // background completion (Lyrics/Tags/Artwork/BPM/Key/Waveform,
+        // metadata write, rating change) must not collapse the
+        // currently-expanded album or scroll the grid back to the top.
+        albums_view.update_track(track_id);
 
         match sidebar.current_selection() {
             Some(SidebarSelection::Item(PlaylistItem::SmartPlaylist(smart_id))) => {

@@ -21,7 +21,9 @@ use super::{
     command_controller::SharedCommandController,
     track_context::TrackRowContextMenu,
 };
-use model::{AlbumKey, AlbumViewModel, album_subtitle, group_albums};
+use model::{
+    AlbumKey, AlbumViewModel, album_subtitle, album_track, group_albums, replace_track_in_album,
+};
 use track_list::AlbumTrackListView;
 
 mod model;
@@ -197,6 +199,69 @@ impl AlbumsView {
             return;
         }
         self.regroup_and_apply_search();
+    }
+
+    /// Apply an in-place update for a single track that already lives in
+    /// the view, mirroring the row-level refresh the Songs and Playlists
+    /// tables run on `track_data_observer`. The album grouping is *not*
+    /// recomputed: every Sustain feature is existing-tag-preserving, so
+    /// an existing track's album never moves across an update. Only the
+    /// row holding the affected album repaints; the selected album,
+    /// scroll position, and every untouched row's artwork stay intact.
+    ///
+    /// A full `replace_tracks` here would tear down the entire grid,
+    /// drop the user's expanded album, and scroll back to the top every
+    /// time a background lyrics/tags/artwork/BPM/key/waveform job
+    /// finished a single track.
+    pub(crate) fn update_track(&self, track_id: TrackId) {
+        let refreshed = {
+            let runtime = self.runtime.borrow();
+            runtime
+                .library_tracks()
+                .iter()
+                .find(|track| track.id == track_id)
+                .cloned()
+        };
+        let Some(refreshed) = refreshed else {
+            return;
+        };
+
+        // Keep the dormant snapshot in sync so a later first
+        // activate() still sees the new value.
+        {
+            let mut pending = self.pending_tracks.borrow_mut();
+            let Some(slot) = pending.iter_mut().find(|track| track.id == track_id) else {
+                return;
+            };
+            *slot = refreshed.clone();
+        }
+
+        if !self.activated.get() {
+            return;
+        }
+
+        let new_track_vm = album_track(&refreshed);
+
+        let Some(affected_album_key) =
+            replace_track_in_album(&mut self.all_albums.borrow_mut(), track_id, &new_track_vm)
+        else {
+            return;
+        };
+
+        // `albums` is a separately-cloned filtered view of
+        // `all_albums`; the on-screen rows read from it, so the same
+        // patch has to land here when the album survived the active
+        // search.
+        let visible_album_present =
+            replace_track_in_album(&mut self.albums.borrow_mut(), track_id, &new_track_vm)
+                .is_some();
+        if !visible_album_present {
+            return;
+        }
+
+        if let Some(row_position) = self.row_position_for_album(&affected_album_key) {
+            self.refresh_row_widget(row_position);
+        }
     }
 
     /// Update the active search filter and re-derive the visible album set.
