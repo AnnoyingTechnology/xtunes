@@ -46,18 +46,19 @@ pub(super) fn build(command_controller: SharedCommandController) -> gtk::Widget 
     );
     content.append(&key_row.container);
 
-    let waveform_row = build_switch_row(
-        "Waveform generation",
-        "Computes the preview and detail waveforms with color, and the beatgrid, \
-         on tracks that are missing them. Never modifies tracks that already have them.",
-        initial.waveform,
+    let audio_row = build_switch_row(
+        "Audio analysis",
+        "Decodes each track once to produce the color waveforms and the perceptual \
+         features Smart Shuffle uses to match transitions. The heaviest pass; runs \
+         in the background on tracks that are missing it.",
+        initial.audio,
     );
     wire_analysis_switch(
-        &waveform_row.switch,
+        &audio_row.switch,
         command_controller.clone(),
-        AnalysisFlag::Waveform,
+        AnalysisFlag::Audio,
     );
-    content.append(&waveform_row.container);
+    content.append(&audio_row.container);
 
     // Separator + resource-usage slider. The separator keeps the
     // "what to compute" toggles visually distinct from the "how
@@ -75,7 +76,7 @@ pub(super) fn build(command_controller: SharedCommandController) -> gtk::Widget 
 enum AnalysisFlag {
     Bpm,
     Key,
-    Waveform,
+    Audio,
 }
 
 fn wire_analysis_switch(
@@ -88,7 +89,7 @@ fn wire_analysis_switch(
         match flag {
             AnalysisFlag::Bpm => settings.analysis.bpm = requested_state,
             AnalysisFlag::Key => settings.analysis.key = requested_state,
-            AnalysisFlag::Waveform => settings.analysis.waveform = requested_state,
+            AnalysisFlag::Audio => settings.analysis.audio = requested_state,
         }
         if command_controller
             .dispatch(ApplicationCommand::UpdateSettings(settings))

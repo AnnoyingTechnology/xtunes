@@ -609,7 +609,7 @@ impl ApplicationRuntime {
 
     /// Spin up the background analysis scheduler against the previously
     /// installed [`LibraryStore`]. The scheduler observes the current
-    /// `AnalysisSettings` (`bpm` / `key` / `waveform` tickboxes) and
+    /// `AnalysisSettings` (`bpm` / `key` / `audio` tickboxes) and
     /// the library root; toggling either through the settings command
     /// path automatically propagates to the worker. Returns
     /// [`ApplicationRuntimeError::LibraryServicesUnavailable`] if no
@@ -623,8 +623,8 @@ impl ApplicationRuntime {
         // Production analyzer: compose a `sustain_analysis::Analyzer`
         // per track and call only the band methods the capability mask
         // selects, so a track scheduled with `bpm: true, key: false,
-        // waveform: false` never pays for chroma extraction or the
-        // full-track waveform decode. Tests substitute a stub via
+        // audio: false` never pays for chroma extraction or the
+        // full-track decode. Tests substitute a stub via
         // `analysis_scheduler::AnalysisScheduler::start` directly.
         let analyzer: analysis_scheduler::AnalyzerFn = Arc::new(|path, capabilities, options| {
             // Surface a hard error before constructing the lazy
@@ -649,10 +649,14 @@ impl ApplicationRuntime {
             } else {
                 None
             };
-            let waveform = if capabilities.waveform {
-                analyzer.waveform()
+            // The waveform overview and the perceptual acoustic features
+            // are both byproducts of one full-track decode (the analyzer
+            // caches the decoded samples, so the second call reuses the
+            // first's work). A single `audio` capability gates both.
+            let (waveform, acoustics) = if capabilities.audio {
+                (analyzer.waveform(), analyzer.acoustics())
             } else {
-                None
+                (None, None)
             };
             let (waveform_preview, waveform_detail) = match waveform {
                 Some(tiers) => (tiers.preview, tiers.detail),
@@ -673,6 +677,7 @@ impl ApplicationRuntime {
                 beatgrid: None,
                 waveform_preview,
                 waveform_detail,
+                acoustics,
             })
         });
         let clock: analysis_scheduler::UnixClockFn = Arc::new(|| {
@@ -1332,8 +1337,20 @@ impl ApplicationRuntime {
             return false;
         }
         let tracks = self.library_tracks.clone();
+        // Acoustics are the enhancement layer (§13): the index caches
+        // them for the timbral terms and the loudness guard, but Smart
+        // Shuffle works without them. A missing store or a load error
+        // degrades gracefully to a zero-coverage, metadata-only index
+        // rather than blocking the rebuild.
+        let acoustics = self
+            .library_store
+            .as_ref()
+            .and_then(|store| store.load_all_acoustics().ok())
+            .unwrap_or_default();
         let now = self.clock.now();
-        let scheduled = self.smart_shuffle_scheduler.request_rebuild(tracks, now);
+        let scheduled = self
+            .smart_shuffle_scheduler
+            .request_rebuild(tracks, acoustics, now);
         if scheduled {
             self.fire_smart_shuffle_state_observer();
         }
@@ -1617,7 +1634,7 @@ impl ApplicationRuntime {
     ///   * Otherwise -> [`RunDecision::Accepted`] and the filtered
     ///     subset is dispatched.
     ///
-    /// `All` always submits the full BPM+key+waveform mask regardless
+    /// `All` always submits the full BPM+key+audio mask regardless
     /// of which global toggles are on; the filter still applies so
     /// re-running `All` on a fully-analyzed playlist is a no-op.
     pub fn request_tracks_analysis_run(
@@ -1629,7 +1646,7 @@ impl ApplicationRuntime {
             let global_on = match capability {
                 AnalysisCapability::Bpm => self.settings.analysis.bpm,
                 AnalysisCapability::Key => self.settings.analysis.key,
-                AnalysisCapability::Waveform => self.settings.analysis.waveform,
+                AnalysisCapability::Audio => self.settings.analysis.audio,
             };
             if global_on {
                 self.push_ephemeral_notification(
@@ -1836,7 +1853,7 @@ pub enum SmartPlaylistTrackStatus {
 pub enum AnalysisCapability {
     Bpm,
     Key,
-    Waveform,
+    Audio,
 }
 
 impl AnalysisCapability {
@@ -1846,7 +1863,7 @@ impl AnalysisCapability {
         match self {
             Self::Bpm => "BPM analysis",
             Self::Key => "key detection",
-            Self::Waveform => "waveform analysis",
+            Self::Audio => "audio analysis",
         }
     }
 }
@@ -1873,7 +1890,7 @@ impl OnlineCapability {
 /// Shape of an analysis-run request submitted by the right-click
 /// menus. `Single(cap)` corresponds to a per-capability menu item;
 /// `All` corresponds to the bundle entry that submits BPM+Key+
-/// Waveform in a single dispatch.
+/// Audio in a single dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AnalysisRunRequest {
     Single(AnalysisCapability),
@@ -1887,22 +1904,22 @@ impl AnalysisRunRequest {
             Self::Single(AnalysisCapability::Bpm) => AnalysisCapabilities {
                 bpm: true,
                 key: false,
-                waveform: false,
+                audio: false,
             },
             Self::Single(AnalysisCapability::Key) => AnalysisCapabilities {
                 bpm: false,
                 key: true,
-                waveform: false,
+                audio: false,
             },
-            Self::Single(AnalysisCapability::Waveform) => AnalysisCapabilities {
+            Self::Single(AnalysisCapability::Audio) => AnalysisCapabilities {
                 bpm: false,
                 key: false,
-                waveform: true,
+                audio: true,
             },
             Self::All => AnalysisCapabilities {
                 bpm: true,
                 key: true,
-                waveform: true,
+                audio: true,
             },
         }
     }
@@ -5487,7 +5504,7 @@ mod tests {
         // global toggle: the user explicitly asked for the bundle.
         let mut settings = runtime.settings().clone();
         settings.analysis.key = true;
-        settings.analysis.waveform = true;
+        settings.analysis.audio = true;
         runtime
             .handle_command(ApplicationCommand::UpdateSettings(settings))
             .expect("apply settings");
@@ -5606,6 +5623,7 @@ mod tests {
                 segment_duration_ms: 0.0,
                 segments: Vec::new(),
             },
+            acoustics: None,
         };
         store
             .record_analysis(
@@ -5614,7 +5632,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: true,
                     key: false,
-                    waveform: false,
+                    audio: false,
                 },
                 AnalysisContext {
                     now_unix: 100,
@@ -5658,7 +5676,7 @@ mod tests {
             ),
             RunDecision::SchedulerUnavailable
         );
-        // `All` finds at least one missing capability (key, waveform)
+        // `All` finds at least one missing capability (key, audio)
         // -> filter passes the track through.
         assert_eq!(
             runtime.request_tracks_analysis_run(vec![track.id], AnalysisRunRequest::All),

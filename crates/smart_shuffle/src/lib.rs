@@ -31,9 +31,10 @@
 //! ## Shape
 //!
 //! * [`index`] — the prepared, library-dependent state ([`SmartShuffleIndex`]):
-//!   genre-token IDF (and, later, robust normalization statistics).
-//!   Rebuilt on a cadence; persisted as an opaque, schema-versioned
-//!   blob. *Not* a fitted model.
+//!   genre-token IDF, the cached per-track acoustic features, and the
+//!   robust normalization ranges the timbral terms need. Rebuilt on a
+//!   cadence; persisted as an opaque, schema-versioned blob. *Not* a
+//!   fitted model.
 //! * [`similarity`] — the per-feature, seed-conditioned similarity
 //!   functions, each masked (`None`) when its feature is absent.
 //! * [`affinity`] — the masked weighted sum with the coverage

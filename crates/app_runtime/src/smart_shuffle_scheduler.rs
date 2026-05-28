@@ -34,7 +34,7 @@ use std::sync::{
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sustain_domain::Track;
+use sustain_domain::{AcousticFeatures, Track, TrackId};
 use sustain_smart_shuffle::SmartShuffleIndex;
 
 /// A freshly-rebuilt index published by the worker. The runtime reads
@@ -78,10 +78,16 @@ impl SmartShuffleScheduler {
     /// Returns `false` when a previous rebuild is still in flight —
     /// the request is dropped rather than queued, because two
     /// back-to-back rebuilds on an unchanged library produce identical
-    /// indexes. `built_at` is captured by the caller (the runtime's
-    /// clock) so the worker thread never reads wall-clock time
-    /// directly.
-    pub fn request_rebuild(&self, tracks: Vec<Track>, built_at: SystemTime) -> bool {
+    /// indexes. `acoustics` is the store's full set of analysed tracks
+    /// (the index ignores entries for unavailable or unknown tracks).
+    /// `built_at` is captured by the caller (the runtime's clock) so the
+    /// worker thread never reads wall-clock time directly.
+    pub fn request_rebuild(
+        &self,
+        tracks: Vec<Track>,
+        acoustics: Vec<(TrackId, AcousticFeatures)>,
+        built_at: SystemTime,
+    ) -> bool {
         // `compare_exchange` rather than `swap` so a running request
         // leaves the flag set and we do not bounce it.
         if self
@@ -98,7 +104,7 @@ impl SmartShuffleScheduler {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         std::thread::spawn(move || {
-            let index = SmartShuffleIndex::build(&tracks, built_at_unix);
+            let index = SmartShuffleIndex::build(&tracks, &acoustics, built_at_unix);
             flag.store(false, Ordering::Release);
             // `send_blocking` cannot meaningfully fail on an unbounded
             // channel whose receiver is owned by the runtime; drop the
@@ -150,12 +156,12 @@ mod tests {
             .map(|index| track(index + 1, if index % 2 == 0 { "Rock" } else { "Jazz" }))
             .collect();
 
-        assert!(scheduler.request_rebuild(tracks.clone(), SystemTime::UNIX_EPOCH));
+        assert!(scheduler.request_rebuild(tracks.clone(), Vec::new(), SystemTime::UNIX_EPOCH));
         // A second request while the first is in flight should be
         // refused. There is an inherent race between the worker
         // clearing `is_rebuilding` and this assertion; the first
         // result is drained to keep the worker tidy regardless.
-        let _ = scheduler.request_rebuild(tracks, SystemTime::UNIX_EPOCH);
+        let _ = scheduler.request_rebuild(tracks, Vec::new(), SystemTime::UNIX_EPOCH);
         let _ = scheduler.result_receiver().recv_blocking();
     }
 
@@ -163,7 +169,7 @@ mod tests {
     fn rebuild_delivers_an_index() {
         let scheduler = SmartShuffleScheduler::new();
         let tracks = vec![track(1, "Rock"), track(2, "Shoegaze")];
-        assert!(scheduler.request_rebuild(tracks, SystemTime::UNIX_EPOCH));
+        assert!(scheduler.request_rebuild(tracks, Vec::new(), SystemTime::UNIX_EPOCH));
         let result = scheduler
             .result_receiver()
             .recv_blocking()

@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+mod acoustic;
 mod clock;
 mod command;
 mod id;
@@ -25,6 +26,7 @@ mod track;
 mod track_column_layout;
 mod waveform;
 
+pub use acoustic::AcousticFeatures;
 pub use clock::{Clock, SystemClock};
 pub use command::{ApplicationCommand, ApplicationQuery};
 pub use id::{PlaylistFolderId, PlaylistId, SmartPlaylistId, TrackId};

@@ -40,18 +40,26 @@ pub const NEUTRAL_PRIOR: f32 = 0.55;
 
 // --- Affinity weights (§10) -------------------------------------------------
 //
-// The DSP/timbral features (loudness 1.40, onset 1.00, brightness
-// 0.80, tonalness 0.60, low-band 0.50, dynamic range 0.40) join this
-// table when the analysis stage lands; until then they are simply not
-// part of the feature set, so the coverage denominator reflects only
-// what can currently be measured.
+// Ordered by how jarring the worst-case violation of each feature is:
+// physical comfort (loudness) first, then the cultural/groove core
+// (genre, tempo, onset, brightness), then user intent and harmony/timbre
+// (grouping, key, tonalness), then era and rhythmic character, then the
+// marginal/identity tail. The DSP/timbral terms are masked (and so drop
+// out of the coverage denominator) on tracks the user has not run audio
+// analysis on — exactly like any other absent feature.
 
+const W_LOUDNESS: f32 = 1.40;
 const W_GENRE: f32 = 1.10;
 const W_TEMPO: f32 = 1.10;
+const W_ONSET: f32 = 1.00;
+const W_BRIGHTNESS: f32 = 0.80;
 const W_GROUPING: f32 = 0.70;
 const W_KEY: f32 = 0.60;
+const W_TONALNESS: f32 = 0.60;
 const W_YEAR: f32 = 0.60;
+const W_LOW_BAND: f32 = 0.50;
 const W_DATE_ADDED: f32 = 0.50;
+const W_DYNAMIC_RANGE: f32 = 0.40;
 const W_COMPOSER: f32 = 0.30;
 const W_DURATION: f32 = 0.30;
 const W_SAME_ARTIST: f32 = 0.20;
@@ -62,12 +70,18 @@ const W_SAME_ALBUM_ARTIST: f32 = 0.15;
 /// `SUSTAIN_LOG_SMART_SHUFFLE=1` trace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AffinityFeature {
+    Loudness,
     Genre,
     Tempo,
+    OnsetDensity,
+    Brightness,
     Grouping,
     Key,
+    Tonalness,
     Year,
+    LowBandVariation,
     DateAdded,
+    DynamicRange,
     Composer,
     Duration,
     SameArtist,
@@ -75,14 +89,20 @@ pub enum AffinityFeature {
 }
 
 impl AffinityFeature {
-    /// Every feature, in scoring/printing order.
-    pub const ALL: [Self; 10] = [
+    /// Every feature, in scoring/printing order (the §10 weight rank).
+    pub const ALL: [Self; 16] = [
+        Self::Loudness,
         Self::Genre,
         Self::Tempo,
+        Self::OnsetDensity,
+        Self::Brightness,
         Self::Grouping,
         Self::Key,
+        Self::Tonalness,
         Self::Year,
+        Self::LowBandVariation,
         Self::DateAdded,
+        Self::DynamicRange,
         Self::Composer,
         Self::Duration,
         Self::SameArtist,
@@ -91,12 +111,18 @@ impl AffinityFeature {
 
     pub const fn weight(self) -> f32 {
         match self {
+            Self::Loudness => W_LOUDNESS,
             Self::Genre => W_GENRE,
             Self::Tempo => W_TEMPO,
+            Self::OnsetDensity => W_ONSET,
+            Self::Brightness => W_BRIGHTNESS,
             Self::Grouping => W_GROUPING,
             Self::Key => W_KEY,
+            Self::Tonalness => W_TONALNESS,
             Self::Year => W_YEAR,
+            Self::LowBandVariation => W_LOW_BAND,
             Self::DateAdded => W_DATE_ADDED,
+            Self::DynamicRange => W_DYNAMIC_RANGE,
             Self::Composer => W_COMPOSER,
             Self::Duration => W_DURATION,
             Self::SameArtist => W_SAME_ARTIST,
@@ -107,12 +133,18 @@ impl AffinityFeature {
     /// Short label for the debug log.
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Loudness => "loudness",
             Self::Genre => "genre",
             Self::Tempo => "tempo",
+            Self::OnsetDensity => "onset_density",
+            Self::Brightness => "brightness",
             Self::Grouping => "grouping",
             Self::Key => "key",
+            Self::Tonalness => "tonalness",
             Self::Year => "year",
+            Self::LowBandVariation => "low_band_variation",
             Self::DateAdded => "date_added",
+            Self::DynamicRange => "dynamic_range",
             Self::Composer => "composer",
             Self::Duration => "duration",
             Self::SameArtist => "same_artist",
@@ -127,12 +159,18 @@ impl AffinityFeature {
         index: Option<&SmartShuffleIndex>,
     ) -> Option<f32> {
         match self {
+            Self::Loudness => similarity::loudness_similarity(seed, cand, index),
             Self::Genre => similarity::genre_similarity(seed, cand, index),
             Self::Tempo => similarity::tempo_similarity(seed, cand),
+            Self::OnsetDensity => similarity::onset_similarity(seed, cand, index),
+            Self::Brightness => similarity::brightness_similarity(seed, cand, index),
             Self::Grouping => similarity::grouping_similarity(seed, cand),
             Self::Key => similarity::key_similarity(seed, cand),
+            Self::Tonalness => similarity::tonalness_similarity(seed, cand, index),
             Self::Year => similarity::year_similarity(seed, cand),
+            Self::LowBandVariation => similarity::low_band_variation_similarity(seed, cand, index),
             Self::DateAdded => similarity::date_added_similarity(seed, cand),
+            Self::DynamicRange => similarity::dynamic_range_similarity(seed, cand, index),
             Self::Composer => similarity::composer_similarity(seed, cand),
             Self::Duration => similarity::duration_similarity(seed, cand),
             Self::SameArtist => similarity::same_artist(seed, cand),
@@ -323,8 +361,24 @@ mod tests {
     #[test]
     fn total_weight_matches_the_feature_table() {
         // Guards against a feature being added to ALL without a weight
-        // (or vice versa): the sum must equal the documented constants.
-        let expected = 1.10 + 1.10 + 0.70 + 0.60 + 0.60 + 0.50 + 0.30 + 0.30 + 0.20 + 0.15;
+        // (or vice versa): the sum must equal the documented constants
+        // (§10), in rank order.
+        let expected = 1.40 // loudness
+            + 1.10 // genre
+            + 1.10 // tempo
+            + 1.00 // onset density
+            + 0.80 // brightness
+            + 0.70 // grouping
+            + 0.60 // key
+            + 0.60 // tonalness
+            + 0.60 // year
+            + 0.50 // low-band variation
+            + 0.50 // date added
+            + 0.40 // dynamic range (LRA)
+            + 0.30 // composer
+            + 0.30 // duration
+            + 0.20 // same artist
+            + 0.15; // same album-artist
         assert!((total_affinity_weight() - expected).abs() < 1e-6);
     }
 }

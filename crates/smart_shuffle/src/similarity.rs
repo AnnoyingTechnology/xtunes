@@ -18,17 +18,20 @@
 //! weights and sums the present features and applies the coverage
 //! correction for thin evidence.
 //!
-//! These are pure functions of the two tracks (plus, for genre, the
-//! IDF table from the prepared index). They read only fields that
-//! exist on a `Track` today; the DSP/timbral features (loudness,
-//! onset density, brightness, …) are added in a later stage and slot
-//! into the same masked-sum framework.
+//! Most functions are pure functions of the two tracks (plus, for
+//! genre, the IDF table from the prepared index). The DSP/timbral
+//! functions (loudness, onset density, brightness, …) additionally read
+//! each track's cached [`AcousticFeatures`] and the library-derived
+//! normalization ranges from the index — the values do not live on a
+//! `Track` — but they slot into the same masked-sum framework: absent
+//! acoustics (or no index) mask the term exactly like an absent tag.
 
 use std::time::SystemTime;
 
-use sustain_domain::{MusicalKey, Track};
+use sustain_domain::{AcousticFeatures, MusicalKey, Track};
 
-use crate::index::{SmartShuffleIndex, genre_tokens};
+use crate::index::SmartShuffleIndex;
+use crate::index::genre_tokens;
 
 /// IDF-weighted Jaccard over the seed's and candidate's genre tokens.
 ///
@@ -288,6 +291,137 @@ fn relation(seed: Option<&str>, cand: Option<&str>) -> Option<f32> {
 
 fn non_blank(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|v| !v.is_empty())
+}
+
+// --- Acoustic (DSP) similarities (§6.1, §7, §8) -----------------------------
+//
+// These read the pair's cached `AcousticFeatures` from the prepared
+// index. When the index is absent, or either track has not been
+// analysed, the term is masked (`None`) — identical to a missing tag.
+// Loudness uses a fixed perceptual scale (absolute LUFS); the
+// collection-scaled features (onset, LRA, low-band variation, tonalness)
+// are mapped onto `[0, 1]` against the library's robust range first, so
+// the fixed σ below is expressed in those normalized units.
+
+/// Width of the integrated-loudness Gaussian, in LUFS (§7). ~σ = 4.5
+/// means a ±3 LUFS difference is nearly free and the similarity falls
+/// off super-linearly as the gap widens.
+const LOUDNESS_SIGMA_LUFS: f32 = 4.5;
+
+/// Width of the Gaussian for the library-normalized acoustic features,
+/// in `[0, 1]` units. A quarter-of-the-library-spread difference scores
+/// ~0.61; a full-spread difference scores near zero.
+const ACOUSTIC_NORM_SIGMA: f32 = 0.25;
+
+/// Look both tracks' cached acoustics up in the index. `None` (masking
+/// the term) when there is no index or either track was not analysed.
+fn acoustic_pair<'a>(
+    seed: &Track,
+    cand: &Track,
+    index: Option<&'a SmartShuffleIndex>,
+) -> Option<(&'a AcousticFeatures, &'a AcousticFeatures)> {
+    let index = index?;
+    Some((index.acoustics(seed.id)?, index.acoustics(cand.id)?))
+}
+
+/// Loudness continuity on the *integrated* (whole-track) level, a fixed
+/// perceptual Gaussian in LUFS (§7). This is the soft distance term; the
+/// hard asymmetric guard (which keys off short-term max) lives in the
+/// picker. Masked when either track lacks acoustics.
+pub fn loudness_similarity(
+    seed: &Track,
+    cand: &Track,
+    index: Option<&SmartShuffleIndex>,
+) -> Option<f32> {
+    let (seed_a, cand_a) = acoustic_pair(seed, cand, index)?;
+    let delta = (cand_a.integrated_lufs - seed_a.integrated_lufs).abs();
+    Some(gaussian(delta, LOUDNESS_SIGMA_LUFS))
+}
+
+/// Onset-density (rhythmic-busyness) continuity. Library-normalized
+/// (§8) so a homogeneous collection keeps its contrast, then a Gaussian
+/// on the normalized difference. Masked when either track lacks
+/// acoustics. Tells a sparse 120-BPM ambient piece from a busy 120-BPM
+/// drum-and-bass track, which tempo alone cannot.
+pub fn onset_similarity(
+    seed: &Track,
+    cand: &Track,
+    index: Option<&SmartShuffleIndex>,
+) -> Option<f32> {
+    let (seed_a, cand_a) = acoustic_pair(seed, cand, index)?;
+    let range = index?.acoustic_normalization().onset_rate;
+    let delta =
+        (range.normalize(seed_a.onset_rate_hz) - range.normalize(cand_a.onset_rate_hz)).abs();
+    Some(gaussian(delta, ACOUSTIC_NORM_SIGMA))
+}
+
+/// Spectral-brightness (timbral shape) continuity from the low/mid/high
+/// band-energy ratios. The ratios already sum to ≈1, so they are
+/// inherently collection-independent and compared directly: the L1
+/// distance between the two ratio vectors lies in `[0, 2]`, mapped to a
+/// `[0, 1]` similarity. Captures dark↔bright *and* EQ curve (V-shape vs
+/// mid-forward) that a single centroid would miss. Masked when either
+/// track lacks acoustics.
+pub fn brightness_similarity(
+    seed: &Track,
+    cand: &Track,
+    index: Option<&SmartShuffleIndex>,
+) -> Option<f32> {
+    let (seed_a, cand_a) = acoustic_pair(seed, cand, index)?;
+    let [sl, sm, sh] = seed_a.band_ratios();
+    let [cl, cm, ch] = cand_a.band_ratios();
+    let l1 = (sl - cl).abs() + (sm - cm).abs() + (sh - ch).abs();
+    Some((1.0 - 0.5 * l1).clamp(0.0, 1.0))
+}
+
+/// Tonalness (pitched↔noisy) continuity. Library-normalized (§8) then a
+/// Gaussian on the normalized difference. Separates a clean piano from a
+/// distorted guitar or a white-noise pad — material that brightness and
+/// onset density alone confuse. Masked when either track lacks
+/// acoustics.
+pub fn tonalness_similarity(
+    seed: &Track,
+    cand: &Track,
+    index: Option<&SmartShuffleIndex>,
+) -> Option<f32> {
+    let (seed_a, cand_a) = acoustic_pair(seed, cand, index)?;
+    let range = index?.acoustic_normalization().tonalness;
+    let delta = (range.normalize(seed_a.tonalness) - range.normalize(cand_a.tonalness)).abs();
+    Some(gaussian(delta, ACOUSTIC_NORM_SIGMA))
+}
+
+/// Low-band-variation (the "kick-drum check") continuity. Separates a
+/// steady four-on-the-floor pulse from a syncopated or fluid low end at
+/// the *same* BPM and onset density. Library-normalized (§8). Masked
+/// when either track lacks acoustics.
+pub fn low_band_variation_similarity(
+    seed: &Track,
+    cand: &Track,
+    index: Option<&SmartShuffleIndex>,
+) -> Option<f32> {
+    let (seed_a, cand_a) = acoustic_pair(seed, cand, index)?;
+    let range = index?.acoustic_normalization().low_band_variation;
+    let delta = (range.normalize(seed_a.low_band_variation)
+        - range.normalize(cand_a.low_band_variation))
+    .abs();
+    Some(gaussian(delta, ACOUSTIC_NORM_SIGMA))
+}
+
+/// Dynamic-range (LRA) continuity — compressed-flat vs dynamic-punchy
+/// material. Low weight (§10): partially overlaps onset density and band
+/// energy, but the independent cases are real. Library-normalized (§8).
+/// Masked when either track lacks acoustics.
+pub fn dynamic_range_similarity(
+    seed: &Track,
+    cand: &Track,
+    index: Option<&SmartShuffleIndex>,
+) -> Option<f32> {
+    let (seed_a, cand_a) = acoustic_pair(seed, cand, index)?;
+    let range = index?.acoustic_normalization().loudness_range;
+    let delta = (range.normalize(seed_a.loudness_range_lu)
+        - range.normalize(cand_a.loudness_range_lu))
+    .abs();
+    Some(gaussian(delta, ACOUSTIC_NORM_SIGMA))
 }
 
 /// Lowercase whitespace/punctuation-delimited tokens for free-text

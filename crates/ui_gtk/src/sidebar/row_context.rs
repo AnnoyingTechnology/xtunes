@@ -185,7 +185,7 @@ fn build_analyze_submenu_page(popover: &gtk::Popover, context: &SidebarRowContex
     for (label_text, capability) in [
         ("BPM", AnalysisCapability::Bpm),
         ("Key", AnalysisCapability::Key),
-        ("Waveform", AnalysisCapability::Waveform),
+        ("Audio", AnalysisCapability::Audio),
     ] {
         let button = row_action_button(label_text);
         button.set_sensitive(!analysis_globally_on(capability));

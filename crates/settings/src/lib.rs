@@ -258,7 +258,7 @@ struct AnalysisSettingsDocument {
     #[serde(default)]
     key: bool,
     #[serde(default)]
-    waveform: bool,
+    audio: bool,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -354,7 +354,7 @@ impl SettingsDocument {
             analysis: AnalysisSettingsDocument {
                 bpm: settings.analysis.bpm,
                 key: settings.analysis.key,
-                waveform: settings.analysis.waveform,
+                audio: settings.analysis.audio,
             },
             online: OnlineSettingsDocument {
                 artwork: settings.online.artwork,
@@ -393,7 +393,7 @@ impl SettingsDocument {
             analysis: AnalysisSettings {
                 bpm: self.analysis.bpm,
                 key: self.analysis.key,
-                waveform: self.analysis.waveform,
+                audio: self.analysis.audio,
             },
             online: OnlineSettings {
                 artwork: self.online.artwork,
@@ -667,7 +667,7 @@ mod tests {
             analysis: AnalysisSettings {
                 bpm: true,
                 key: false,
-                waveform: true,
+                audio: true,
             },
             online: OnlineSettings {
                 artwork: true,

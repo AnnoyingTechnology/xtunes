@@ -144,12 +144,33 @@ CREATE TABLE IF NOT EXISTS track_column_layout_smart_playlist_override (
 -- so older rows are excluded from "fresh enough" checks without any
 -- migration step.
 CREATE TABLE IF NOT EXISTS track_analysis (
-    track_id                    INTEGER PRIMARY KEY
-                                  REFERENCES tracks(id) ON DELETE CASCADE,
-    bpm_attempted_at_unix       INTEGER,
-    key_attempted_at_unix       INTEGER,
-    waveform_attempted_at_unix  INTEGER,
-    analyzer_version            INTEGER NOT NULL
+    track_id                  INTEGER PRIMARY KEY
+                                REFERENCES tracks(id) ON DELETE CASCADE,
+    bpm_attempted_at_unix     INTEGER,
+    key_attempted_at_unix     INTEGER,
+    audio_attempted_at_unix   INTEGER,
+    analyzer_version          INTEGER NOT NULL
+);
+
+-- Per-track perceptual acoustic features for Smart Shuffle (loudness,
+-- onset density, timbral band ratios, low-band variation, tonalness).
+-- Split from track_analysis (which is bookkeeping-only) the same way
+-- track_waveform is. Both this table and track_waveform are byproducts
+-- of one heavy full-decode pass — the opt-in "audio analysis" — so they
+-- share track_analysis.audio_attempted_at_unix. Absence of a row means
+-- "not analysed", which the scorer masks.
+CREATE TABLE IF NOT EXISTS track_acoustics (
+    track_id             INTEGER PRIMARY KEY
+                           REFERENCES tracks(id) ON DELETE CASCADE,
+    integrated_lufs      REAL NOT NULL,
+    short_term_lufs_max  REAL NOT NULL,
+    loudness_range_lu    REAL NOT NULL,
+    onset_rate_hz        REAL NOT NULL,
+    low_band_ratio       REAL NOT NULL,
+    mid_band_ratio       REAL NOT NULL,
+    high_band_ratio      REAL NOT NULL,
+    low_band_variation   REAL NOT NULL,
+    tonalness            REAL NOT NULL
 );
 
 -- Waveform BLOBs only. Split from track_analysis so a future
@@ -370,15 +391,52 @@ INSERT INTO track_analysis (
     track_id,
     bpm_attempted_at_unix,
     key_attempted_at_unix,
-    waveform_attempted_at_unix,
+    audio_attempted_at_unix,
     analyzer_version
 )
 VALUES (?1, ?2, ?3, ?4, ?5)
 ON CONFLICT(track_id) DO UPDATE SET
     bpm_attempted_at_unix = COALESCE(excluded.bpm_attempted_at_unix, bpm_attempted_at_unix),
     key_attempted_at_unix = COALESCE(excluded.key_attempted_at_unix, key_attempted_at_unix),
-    waveform_attempted_at_unix = COALESCE(excluded.waveform_attempted_at_unix, waveform_attempted_at_unix),
+    audio_attempted_at_unix = COALESCE(excluded.audio_attempted_at_unix, audio_attempted_at_unix),
     analyzer_version = excluded.analyzer_version
+"#;
+
+/// Upsert a track's acoustic features. Overwrites on re-analysis (the
+/// feature set is a single-shot store-or-replace, like the waveform).
+pub(super) const UPSERT_TRACK_ACOUSTICS_SQL: &str = r#"
+INSERT INTO track_acoustics (
+    track_id,
+    integrated_lufs,
+    short_term_lufs_max,
+    loudness_range_lu,
+    onset_rate_hz,
+    low_band_ratio,
+    mid_band_ratio,
+    high_band_ratio,
+    low_band_variation,
+    tonalness
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+ON CONFLICT(track_id) DO UPDATE SET
+    integrated_lufs     = excluded.integrated_lufs,
+    short_term_lufs_max = excluded.short_term_lufs_max,
+    loudness_range_lu   = excluded.loudness_range_lu,
+    onset_rate_hz       = excluded.onset_rate_hz,
+    low_band_ratio      = excluded.low_band_ratio,
+    mid_band_ratio      = excluded.mid_band_ratio,
+    high_band_ratio     = excluded.high_band_ratio,
+    low_band_variation  = excluded.low_band_variation,
+    tonalness           = excluded.tonalness
+"#;
+
+/// Load every track's acoustic features for the Smart Shuffle index
+/// rebuild. Column order matches `LibraryStore::load_all_acoustics`.
+pub(super) const SELECT_ALL_TRACK_ACOUSTICS_SQL: &str = r#"
+SELECT track_id, integrated_lufs, short_term_lufs_max, loudness_range_lu,
+       onset_rate_hz, low_band_ratio, mid_band_ratio, high_band_ratio,
+       low_band_variation, tonalness
+FROM track_acoustics
 "#;
 
 pub(super) const UPSERT_TRACK_WAVEFORM_SQL: &str = r#"
@@ -491,15 +549,6 @@ ORDER BY t.id
 LIMIT ?5
 "#;
 
-/// "Find tracks needing analysis." Returns track IDs that are not
-/// marked missing AND have at least one of the requested capabilities
-/// either un-attempted (NULL timestamp) or stamped by an older
-/// analyzer_version. Bound parameters in order:
-///   ?1 = include_bpm        (1 or 0)
-///   ?2 = include_key        (1 or 0)
-///   ?3 = include_waveform   (1 or 0)
-///   ?4 = current analyzer_version
-///   ?5 = LIMIT
 pub(super) const UPSERT_SMART_SHUFFLE_INDEX_SQL: &str = r#"
 INSERT INTO smart_shuffle_index (
     id,
@@ -521,15 +570,24 @@ WHERE id = 1
 pub(super) const DELETE_SMART_SHUFFLE_INDEX_SQL: &str =
     r#"DELETE FROM smart_shuffle_index WHERE id = 1"#;
 
+/// "Find tracks needing analysis." Returns track IDs that are not
+/// marked missing AND have at least one of the requested capabilities
+/// either un-attempted (NULL timestamp) or stamped by an older
+/// analyzer_version. Bound parameters in order:
+///   ?1 = include_bpm        (1 or 0)
+///   ?2 = include_key        (1 or 0)
+///   ?3 = include_audio      (1 or 0)
+///   ?4 = current analyzer_version
+///   ?5 = LIMIT
 pub(super) const SELECT_TRACKS_NEEDING_ANALYSIS_SQL: &str = r#"
 SELECT t.id
 FROM tracks t
 LEFT JOIN track_analysis ta ON ta.track_id = t.id
 WHERE t.is_missing = 0
   AND (
-        (?1 = 1 AND (ta.bpm_attempted_at_unix      IS NULL OR ta.analyzer_version < ?4))
-     OR (?2 = 1 AND (ta.key_attempted_at_unix      IS NULL OR ta.analyzer_version < ?4))
-     OR (?3 = 1 AND (ta.waveform_attempted_at_unix IS NULL OR ta.analyzer_version < ?4))
+        (?1 = 1 AND (ta.bpm_attempted_at_unix   IS NULL OR ta.analyzer_version < ?4))
+     OR (?2 = 1 AND (ta.key_attempted_at_unix   IS NULL OR ta.analyzer_version < ?4))
+     OR (?3 = 1 AND (ta.audio_attempted_at_unix IS NULL OR ta.analyzer_version < ?4))
       )
 ORDER BY t.id
 LIMIT ?5

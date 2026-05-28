@@ -613,7 +613,7 @@ fn build_analyze_submenu_page(
     for (label_text, capability) in [
         ("BPM", AnalysisCapability::Bpm),
         ("Key", AnalysisCapability::Key),
-        ("Waveform", AnalysisCapability::Waveform),
+        ("Audio", AnalysisCapability::Audio),
     ] {
         let button = context_menu_button_with_label(label_text);
         button.set_sensitive(!(menu.enabled)(capability));

@@ -1148,7 +1148,7 @@ fn analysis_capability_enabled(
     match capability {
         sustain_app_runtime::AnalysisCapability::Bpm => analysis.bpm,
         sustain_app_runtime::AnalysisCapability::Key => analysis.key,
-        sustain_app_runtime::AnalysisCapability::Waveform => analysis.waveform,
+        sustain_app_runtime::AnalysisCapability::Audio => analysis.audio,
     }
 }
 

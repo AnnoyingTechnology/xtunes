@@ -152,13 +152,15 @@ pub enum UiSidebarSelection {
 /// are missing it. Flags never gate manual right-click runs — those are
 /// always available and intentionally overwrite existing values.
 ///
-/// The `waveform` flag covers beatgrid plus the preview and detail
-/// waveforms with color — they share a single DSP pass.
+/// The `audio` flag covers the single heavy full-decode pass: the
+/// preview and detail waveforms with color, plus the perceptual acoustic
+/// features (loudness, onset density, timbre) Smart Shuffle consumes.
+/// They are all byproducts of the one decode, so they share one toggle.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AnalysisSettings {
     pub bpm: bool,
     pub key: bool,
-    pub waveform: bool,
+    pub audio: bool,
 }
 
 /// Background-capability toggles for network-bound retrieval. Same
@@ -295,7 +297,7 @@ mod tests {
         assert_eq!(settings.online, OnlineSettings::default());
         assert!(!settings.analysis.bpm);
         assert!(!settings.analysis.key);
-        assert!(!settings.analysis.waveform);
+        assert!(!settings.analysis.audio);
         assert!(!settings.online.artwork);
         assert!(!settings.online.tags);
         assert!(!settings.online.lyrics);

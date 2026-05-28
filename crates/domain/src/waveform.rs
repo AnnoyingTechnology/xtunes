@@ -14,7 +14,7 @@
 //! count. Endianness is irrelevant because every field is a single
 //! `u8`.
 
-use crate::MusicalKey;
+use crate::{AcousticFeatures, MusicalKey};
 
 /// Fixed segment count for the preview waveform. Matches Pioneer's
 /// PWAV column count (so a future export crate does not have to
@@ -90,6 +90,10 @@ pub struct TrackAnalysis {
     /// Time-resolution detail ([`DETAIL_SEGMENTS_PER_SECOND`]
     /// segments per second of audio).
     pub waveform_detail: WaveformSegments,
+    /// Perceptual acoustic features for Smart Shuffle (loudness, onset
+    /// density, timbre, …). `None` when the acoustics capability was
+    /// not requested or the DSP pass could not produce them.
+    pub acoustics: Option<AcousticFeatures>,
 }
 
 /// Beat-grid information. Reserved; not populated by the DSP layer

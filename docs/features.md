@@ -190,13 +190,13 @@ The header hides for folder selections and for empty states.
 
 ### Per-playlist analysis & online retrieval — *Sustain-native*
 Right-clicking a playlist or smart playlist exposes two submenus —
-**Analyze** (BPM / Key / Waveform / All) and **Retrieve** (Lyrics /
+**Analyze** (BPM / Key / Audio / All) and **Retrieve** (Lyrics /
 Tags / Artwork / All) — that run the chosen capability against that
 playlist's track set without waiting for the background sweep to
 reach them. Useful for dedicated mix-set playlists destined for
-Pioneer PDB export (waveforms cost a lot of decode time on long
-mixes, so most users keep the global waveform toggle off and trigger
-it per playlist) or for one-shot "fetch lyrics on this 'Sing me'
+Pioneer PDB export (the audio pass costs a lot of decode time on long
+mixes, so most users keep the global audio-analysis toggle off and
+trigger it per playlist) or for one-shot "fetch lyrics on this 'Sing me'
 playlist" runs. Each per-capability entry is rendered insensitive
 when its matching global toggle is on — the background sweep is
 already covering those tracks, so the right-click trigger would be
@@ -262,14 +262,28 @@ another well — a largely objective, perceptual judgement.
 
 Each candidate is scored against the currently-playing track by a
 fixed, transparent perceptual metric — a masked weighted sum of
-per-feature similarities: genre (IDF-weighted, so a shared rare genre
-counts for more than a shared ubiquitous one), tempo (log-scaled with
-octave folding, so 90 and 180 BPM match), musical key
+per-feature similarities. Metadata terms: genre (IDF-weighted, so a
+shared rare genre counts for more than a shared ubiquitous one), tempo
+(log-scaled with octave folding, so 90 and 180 BPM match), musical key
 (circle-of-fifths proximity plus mode), release year (era of
 creation), date added (era of discovery), grouping, composer,
-duration, and artist identity. A feature missing on either side is
+duration, and artist identity. When the track has been through audio
+analysis, six **acoustic continuity** terms join the sum: loudness
+(integrated LUFS, the heaviest-weighted feature), onset density
+(rhythmic busyness, separating a sparse 120-BPM ambient piece from a
+busy 120-BPM drum-and-bass track), spectral brightness (dark↔bright
+band-energy shape), tonalness (pitched↔noisy), low-band variation (the
+"kick-drum check"), and dynamic range. A feature missing on either
+side — including the acoustic ones on a not-yet-analysed track — is
 masked out rather than guessed, and a coverage term keeps a
-two-feature match from outscoring a ten-feature one. Small
+two-feature match from outscoring a ten-feature one.
+
+Loudness is also a hard, **asymmetric guard**: a candidate whose
+short-term loudness peak sits far above the playing track's is excluded
+outright (going from a quiet master into a brickwalled one startles),
+while the quieter direction — a natural breakdown — is tolerated much
+further. The guard prunes before the candidate pool is formed, so no
+Exploration setting can rescue a catastrophic loudness jump. Small
 candidate-side nudges (a gentle rating prior) and penalties
 (recency/fatigue, a same-artist-streak guard, an anti-album-walk-back)
 shape the final score. The surviving candidates form a bounded pool
@@ -280,14 +294,17 @@ inputs, so the `SUSTAIN_LOG_SMART_SHUFFLE=1` debug trace — a full
 per-feature decomposition of every pick — is reproducible after the
 fact.
 
-The genre IDF weights are prepared in a small **index** recomputed on
-a background worker thread — milliseconds of work, but genuinely
-library-dependent. The Shuffle preferences tab exposes an **Automatic
-rebuild** cadence (Never / Hourly / Daily / Weekly) plus an explicit
-**Rebuild index** button; the index is persisted alongside the library
-database so it survives restarts. There is no cold-start gate: Smart
-Shuffle works from the first track, degrading gracefully on tracks
-with sparse metadata.
+The genre IDF weights, the cached per-track acoustic features, and the
+library-derived robust normalization ranges the acoustic terms need are
+prepared in a small **index** recomputed on a background worker thread —
+milliseconds of work, but genuinely library-dependent. The Shuffle
+preferences tab exposes an **Automatic rebuild** cadence (Never /
+Hourly / Daily / Weekly) plus an explicit **Rebuild index** button, and
+reports the analysis coverage the acoustic terms have to work with; the
+index is persisted alongside the library database so it survives
+restarts. There is no cold-start gate: Smart Shuffle works from the
+first track, degrading gracefully on tracks with sparse metadata or no
+audio analysis.
 
 Smart Shuffle only applies to library-wide queues. Single-album or
 single-playlist playback uses Pure shuffle even when Smart is the
@@ -317,11 +334,13 @@ don't collide.
 
 ## Audio analysis
 
-Sustain derives three signals from each track's audio content — BPM,
-musical key, and a waveform — and stores them alongside the rest of
-the track's data in SQLite. Analysis is paced and runs out of band
-of playback; freshly imported tracks are picked up on the next sweep
-without any user prompt.
+Sustain derives several signals from each track's audio content — BPM,
+musical key, and a heavier full-decode "audio analysis" pass that
+yields the waveforms and the perceptual acoustic features Smart Shuffle
+uses — and stores them alongside the rest of the track's data in
+SQLite. Analysis is paced and runs out of band of playback; freshly
+imported tracks are picked up on the next sweep without any user
+prompt.
 
 ### BPM detection — *Sustain-native*
 A tempogram estimator over the track's beat envelope, octave-normalized
@@ -339,15 +358,21 @@ SQLite has no value for that field. The Music Key column ships hidden
 by default; surface it through the column selector. The same field is
 exposed to smart-playlist rules for harmony-aware sets.
 
-### Waveform analysis — *Sustain-native*
-A single DSP pass produces both a coarse preview waveform and a
-detailed colour waveform with beatgrid, sharing decode work. The
-preview backs the playback seek bar; the detail data is held in
-SQLite for future DJ-export targets.
+### Audio analysis — *Sustain-native*
+A single heavy full-decode pass produces, as byproducts of the one
+decode, both a coarse preview waveform and a detailed colour waveform
+with beatgrid, plus the perceptual acoustic features (integrated and
+short-term loudness, loudness range, onset density, low/mid/high
+band-energy ratios, low-band variation, and tonalness) that Smart
+Shuffle's continuity terms and loudness guard consume. The preview
+backs the playback seek bar; the detail waveform is held in SQLite for
+future DJ-export targets; the acoustic features are stored per track
+and cached into the Smart Shuffle index. Because they all come from one
+decode, a single toggle governs the whole pass.
 
 ### Background analysis scheduler — *Sustain-native*
 The Analysis tab in Preferences exposes three independent toggles —
-BPM / Key / Waveform — that gate which capabilities the background
+BPM / Key / Audio — that gate which capabilities the background
 sweep requests. With any toggle on, a paced multi-worker pool walks
 `tracks_needing_analysis` and runs only the missing capabilities per
 track; tracks whose value is already populated (whether from prior
@@ -532,7 +557,7 @@ groups:
 - **Copy** — copy the audio file itself
 - **Show in folder** — open the system file manager at the file's
   location (`Ctrl+R`)
-- **Analyze** — submenu (BPM / Key / Waveform / All) running the
+- **Analyze** — submenu (BPM / Key / Audio / All) running the
   chosen analysis pass on the selected tracks; per-capability items
   are insensitive when the matching global toggle is on
 - **Retrieve** — submenu (Lyrics / Tags / Artwork / All) running the
@@ -554,7 +579,7 @@ The Preferences window currently exposes:
 - Library folder picker (with validation)
 - Managed-mode tickbox
 - Manual library scan trigger
-- Analysis tab: BPM / Key / Waveform background toggles
+- Analysis tab: BPM / Key / Audio background toggles
 - Online tab: Artwork / Tags / Lyrics background toggles
 
 Settings persist to `~/.config/sustain/settings.toml`.

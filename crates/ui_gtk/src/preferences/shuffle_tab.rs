@@ -346,8 +346,15 @@ fn status_caption_text(
                     "Library indexed: {} tracks",
                     group_thousands(meta.indexed_track_count)
                 ),
+                // Framed as an *optional enhancement*, not a measure of
+                // whether Smart Shuffle works: the core scorer runs on
+                // tag features (genre, tempo, key, year, …) at 0%
+                // coverage. This line reports how much of the library
+                // has the heavier audio analysis (loudness, timbre) that
+                // sharpens continuity — so "0%" reads as "not enhanced
+                // yet", not "relies on nothing".
                 format!(
-                    "Analysis coverage: {}%",
+                    "Audio-enhanced coverage: {}%",
                     (meta.analysis_coverage * 100.0).round() as i64
                 ),
             ];

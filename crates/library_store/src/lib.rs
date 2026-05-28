@@ -12,9 +12,9 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value as SqlValue};
 use sustain_domain::SmartPlaylistRuleSet;
 pub use sustain_domain::{
-    LibraryQuery, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, Rating, SmartPlaylist,
-    SmartPlaylistId, SyncedLyrics, Track, TrackAnalysis, TrackColumnEntry, TrackColumnLayout,
-    TrackColumnLayoutScope, TrackId, WaveformSegments,
+    AcousticFeatures, LibraryQuery, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, Rating,
+    SmartPlaylist, SmartPlaylistId, SyncedLyrics, Track, TrackAnalysis, TrackColumnEntry,
+    TrackColumnLayout, TrackColumnLayoutScope, TrackId, WaveformSegments,
 };
 
 mod memory;
@@ -27,10 +27,11 @@ pub use memory::InMemoryLibraryStore;
 use query::{sort_tracks, track_matches_search};
 use schema::{
     DELETE_SMART_SHUFFLE_INDEX_SQL, DELETE_TRACK_SYNCED_LYRICS_SQL, FILL_TRACK_BPM_IF_NULL_SQL,
-    FILL_TRACK_MUSICAL_KEY_IF_NULL_SQL, SAVE_TRACK_SQL, SCHEMA_SQL, SELECT_ALL_TRACKS_SQL,
-    SELECT_SMART_SHUFFLE_INDEX_SQL, SELECT_TRACK_BY_CONTENT_HASH_SQL, SELECT_TRACK_BY_ID_SQL,
-    SELECT_TRACK_SYNCED_LYRICS_SQL, SELECT_TRACK_WAVEFORM_SQL, SELECT_TRACKS_NEEDING_ANALYSIS_SQL,
-    SELECT_TRACKS_NEEDING_ONLINE_SQL, UPSERT_SMART_SHUFFLE_INDEX_SQL, UPSERT_TRACK_ANALYSIS_SQL,
+    FILL_TRACK_MUSICAL_KEY_IF_NULL_SQL, SAVE_TRACK_SQL, SCHEMA_SQL, SELECT_ALL_TRACK_ACOUSTICS_SQL,
+    SELECT_ALL_TRACKS_SQL, SELECT_SMART_SHUFFLE_INDEX_SQL, SELECT_TRACK_BY_CONTENT_HASH_SQL,
+    SELECT_TRACK_BY_ID_SQL, SELECT_TRACK_SYNCED_LYRICS_SQL, SELECT_TRACK_WAVEFORM_SQL,
+    SELECT_TRACKS_NEEDING_ANALYSIS_SQL, SELECT_TRACKS_NEEDING_ONLINE_SQL,
+    UPSERT_SMART_SHUFFLE_INDEX_SQL, UPSERT_TRACK_ACOUSTICS_SQL, UPSERT_TRACK_ANALYSIS_SQL,
     UPSERT_TRACK_ONLINE_STATUS_SQL, UPSERT_TRACK_SYNCED_LYRICS_SQL, UPSERT_TRACK_WAVEFORM_SQL,
 };
 use sqlite_rows::{
@@ -72,7 +73,12 @@ impl From<rusqlite::Error> for StoreError {
 pub struct AnalysisCapabilities {
     pub bpm: bool,
     pub key: bool,
-    pub waveform: bool,
+    /// The single heavy full-decode pass. One decode produces both the
+    /// waveform overview and the perceptual acoustic features (loudness,
+    /// onset density, timbre) Smart Shuffle consumes; the waveform and the
+    /// acoustics are byproducts of the same work, so they share one
+    /// attempt timestamp and one opt-in toggle.
+    pub audio: bool,
 }
 
 impl AnalysisCapabilities {
@@ -82,21 +88,21 @@ impl AnalysisCapabilities {
         Self {
             bpm: false,
             key: false,
-            waveform: false,
+            audio: false,
         }
     }
 
-    /// All three capabilities requested.
+    /// All capabilities requested.
     pub const fn all() -> Self {
         Self {
             bpm: true,
             key: true,
-            waveform: true,
+            audio: true,
         }
     }
 
     pub const fn is_empty(self) -> bool {
-        !(self.bpm || self.key || self.waveform)
+        !(self.bpm || self.key || self.audio)
     }
 }
 
@@ -311,6 +317,11 @@ pub trait LibraryStore: Send + Sync {
     /// when the track has not been waveform-analyzed yet (or analysis
     /// failed).
     fn load_waveform(&self, track_id: TrackId) -> StoreResult<Option<StoredWaveform>>;
+
+    /// Load every track's acoustic features in one sweep, for the
+    /// Smart Shuffle index rebuild. Tracks without an acoustics row
+    /// are simply absent from the result — the scorer masks them.
+    fn load_all_acoustics(&self) -> StoreResult<Vec<(TrackId, AcousticFeatures)>>;
 
     /// Persist time-coded lyrics for a track. Overwrites any previous
     /// entry — synced lyrics are a single-shot store-or-replace, not
@@ -1154,7 +1165,7 @@ impl LibraryStore for SqliteLibraryStore {
 
         upsert_track_analysis(&transaction, track_id, capabilities, context)?;
 
-        if capabilities.waveform && !analysis.waveform_detail.segments.is_empty() {
+        if capabilities.audio && !analysis.waveform_detail.segments.is_empty() {
             transaction
                 .execute(
                     UPSERT_TRACK_WAVEFORM_SQL,
@@ -1187,6 +1198,28 @@ impl LibraryStore for SqliteLibraryStore {
                 .execute(
                     FILL_TRACK_MUSICAL_KEY_IF_NULL_SQL,
                     params![key.short_code(), track_id.get()],
+                )
+                .map_err(StoreError::from)?;
+        }
+
+        if capabilities.audio
+            && let Some(acoustics) = analysis.acoustics
+        {
+            transaction
+                .execute(
+                    UPSERT_TRACK_ACOUSTICS_SQL,
+                    params![
+                        track_id.get(),
+                        f64::from(acoustics.integrated_lufs),
+                        f64::from(acoustics.short_term_lufs_max),
+                        f64::from(acoustics.loudness_range_lu),
+                        f64::from(acoustics.onset_rate_hz),
+                        f64::from(acoustics.low_band_ratio),
+                        f64::from(acoustics.mid_band_ratio),
+                        f64::from(acoustics.high_band_ratio),
+                        f64::from(acoustics.low_band_variation),
+                        f64::from(acoustics.tonalness),
+                    ],
                 )
                 .map_err(StoreError::from)?;
         }
@@ -1224,7 +1257,7 @@ impl LibraryStore for SqliteLibraryStore {
             .query(params![
                 i64::from(capabilities.bpm),
                 i64::from(capabilities.key),
-                i64::from(capabilities.waveform),
+                i64::from(capabilities.audio),
                 i64::from(analyzer_version),
                 limit as i64,
             ])
@@ -1256,7 +1289,7 @@ impl LibraryStore for SqliteLibraryStore {
                 chunk.iter().map(|id| SqlValue::Integer(id.get())).collect();
             params.push(SqlValue::Integer(i64::from(capabilities.bpm)));
             params.push(SqlValue::Integer(i64::from(capabilities.key)));
-            params.push(SqlValue::Integer(i64::from(capabilities.waveform)));
+            params.push(SqlValue::Integer(i64::from(capabilities.audio)));
             params.push(SqlValue::Integer(i64::from(analyzer_version)));
             let mut rows = statement
                 .query(params_from_iter(params.iter()))
@@ -1302,6 +1335,39 @@ impl LibraryStore for SqliteLibraryStore {
                 segments: blob_to_waveform_segments(&detail_bytes),
             },
         }))
+    }
+
+    fn load_all_acoustics(&self) -> StoreResult<Vec<(TrackId, AcousticFeatures)>> {
+        let connection = self.connection_guard()?;
+        let mut statement = connection
+            .prepare(SELECT_ALL_TRACK_ACOUSTICS_SQL)
+            .map_err(StoreError::from)?;
+        let mut rows = statement.query([]).map_err(StoreError::from)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(StoreError::from)? {
+            let raw: i64 = row.get(0).map_err(StoreError::from)?;
+            let Some(track_id) = TrackId::new(raw) else {
+                continue;
+            };
+            let value = |index: usize| -> StoreResult<f32> {
+                Ok(row.get::<_, f64>(index).map_err(StoreError::from)? as f32)
+            };
+            out.push((
+                track_id,
+                AcousticFeatures {
+                    integrated_lufs: value(1)?,
+                    short_term_lufs_max: value(2)?,
+                    loudness_range_lu: value(3)?,
+                    onset_rate_hz: value(4)?,
+                    low_band_ratio: value(5)?,
+                    mid_band_ratio: value(6)?,
+                    high_band_ratio: value(7)?,
+                    low_band_variation: value(8)?,
+                    tonalness: value(9)?,
+                },
+            ));
+        }
+        Ok(out)
     }
 
     fn record_synced_lyrics(
@@ -1503,7 +1569,7 @@ fn build_filter_tracks_needing_analysis_sql(id_count: usize) -> String {
         .join(", ");
     let bpm = id_count + 1;
     let key = id_count + 2;
-    let waveform = id_count + 3;
+    let audio = id_count + 3;
     let version = id_count + 4;
     format!(
         "SELECT t.id FROM tracks t
@@ -1511,9 +1577,9 @@ LEFT JOIN track_analysis ta ON ta.track_id = t.id
 WHERE t.is_missing = 0
   AND t.id IN ({id_placeholders})
   AND (
-        (?{bpm} = 1 AND (ta.bpm_attempted_at_unix      IS NULL OR ta.analyzer_version < ?{version}))
-     OR (?{key} = 1 AND (ta.key_attempted_at_unix      IS NULL OR ta.analyzer_version < ?{version}))
-     OR (?{waveform} = 1 AND (ta.waveform_attempted_at_unix IS NULL OR ta.analyzer_version < ?{version}))
+        (?{bpm} = 1 AND (ta.bpm_attempted_at_unix   IS NULL OR ta.analyzer_version < ?{version}))
+     OR (?{key} = 1 AND (ta.key_attempted_at_unix   IS NULL OR ta.analyzer_version < ?{version}))
+     OR (?{audio} = 1 AND (ta.audio_attempted_at_unix IS NULL OR ta.analyzer_version < ?{version}))
       )"
     )
 }
@@ -1558,7 +1624,7 @@ fn upsert_track_analysis(
 ) -> StoreResult<()> {
     let bpm_at = capabilities.bpm.then_some(context.now_unix);
     let key_at = capabilities.key.then_some(context.now_unix);
-    let waveform_at = capabilities.waveform.then_some(context.now_unix);
+    let audio_at = capabilities.audio.then_some(context.now_unix);
     connection
         .execute(
             UPSERT_TRACK_ANALYSIS_SQL,
@@ -1566,7 +1632,7 @@ fn upsert_track_analysis(
                 track_id.get(),
                 bpm_at,
                 key_at,
-                waveform_at,
+                audio_at,
                 i64::from(context.analyzer_version),
             ],
         )
@@ -2214,6 +2280,7 @@ mod tests {
             beatgrid: None,
             waveform_preview: preview,
             waveform_detail: detail,
+            acoustics: None,
         }
     }
 
@@ -2327,7 +2394,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: false,
                     key: false,
-                    waveform: true,
+                    audio: true,
                 },
                 ctx(1_700_000_000),
             )
@@ -2338,7 +2405,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: false,
                     key: false,
-                    waveform: true,
+                    audio: true,
                 },
                 1,
                 100,
@@ -2382,7 +2449,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: false,
                     key: false,
-                    waveform: true,
+                    audio: true,
                 },
                 ctx(1_700_000_000),
             )
@@ -2399,7 +2466,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: false,
                     key: false,
-                    waveform: true,
+                    audio: true,
                 },
                 1,
             )
@@ -2415,7 +2482,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: true,
                     key: false,
-                    waveform: false,
+                    audio: false,
                 },
                 1,
             )
@@ -2435,7 +2502,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: true,
                     key: true,
-                    waveform: true,
+                    audio: true,
                 },
                 1,
             )
@@ -2450,7 +2517,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: false,
                     key: false,
-                    waveform: true,
+                    audio: true,
                 },
                 2,
             )
@@ -2479,7 +2546,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: true,
                     key: false,
-                    waveform: false,
+                    audio: false,
                 },
                 ctx(1_700_000_000),
             )
@@ -2490,7 +2557,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: true,
                     key: false,
-                    waveform: false,
+                    audio: false,
                 },
                 1,
                 100,
@@ -2507,7 +2574,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: true,
                     key: false,
-                    waveform: false,
+                    audio: false,
                 },
                 2,
                 100,
@@ -2569,7 +2636,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: true,
                     key: false,
-                    waveform: false,
+                    audio: false,
                 },
                 ctx(1_000),
             )
@@ -2583,7 +2650,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: false,
                     key: false,
-                    waveform: true,
+                    audio: true,
                 },
                 ctx(2_000),
             )
@@ -2596,7 +2663,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: true,
                     key: false,
-                    waveform: false,
+                    audio: false,
                 },
                 1,
                 10,
@@ -2607,7 +2674,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: false,
                     key: false,
-                    waveform: true,
+                    audio: true,
                 },
                 1,
                 10,
@@ -2618,7 +2685,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: false,
                     key: true,
-                    waveform: false,
+                    audio: false,
                 },
                 1,
                 10,

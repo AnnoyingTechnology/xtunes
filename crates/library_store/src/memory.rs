@@ -9,10 +9,10 @@ use std::{
 use sustain_domain::TrackAnalysis;
 
 use crate::{
-    AnalysisCapabilities, AnalysisContext, LibraryStore, OnlineCapabilities, OnlineContext,
-    Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, SmartPlaylist, SmartPlaylistId,
-    StoreError, StoreResult, StoredSmartShuffleIndex, StoredSyncedLyrics, StoredWaveform,
-    SyncedLyrics, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
+    AcousticFeatures, AnalysisCapabilities, AnalysisContext, LibraryStore, OnlineCapabilities,
+    OnlineContext, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, SmartPlaylist,
+    SmartPlaylistId, StoreError, StoreResult, StoredSmartShuffleIndex, StoredSyncedLyrics,
+    StoredWaveform, SyncedLyrics, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
 };
 
 #[derive(Debug, Default)]
@@ -29,6 +29,7 @@ pub struct InMemoryLibraryStore {
     synced_lyrics: Mutex<BTreeMap<TrackId, StoredSyncedLyrics>>,
     online_bookkeeping: Mutex<BTreeMap<TrackId, OnlineBookkeeping>>,
     smart_shuffle_index: Mutex<Option<StoredSmartShuffleIndex>>,
+    acoustics: Mutex<BTreeMap<TrackId, AcousticFeatures>>,
 }
 
 /// In-memory mirror of one `track_analysis` row. Mirrors the SQLite
@@ -38,7 +39,7 @@ pub struct InMemoryLibraryStore {
 struct AnalysisBookkeeping {
     bpm_attempted_at_unix: Option<i64>,
     key_attempted_at_unix: Option<i64>,
-    waveform_attempted_at_unix: Option<i64>,
+    audio_attempted_at_unix: Option<i64>,
     analyzer_version: u32,
 }
 
@@ -349,13 +350,13 @@ impl LibraryStore for InMemoryLibraryStore {
         if capabilities.key {
             entry.key_attempted_at_unix = Some(context.now_unix);
         }
-        if capabilities.waveform {
-            entry.waveform_attempted_at_unix = Some(context.now_unix);
+        if capabilities.audio {
+            entry.audio_attempted_at_unix = Some(context.now_unix);
         }
         entry.analyzer_version = context.analyzer_version;
         drop(bookkeeping);
 
-        if capabilities.waveform && !analysis.waveform_detail.segments.is_empty() {
+        if capabilities.audio && !analysis.waveform_detail.segments.is_empty() {
             self.waveforms
                 .lock()
                 .map_err(|_| StoreError::StoreUnavailable)?
@@ -366,6 +367,15 @@ impl LibraryStore for InMemoryLibraryStore {
                         detail: analysis.waveform_detail.clone(),
                     },
                 );
+        }
+
+        if capabilities.audio
+            && let Some(acoustics) = analysis.acoustics
+        {
+            self.acoustics
+                .lock()
+                .map_err(|_| StoreError::StoreUnavailable)?
+                .insert(track_id, acoustics);
         }
 
         // Fill tracks.bpm / metadata.key only when currently empty —
@@ -408,8 +418,8 @@ impl LibraryStore for InMemoryLibraryStore {
         if capabilities.key {
             entry.key_attempted_at_unix = Some(context.now_unix);
         }
-        if capabilities.waveform {
-            entry.waveform_attempted_at_unix = Some(context.now_unix);
+        if capabilities.audio {
+            entry.audio_attempted_at_unix = Some(context.now_unix);
         }
         entry.analyzer_version = context.analyzer_version;
         Ok(())
@@ -444,10 +454,10 @@ impl LibraryStore for InMemoryLibraryStore {
             let needs_key = capabilities.key
                 && (book.key_attempted_at_unix.is_none()
                     || book.analyzer_version < analyzer_version);
-            let needs_waveform = capabilities.waveform
-                && (book.waveform_attempted_at_unix.is_none()
+            let needs_audio = capabilities.audio
+                && (book.audio_attempted_at_unix.is_none()
                     || book.analyzer_version < analyzer_version);
-            if needs_bpm || needs_key || needs_waveform {
+            if needs_bpm || needs_key || needs_audio {
                 out.push(*track_id);
             }
         }
@@ -483,14 +493,24 @@ impl LibraryStore for InMemoryLibraryStore {
             let needs_key = capabilities.key
                 && (book.key_attempted_at_unix.is_none()
                     || book.analyzer_version < analyzer_version);
-            let needs_waveform = capabilities.waveform
-                && (book.waveform_attempted_at_unix.is_none()
+            let needs_audio = capabilities.audio
+                && (book.audio_attempted_at_unix.is_none()
                     || book.analyzer_version < analyzer_version);
-            if needs_bpm || needs_key || needs_waveform {
+            if needs_bpm || needs_key || needs_audio {
                 out.push(*track_id);
             }
         }
         Ok(out)
+    }
+
+    fn load_all_acoustics(&self) -> StoreResult<Vec<(TrackId, AcousticFeatures)>> {
+        Ok(self
+            .acoustics
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .iter()
+            .map(|(id, features)| (*id, *features))
+            .collect())
     }
 
     fn load_waveform(&self, track_id: TrackId) -> StoreResult<Option<StoredWaveform>> {

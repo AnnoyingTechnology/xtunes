@@ -51,8 +51,8 @@
 //!    `AnalysisScheduler::request_explicit_run` for per-playlist
 //!    user-initiated runs (the right-click menu items). Each entry
 //!    carries its own capability mask, independent of the global
-//!    settings, so a user can ask for waveform analysis on a single
-//!    playlist while keeping waveform globally off.
+//!    settings, so a user can ask for audio analysis on a single
+//!    playlist while keeping audio analysis globally off.
 //!
 //! The explicit queue is drained first on every refill, then any
 //! remaining buffer slack is filled from the background query. Items
@@ -94,8 +94,8 @@ const BATCH_SIZE: usize = 16;
 /// The DSP function the worker calls per track. Production composes a
 /// [`sustain_analysis::Analyzer`] and only calls the band methods for
 /// capabilities that are currently active, so a track scheduled with
-/// `bpm: true, key: false, waveform: false` does **not** pay for the
-/// chroma extraction or full-track waveform decode. Tests substitute
+/// `bpm: true, key: false, audio: false` does **not** pay for the
+/// chroma extraction or full-track decode. Tests substitute
 /// a closure that returns canned `TrackAnalysis` values and may
 /// ignore the capability mask.
 pub type AnalyzerFn = Arc<
@@ -111,7 +111,7 @@ pub type AnalyzerFn = Arc<
 pub type ProgressSink = Arc<dyn Fn(SchedulerProgress) + Send + Sync>;
 
 /// Sink invoked once per track after a successful `record_analysis`
-/// landed BPM/key/waveform data into the store. The runtime wraps
+/// landed BPM/key/audio data into the store. The runtime wraps
 /// this in an `async_channel` send so the UI shell refreshes the
 /// matching row on the main loop. Stays a no-op when no sink is
 /// installed (tests, headless deployments).
@@ -230,8 +230,8 @@ impl AnalysisScheduler {
     /// Enqueue a user-initiated batch of tracks for analysis with the
     /// given capability mask. The batch is processed ahead of the
     /// background sweep; capabilities here are independent of the
-    /// global `AnalysisSettings`, so the caller can request waveform
-    /// analysis on a single playlist while the global waveform toggle
+    /// global `AnalysisSettings`, so the caller can request audio
+    /// analysis on a single playlist while the global audio toggle
     /// is off.
     ///
     /// Duplicate `TrackId`s already in flight or already queued (either
@@ -1004,7 +1004,7 @@ fn capabilities_from(settings: &AnalysisSettings) -> AnalysisCapabilities {
     AnalysisCapabilities {
         bpm: settings.bpm,
         key: settings.key,
-        waveform: settings.waveform,
+        audio: settings.audio,
     }
 }
 
@@ -1099,6 +1099,7 @@ mod tests {
                     segment_duration_ms: 6.67,
                     segments: vec![WaveformSegment::silent(); 512],
                 },
+                acoustics: None,
             })
         })
     }
@@ -1144,7 +1145,7 @@ mod tests {
     }
 
     fn capability_count(capabilities: AnalysisCapabilities) -> u32 {
-        u32::from(capabilities.bpm) + u32::from(capabilities.key) + u32::from(capabilities.waveform)
+        u32::from(capabilities.bpm) + u32::from(capabilities.key) + u32::from(capabilities.audio)
     }
 
     fn deterministic_config(
@@ -1189,7 +1190,7 @@ mod tests {
             AnalysisSettings {
                 bpm: true,
                 key: true,
-                waveform: true,
+                audio: true,
             },
             Some(library_root),
         ));
@@ -1233,7 +1234,7 @@ mod tests {
             AnalysisSettings {
                 bpm: true,
                 key: false,
-                waveform: false,
+                audio: false,
             },
             Some(library_root),
         ));
@@ -1256,7 +1257,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: true,
                     key: false,
-                    waveform: false,
+                    audio: false,
                 },
                 1,
                 10,
@@ -1334,12 +1335,12 @@ mod tests {
             .expect("initial progress");
         assert!(matches!(initial, SchedulerProgress::Idle { .. }));
 
-        // Flip waveform on; the supervisor must wake, process, and
+        // Flip audio on; the supervisor must wake, process, and
         // emit a Tick.
         scheduler.update_settings(AnalysisSettings {
             bpm: false,
             key: false,
-            waveform: true,
+            audio: true,
         });
 
         let tick = wait_for(&rx, Duration::from_secs(2), |progress| {
@@ -1389,13 +1390,13 @@ mod tests {
             AnalysisSettings {
                 bpm: false,
                 key: false,
-                waveform: true,
+                audio: true,
             },
             Some(library_root),
         ));
 
         // Let a couple of ticks land — proves the scheduler is
-        // genuinely analyzing — then toggle waveform off.
+        // genuinely analyzing — then toggle audio off.
         let _first_tick = wait_for(
             &rx,
             Duration::from_secs(2),
@@ -1416,7 +1417,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: false,
                     key: false,
-                    waveform: true,
+                    audio: true,
                 },
                 1,
                 100,
@@ -1429,7 +1430,7 @@ mod tests {
                 AnalysisCapabilities {
                     bpm: false,
                     key: false,
-                    waveform: true,
+                    audio: true,
                 },
                 1,
                 100,
@@ -1494,7 +1495,7 @@ mod tests {
             initial_settings: AnalysisSettings {
                 bpm: true,
                 key: true,
-                waveform: true,
+                audio: true,
             },
             initial_resource_usage: BackgroundResourceUsage::Innocuous,
             library_path: Some(library_root),
@@ -1534,7 +1535,7 @@ mod tests {
             AnalysisSettings {
                 bpm: true,
                 key: true,
-                waveform: true,
+                audio: true,
             },
             Some(library_root),
         ));
@@ -1605,7 +1606,7 @@ mod tests {
             AnalysisSettings {
                 bpm: true,
                 key: false,
-                waveform: false,
+                audio: false,
             },
             Some(library_root),
         ));
@@ -1621,10 +1622,7 @@ mod tests {
             .expect("analyzer was called");
         assert!(seen.bpm, "bpm must be set");
         assert!(!seen.key, "key must be cleared — user toggled it off");
-        assert!(
-            !seen.waveform,
-            "waveform must be cleared — user toggled it off"
-        );
+        assert!(!seen.audio, "audio must be cleared — user toggled it off");
 
         scheduler.shutdown();
     }
@@ -1686,7 +1684,7 @@ mod tests {
             AnalysisSettings {
                 bpm: true,
                 key: true,
-                waveform: true,
+                audio: true,
             },
             Some(library_root),
         ));
@@ -1739,7 +1737,7 @@ mod tests {
             capability_count(AnalysisCapabilities {
                 bpm: true,
                 key: true,
-                waveform: false
+                audio: false
             }),
             2
         );
@@ -1750,8 +1748,8 @@ mod tests {
     #[test]
     fn explicit_run_processes_tracks_with_global_settings_off() {
         // The per-playlist right-click menu lets the user run, say,
-        // waveform analysis on a single playlist while the global
-        // waveform toggle stays off. The scheduler must accept and
+        // audio analysis on a single playlist while the global
+        // audio toggle stays off. The scheduler must accept and
         // process the explicit batch even though
         // `tracks_needing_analysis` would return nothing for the
         // empty settings mask.
@@ -1787,7 +1785,7 @@ mod tests {
             AnalysisSettings {
                 bpm: false,
                 key: false,
-                waveform: false,
+                audio: false,
             },
             Some(library_root),
         ));
@@ -1800,7 +1798,7 @@ mod tests {
             AnalysisCapabilities {
                 bpm: false,
                 key: false,
-                waveform: true,
+                audio: true,
             },
         );
 
@@ -1813,7 +1811,7 @@ mod tests {
         for caps in seen {
             assert!(!caps.bpm, "explicit caps must control the mask");
             assert!(!caps.key);
-            assert!(caps.waveform);
+            assert!(caps.audio);
         }
 
         scheduler.shutdown();
@@ -1881,7 +1879,7 @@ mod tests {
             AnalysisSettings {
                 bpm: true,
                 key: false,
-                waveform: false,
+                audio: false,
             },
             Some(library_root),
         ));
@@ -1894,7 +1892,7 @@ mod tests {
             AnalysisCapabilities {
                 bpm: false,
                 key: true,
-                waveform: false,
+                audio: false,
             },
         );
 

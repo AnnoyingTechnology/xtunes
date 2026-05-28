@@ -104,6 +104,21 @@ const SAME_ARTIST_STREAK_CAP: u32 = 6;
 /// goal. If the listener wanted the album, they would play the album.
 const SAME_ALBUM_PENALTY: f32 = 0.10;
 
+/// Asymmetric loudness guard, ascent half (§7): a candidate whose
+/// short-term loudness *peak* sits more than this many LUFS above the
+/// seed's is excluded outright — going from a quiet master into a
+/// brickwalled one *startles*, and no genre/tempo match should rescue
+/// it (a guard, not a weight, so the Exploration slider cannot override
+/// it). Keyed off short-term max, not integrated LUFS, because the
+/// jarring boundary is the loud peak, not the whole-track average.
+const LOUDNESS_GUARD_ASCENT_LUFS: f32 = 8.0;
+
+/// Asymmetric loudness guard, descent half (§7): going *down* in
+/// loudness is a natural breakdown the ear forgives, so the quiet
+/// direction is tolerated far further than the loud one before the
+/// transition is excluded.
+const LOUDNESS_GUARD_DESCENT_LUFS: f32 = 14.0;
+
 /// Hard cap on how many top candidates the debug logger prints.
 const DEBUG_TOP_K: usize = 6;
 
@@ -186,8 +201,11 @@ pub fn pick_next_track(
     context: PickContext<'_>,
 ) -> Option<(PickedTrack, Option<PickDebug>)> {
     // Step 1 — eligibility guards. The seed cannot follow itself; the
-    // runtime has already dropped unavailable files. (The loudness
-    // guard, §7, joins here once acoustic features are extracted.)
+    // runtime has already dropped unavailable files; and the asymmetric
+    // loudness guard (§7) prunes catastrophic level jumps *before* the
+    // pool is formed, so no Exploration setting can rescue them. The
+    // guard masks gracefully — a candidate (or seed) without acoustics
+    // is never excluded, only un-guarded.
     let played_ids: HashSet<TrackId> = context.played_history.iter().map(|t| t.id).collect();
     let streak = same_artist_streak(context.seed, context.played_history);
 
@@ -195,6 +213,7 @@ pub fn pick_next_track(
         .candidates
         .iter()
         .filter(|cand| cand.id != context.seed.id)
+        .filter(|cand| passes_loudness_guard(index, context.seed, cand))
         .map(|cand| score_candidate(index, &context, cand, &played_ids, &streak))
         .collect();
 
@@ -411,6 +430,23 @@ fn same_album_penalty(seed: &Track, cand: &Track) -> f32 {
         }
         _ => 0.0,
     }
+}
+
+/// The asymmetric loudness guard (§7): may `cand` follow `seed` at all?
+/// Compares the two tracks' short-term loudness *peaks* — the boundary
+/// the ear actually hits — and excludes a jump that is too loud upward
+/// (the startle case) or implausibly far downward. Degrades gracefully:
+/// with no index, or when either track lacks acoustics, the guard
+/// cannot evaluate and so never excludes (a hole is not a signal, §5).
+fn passes_loudness_guard(index: Option<&SmartShuffleIndex>, seed: &Track, cand: &Track) -> bool {
+    let Some(index) = index else {
+        return true;
+    };
+    let (Some(seed_a), Some(cand_a)) = (index.acoustics(seed.id), index.acoustics(cand.id)) else {
+        return true;
+    };
+    let delta = cand_a.short_term_lufs_max - seed_a.short_term_lufs_max;
+    (-LOUDNESS_GUARD_DESCENT_LUFS..=LOUDNESS_GUARD_ASCENT_LUFS).contains(&delta)
 }
 
 /// Softmax-sample one candidate from the pool, returning its index and
