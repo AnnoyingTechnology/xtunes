@@ -3,7 +3,7 @@ name = "sustain-app"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Music library and player for Linux"
+description = "Music library and player"
 license.workspace = true
 publish.workspace = true
 homepage = "https://github.com/open-sustain/sustain"
@@ -33,6 +33,34 @@ maintainer = "Sustain contributors <https://github.com/open-sustain/sustain>"
 section = "sound"
 priority = "optional"
 depends = "$auto, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad"
+extended-description = """
+Sustain is a Linux desktop music player in the lineage of 2010s iTunes.
+The product target is the dense, predictable library workflow of that
+era: a fast table over your local files, with playlists, smart
+playlists, ratings, listening statistics, instant search, and optional
+library management.
+
+Built in Rust against GTK4 and GStreamer; no web wrapper, no Electron.
+Optimised for a 10,000+ track library: instant search, smooth scrolling,
+fast cold start.
+
+Library views:
+ * Music — dense, keyboard-friendly track table
+ * Albums — full-width album-cover grid, plays album-scoped on click
+ * Playlists — per-playlist track tables in a collapsible sidebar
+
+Key features:
+ * Smart playlists and playlist folders, with tempo- and harmony-aware
+   rules (BPM, Music Key)
+ * 5-star ratings, play count, skip count, last played, last skipped
+ * Up Next queue (Play Next, Add to Queue)
+ * Background BPM / key / waveform analysis with paced resource use
+ * Online artwork, tag, and lyrics fetching via MusicBrainz, Cover Art
+   Archive, AcoustID, and LRClib
+ * Native light and dark themes with the system accent color
+ * Two library modes: leave files in place, or keep the library
+   organised on disk
+"""
 assets = [
     ["target/release/sustain", "usr/bin/", "755"],
     ["../../data/io.github.open_sustain.sustain.desktop", "usr/share/applications/", "644"],
