@@ -200,7 +200,14 @@ jobs:
 
       - name: Install cargo-sources generator dependencies
         run: |
-          dnf install -y python3-pip python3-aiohttp python3-pyyaml python3-toml
+          # The image is the Freedesktop SDK 25.08 Flatpak runtime, so
+          # there is no `dnf` or `apt-get` — only `pip`. The runtime
+          # already bundles aiohttp and PyYAML, but install all three
+          # deps explicitly so this step doesn't silently break if the
+          # image trims its pre-installed Python set later.
+          # `--break-system-packages` opts past PEP 668 in the ephemeral
+          # CI container, which is fine because nothing persists.
+          pip install --break-system-packages aiohttp pyyaml toml
 
       - name: Fetch flatpak-cargo-generator
         run: |
