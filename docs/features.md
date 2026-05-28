@@ -270,6 +270,54 @@ don't collide.
 
 ---
 
+## Audio analysis
+
+Sustain derives three signals from each track's audio content — BPM,
+musical key, and a waveform — and stores them alongside the rest of
+the track's data in SQLite. Analysis is paced and runs out of band
+of playback; freshly imported tracks are picked up on the next sweep
+without any user prompt.
+
+### BPM detection — *Sustain-native*
+A tempogram estimator over the track's beat envelope, octave-normalized
+into the configured `[min_bpm, max_bpm]` band (default 70–170 BPM). The
+estimate fills `tracks.bpm` only when SQLite has no value for that
+field — analysis supplies missing data, it never overrides a value
+imported from a file tag or set by the user. The BPM column ships
+visible by default and feeds the `BPM` smart-playlist field for
+tempo-aware rules.
+
+### Musical key detection — *Sustain-native*
+Estimates the song's tonal centre via chroma analysis and stores one
+of the 24 major/minor labels in `tracks.musical_key`, again only when
+SQLite has no value for that field. The Music Key column ships hidden
+by default; surface it through the column selector. The same field is
+exposed to smart-playlist rules for harmony-aware sets.
+
+### Waveform analysis — *Sustain-native*
+A single DSP pass produces both a coarse preview waveform and a
+detailed colour waveform with beatgrid, sharing decode work. The
+preview backs the playback seek bar; the detail data is held in
+SQLite for future DJ-export targets.
+
+### Background analysis scheduler — *Sustain-native*
+The Analysis tab in Preferences exposes three independent toggles —
+BPM / Key / Waveform — that gate which capabilities the background
+sweep requests. With any toggle on, a paced multi-worker pool walks
+`tracks_needing_analysis` and runs only the missing capabilities per
+track; tracks whose value is already populated (whether from prior
+analysis or from a file tag at import) are skipped. Worker count and
+CPU/IO priority follow the Background resource usage slider in the
+same tab.
+
+The same pool also drains an explicit queue populated by the
+per-playlist and per-track **Analyze** submenus, so a one-off
+capability can run on a chosen set even with the global toggle off.
+Progress and final outcome surface through the status-bar
+notification lane.
+
+---
+
 ## Track metadata
 
 ### Get Info dialog — *iso-iTunes*
@@ -300,12 +348,32 @@ are **never** written to file tags. They live exclusively in SQLite.
 Shared frames like ID3 POPM are written carefully so existing
 `play_counter` data belonging to other applications is preserved.
 
-### Remote metadata services — *iTunes-adjacent*
-The Get Info Artwork tab can fetch cover art from MusicBrainz +
-Cover Art Archive. Sparse-tag tracks can be identified via AcoustID
-acoustic fingerprinting. Remote-fetched fields are written only when
-the local field is empty — Sustain never overwrites existing tags from
-a network source.
+### Background metadata retrieval — *iTunes-adjacent*
+The Online tab in Preferences exposes three independent toggles —
+Artwork / Tags / Lyrics — that gate which capabilities a paced
+background worker requests for tracks missing the matching data.
+Providers:
+
+- **Artwork** — MusicBrainz + Cover Art Archive lookup, falling back
+  to AcoustID acoustic fingerprinting when the embedded tag set is
+  too sparse for a confident text match.
+- **Tags** — MusicBrainz fills missing fields (title, artist, album,
+  album artist, year, track number, genre…) from a matched release.
+- **Lyrics** — LRClib lookup, preferring synced LRC when available
+  and falling back to plain text.
+
+The worker is intentionally conservative: capabilities are
+missing-only (a track that already has artwork, a populated field,
+or stored lyrics is not contacted), every attempt is stamped so
+the next sweep does not re-fetch the same track, and per-host rate
+limits hold network use polite even on a fresh library.
+
+Each capability also has a manual entry point. The Get Info Artwork
+tab can trigger an immediate lookup, and the per-playlist and
+per-track **Retrieve** submenus run the chosen capability against a
+target set independent of the global toggles. Manual triggers also
+respect the "missing-only" rule and never overwrite an existing
+value.
 
 ### Artwork cache — *Sustain-native*
 Embedded artwork is decoded once and cached in SQLite. Now Playing,

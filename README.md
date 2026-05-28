@@ -29,7 +29,7 @@ This player is not pixel-perfect iTunes taxidermy for a few reasons :
 - features for music lovers have been added.
 
 This player is not designed by commity. 
-It's autoritarian, as I believe was the case for most good Apple products.
+It's autoritarian*, as I believe was the case for most good Apple products.
 
 The interface respects both light and dark modes natively. It leverages GNOME's core features to strike the right balance of bespoke visual components without abusing GTK or fighting the desktop environment. For instance, it uses your native system icons and accent colors out of the box.
 
@@ -43,6 +43,8 @@ for normal local Linux filesystems such as ext4, XFS, Btrfs, and ZFS, but it can
 fail on filesystems or mounts that do not support hard links, such as some SMB,
 FUSE, FAT/exFAT, or restricted network shares. In those cases Sustain fails the
 organization step rather than falling back to copy/delete.
+
+`*` _If you have ideas I'm open to discussion. A consolidated Sustain is probably preferable over a fork with marginal changes._
 
 ## Stack
 
@@ -62,21 +64,17 @@ Implemented:
 - Sidebar-driven navigation — LIBRARY (Music, Albums) and PLAYLISTS — with a collapsible left column (*Sustain-native*)
 - Dense, keyboard-friendly Music and playlist track tables, full-width album grid (*iso-iTunes*)
 - Playlists, smart playlists, and playlist folders (*iso-iTunes*)
-- Get Info multi-tab metadata editor with tag mirroring to ID3/Vorbis/MP4 (*iso-iTunes*)
 - 5-star ratings, play count, skip count, last played, last skipped (*iso-iTunes*)
 - Up Next queue with `Play Next` and `Add to Queue` (*iso-iTunes*)
 - Real-time search, sortable and customizable columns (*iso-iTunes*)
-- Remote artwork and metadata fetching via MusicBrainz, Cover Art Archive, and AcoustID (*iTunes-adjacent*)
-- MPRIS / D-Bus / media-key integration (*Sustain-native*)
+- Background BPM and musical-key detection, with a tempo/harmony-aware smart-playlist rule engine (*Sustain-native*)
+- Background backfill of artwork, ID3 tags, and lyrics via MusicBrainz, Cover Art Archive, AcoustID, and LRClib (*iTunes-adjacent*)
 - Native light / dark theme and system accent color (*Sustain-native*)
-- Single-instance enforcement per library database (*iso-iTunes*)
 
 ## Roadmap
 
-- BPM and Key detection
 - "Smart shuffle" powered by a local machine learning model
 - Duplicates consolidation (preserve the best audio version, aggregate tags)
-- Artwork and ID3 backfill
 - Sync to Android / Export to [XDJ](https://github.com/AnnoyingTechnology/rhythmbox-to-pioneer-xdj-exporter)
 
 ## Install
