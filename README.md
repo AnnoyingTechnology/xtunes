@@ -7,6 +7,12 @@
 
 ![Sustain interface screenshot light](.github/assets/screenshot-light.png)
 
+![Sustain interface screenshot settings library](.github/assets/settings-library.png)
+
+![Sustain interface screenshot settings analysis](.github/assets/settings-analysis.png)
+
+![Sustain interface screenshot settings online](.github/assets/settings-online.png)
+
 Sustain (`open-sustain/sustain`) is a Linux music player heavily inspired by old iTunes builds.
 
 > I was an Apple fanboy during the iTunes golden era (2005-2015).
