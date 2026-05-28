@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
 
 use sustain_domain::{
@@ -272,38 +272,48 @@ impl ApplicationRuntime {
     /// when the env var is set.
     fn pick_smart_shuffle_next(&mut self) -> Option<TrackId> {
         let context = self.playback_queue.lazy_pick_context()?;
-        let seed = self
+
+        // Resolve pool / history ids to live `&Track`s through a map
+        // built once per transition. The candidate pool is the whole
+        // library, so a linear `find` per id would be quadratic at the
+        // 10 000-track scale the performance budget targets.
+        let by_id: HashMap<TrackId, &Track> = self
             .library_tracks
             .iter()
-            .find(|track| track.id == context.seed_track_id)?;
-        // Pre-resolve candidate `&Track` references. Filter out
-        // missing files inline so the picker never proposes a
-        // track we cannot actually play.
+            .map(|track| (track.id, track))
+            .collect();
+
+        let seed = by_id.get(&context.seed_track_id).copied()?;
+        // Candidate pool: every library track, minus missing files so
+        // the picker never proposes something we cannot play. The
+        // picker itself drops the seed and applies the guards.
         let candidate_refs: Vec<&Track> = context
             .candidate_pool
             .iter()
-            .filter_map(|track_id| {
-                self.library_tracks
-                    .iter()
-                    .find(|track| track.id == *track_id)
-            })
+            .filter_map(|track_id| by_id.get(track_id).copied())
             .filter(|track| !track.location.is_missing())
+            .collect();
+        // Played history, most-recent-last, resolved to tracks for the
+        // anti-repeat set and the same-artist streak.
+        let history_refs: Vec<&Track> = context
+            .played_history
+            .iter()
+            .filter_map(|track_id| by_id.get(track_id).copied())
             .collect();
 
         let pick_context = PickContext {
             seed,
             candidates: &candidate_refs,
-            played_history: context.played_history,
+            played_history: &history_refs,
             entropy: self.settings.playback.smart_shuffle_entropy,
             now: self.clock.now(),
         };
-        let (picked, debug) = pick_next_track(self.smart_shuffle_model.as_ref(), pick_context)?;
+        let (picked, debug) = pick_next_track(self.smart_shuffle_index.as_ref(), pick_context)?;
 
         if let Some(debug) = debug {
             let label = |track_id: TrackId| -> String {
-                self.library_tracks
-                    .iter()
-                    .find(|track| track.id == track_id)
+                by_id
+                    .get(&track_id)
                     .and_then(|track| track.metadata.title.clone())
                     .unwrap_or_else(|| format!("#{}", track_id.get()))
             };

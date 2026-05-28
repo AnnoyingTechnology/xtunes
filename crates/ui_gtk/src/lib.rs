@@ -110,6 +110,8 @@ pub(crate) type AnalysisProgressReceiver =
 pub(crate) type OnlineProgressReceiver =
     async_channel::Receiver<sustain_app_runtime::OnlineProgress>;
 pub(crate) type TrackUpdatedReceiver = async_channel::Receiver<sustain_app_runtime::TrackId>;
+pub(crate) type SmartShuffleRebuildResultReceiver =
+    async_channel::Receiver<sustain_app_runtime::SmartShuffleRebuildResult>;
 
 pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     let trun = std::time::Instant::now();
@@ -174,6 +176,14 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     let (track_updated_tx, track_updated_rx) =
         async_channel::unbounded::<sustain_app_runtime::TrackId>();
     runtime.set_track_updated_sink(track_updated_tx);
+
+    // The Smart Shuffle scheduler owns its result channel internally
+    // (it pre-allocates the (sender, receiver) pair on construction);
+    // grab a receiver clone here before the runtime is wrapped in the
+    // shared cell, mirroring how the other channels surface to the
+    // main loop. Without a drain, completed rebuilds would queue
+    // forever in the channel and the index would never be adopted.
+    let smart_shuffle_rebuild_result_rx = runtime.smart_shuffle_rebuild_result_receiver();
 
     // Start the paced background analysis scheduler. The progress sink
     // is installed before `start_analysis_scheduler` so the worker's
@@ -241,6 +251,9 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
         Rc::new(RefCell::new(Some(online_progress_rx)));
     let track_updated_rx_holder: Rc<RefCell<Option<TrackUpdatedReceiver>>> =
         Rc::new(RefCell::new(Some(track_updated_rx)));
+    let smart_shuffle_rebuild_result_rx_holder: Rc<
+        RefCell<Option<SmartShuffleRebuildResultReceiver>>,
+    > = Rc::new(RefCell::new(Some(smart_shuffle_rebuild_result_rx)));
 
     tlog!("mpris done; about to connect_activate");
     app.connect_activate({
@@ -257,6 +270,8 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
             let analysis_progress_rx = analysis_progress_rx_holder.borrow_mut().take();
             let online_progress_rx = online_progress_rx_holder.borrow_mut().take();
             let track_updated_rx = track_updated_rx_holder.borrow_mut().take();
+            let smart_shuffle_rebuild_result_rx =
+                smart_shuffle_rebuild_result_rx_holder.borrow_mut().take();
             let main_window = build_main_window(
                 app,
                 runtime.clone(),
@@ -268,6 +283,7 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
                     analysis_progress_rx,
                     online_progress_rx,
                     track_updated_rx,
+                    smart_shuffle_rebuild_result_rx,
                 },
             );
             eprintln!(

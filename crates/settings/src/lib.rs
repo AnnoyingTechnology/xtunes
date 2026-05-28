@@ -16,8 +16,8 @@ pub use sustain_domain::{
     AnalysisSettings, BackgroundJobsSettings, BackgroundResourceUsage,
     DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings, OnlineSettings,
     PlaybackSettings, PlaylistFolderId, PlaylistId, PlaylistItem, ShuffleMode, SmartPlaylistId,
-    SmartShuffleEntropy, SmartShuffleTrainingInterval, UiSettings, UiSidebarSelection,
-    UserSettings, VolumePercent,
+    SmartShuffleEntropy, SmartShuffleRebuildInterval, UiSettings, UiSidebarSelection, UserSettings,
+    VolumePercent,
 };
 
 pub type SettingsResult<T> = Result<T, SettingsError>;
@@ -152,7 +152,7 @@ struct PlaybackSettingsDocument {
     #[serde(default)]
     smart_shuffle_entropy: SmartShuffleEntropyDocument,
     #[serde(default)]
-    smart_shuffle_training_interval: SmartShuffleTrainingIntervalDocument,
+    smart_shuffle_rebuild_interval: SmartShuffleRebuildIntervalDocument,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -211,7 +211,7 @@ impl SmartShuffleEntropyDocument {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum SmartShuffleTrainingIntervalDocument {
+enum SmartShuffleRebuildIntervalDocument {
     Off,
     Hourly,
     #[default]
@@ -219,22 +219,22 @@ enum SmartShuffleTrainingIntervalDocument {
     Weekly,
 }
 
-impl SmartShuffleTrainingIntervalDocument {
-    fn from_domain(value: SmartShuffleTrainingInterval) -> Self {
+impl SmartShuffleRebuildIntervalDocument {
+    fn from_domain(value: SmartShuffleRebuildInterval) -> Self {
         match value {
-            SmartShuffleTrainingInterval::Off => Self::Off,
-            SmartShuffleTrainingInterval::Hourly => Self::Hourly,
-            SmartShuffleTrainingInterval::Daily => Self::Daily,
-            SmartShuffleTrainingInterval::Weekly => Self::Weekly,
+            SmartShuffleRebuildInterval::Off => Self::Off,
+            SmartShuffleRebuildInterval::Hourly => Self::Hourly,
+            SmartShuffleRebuildInterval::Daily => Self::Daily,
+            SmartShuffleRebuildInterval::Weekly => Self::Weekly,
         }
     }
 
-    fn into_domain(self) -> SmartShuffleTrainingInterval {
+    fn into_domain(self) -> SmartShuffleRebuildInterval {
         match self {
-            Self::Off => SmartShuffleTrainingInterval::Off,
-            Self::Hourly => SmartShuffleTrainingInterval::Hourly,
-            Self::Daily => SmartShuffleTrainingInterval::Daily,
-            Self::Weekly => SmartShuffleTrainingInterval::Weekly,
+            Self::Off => SmartShuffleRebuildInterval::Off,
+            Self::Hourly => SmartShuffleRebuildInterval::Hourly,
+            Self::Daily => SmartShuffleRebuildInterval::Daily,
+            Self::Weekly => SmartShuffleRebuildInterval::Weekly,
         }
     }
 }
@@ -292,7 +292,7 @@ impl Default for PlaybackSettingsDocument {
             volume_percent: DEFAULT_PLAYBACK_VOLUME_PERCENT,
             shuffle_mode: ShuffleModeDocument::default(),
             smart_shuffle_entropy: SmartShuffleEntropyDocument::default(),
-            smart_shuffle_training_interval: SmartShuffleTrainingIntervalDocument::default(),
+            smart_shuffle_rebuild_interval: SmartShuffleRebuildIntervalDocument::default(),
         }
     }
 }
@@ -339,8 +339,8 @@ impl SettingsDocument {
                 smart_shuffle_entropy: SmartShuffleEntropyDocument::from_domain(
                     settings.playback.smart_shuffle_entropy,
                 ),
-                smart_shuffle_training_interval: SmartShuffleTrainingIntervalDocument::from_domain(
-                    settings.playback.smart_shuffle_training_interval,
+                smart_shuffle_rebuild_interval: SmartShuffleRebuildIntervalDocument::from_domain(
+                    settings.playback.smart_shuffle_rebuild_interval,
                 ),
             },
             ui: UiSettingsDocument {
@@ -379,9 +379,9 @@ impl SettingsDocument {
                 volume: VolumePercent::from_clamped(self.playback.volume_percent),
                 shuffle_mode: self.playback.shuffle_mode.into_domain(),
                 smart_shuffle_entropy: self.playback.smart_shuffle_entropy.into_domain(),
-                smart_shuffle_training_interval: self
+                smart_shuffle_rebuild_interval: self
                     .playback
-                    .smart_shuffle_training_interval
+                    .smart_shuffle_rebuild_interval
                     .into_domain(),
             },
             ui: UiSettings {
@@ -488,7 +488,7 @@ mod tests {
         AnalysisSettings, BackgroundJobsSettings, BackgroundResourceUsage,
         DEFAULT_PLAYBACK_VOLUME_PERCENT, InMemorySettingsStore, LibraryManagementMode,
         OnlineSettings, PlaylistId, PlaylistItem, SettingsStore, ShuffleMode, SmartShuffleEntropy,
-        SmartShuffleTrainingInterval, TomlSettingsStore, UiSettings, UiSidebarSelection,
+        SmartShuffleRebuildInterval, TomlSettingsStore, UiSettings, UiSidebarSelection,
         UserSettings, VolumePercent,
     };
 
@@ -558,7 +558,7 @@ mod tests {
         let mut settings = UserSettings::default();
         settings.playback.shuffle_mode = ShuffleMode::Smart;
         settings.playback.smart_shuffle_entropy = SmartShuffleEntropy::Adventurous;
-        settings.playback.smart_shuffle_training_interval = SmartShuffleTrainingInterval::Weekly;
+        settings.playback.smart_shuffle_rebuild_interval = SmartShuffleRebuildInterval::Weekly;
 
         assert_eq!(store.save_settings(settings.clone()), Ok(()));
         assert_eq!(store.load_settings(), Ok(settings));

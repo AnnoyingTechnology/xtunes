@@ -31,18 +31,20 @@ pub struct PlaybackSettings {
     /// closed the app with Smart shuffle on reopens with it on. The
     /// tri-state enum replaces the old `shuffle_enabled: bool` —
     /// `ShuffleMode::Off` is the silent default, `ShuffleMode::Pure`
-    /// is the legacy Fisher-Yates behaviour, `ShuffleMode::Smart`
-    /// defers next-track choice to the trained engagement model.
+    /// is the Fisher-Yates random walk, `ShuffleMode::Smart` defers
+    /// next-track choice to the perceptual transition picker.
     pub shuffle_mode: ShuffleMode,
-    /// Smart-shuffle entropy slider (focused / balanced /
+    /// Smart-shuffle exploration slider (focused / balanced /
     /// adventurous), exposed in the Shuffle preferences tab.
-    /// Controls the softmax temperature applied to candidate scores;
-    /// has no effect when Pure shuffle is active.
+    /// Controls the candidate pool width and the softmax temperature
+    /// applied to candidate scores; has no effect when Pure shuffle
+    /// is active.
     pub smart_shuffle_entropy: SmartShuffleEntropy,
-    /// Cadence at which the background trainer rebuilds the
-    /// engagement model. `Off` disables automatic retraining; the
-    /// user can still hit "Retrain now" from the preferences tab.
-    pub smart_shuffle_training_interval: SmartShuffleTrainingInterval,
+    /// Cadence at which the background worker rebuilds the Smart
+    /// Shuffle index (genre IDF and, later, normalization
+    /// statistics). `Off` disables automatic rebuilds; the user can
+    /// still trigger one with "Rebuild index" in the preferences tab.
+    pub smart_shuffle_rebuild_interval: SmartShuffleRebuildInterval,
 }
 
 impl Default for PlaybackSettings {
@@ -51,7 +53,7 @@ impl Default for PlaybackSettings {
             volume: VolumePercent::from_clamped(DEFAULT_PLAYBACK_VOLUME_PERCENT),
             shuffle_mode: ShuffleMode::Off,
             smart_shuffle_entropy: SmartShuffleEntropy::default(),
-            smart_shuffle_training_interval: SmartShuffleTrainingInterval::default(),
+            smart_shuffle_rebuild_interval: SmartShuffleRebuildInterval::default(),
         }
     }
 }
@@ -83,12 +85,13 @@ impl SmartShuffleEntropy {
     }
 }
 
-/// How often the smart-shuffle trainer rebuilds the engagement
-/// model in the background. `Off` is intentionally available — the
-/// user can train once via the "Retrain now" button and then leave
-/// the model frozen while iterating on their library.
+/// How often the background worker rebuilds the Smart Shuffle index
+/// (genre IDF and, later, normalization statistics). `Off` is
+/// intentionally available — the user can rebuild once via the
+/// "Rebuild index" button and then leave it frozen while iterating on
+/// their library.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum SmartShuffleTrainingInterval {
+pub enum SmartShuffleRebuildInterval {
     Off,
     Hourly,
     #[default]
@@ -96,9 +99,9 @@ pub enum SmartShuffleTrainingInterval {
     Weekly,
 }
 
-impl SmartShuffleTrainingInterval {
-    /// Number of seconds between automatic retrains, or `None` when
-    /// retraining is disabled.
+impl SmartShuffleRebuildInterval {
+    /// Number of seconds between automatic index rebuilds, or `None`
+    /// when automatic rebuilding is disabled.
     pub const fn interval_secs(self) -> Option<u64> {
         match self {
             Self::Off => None,

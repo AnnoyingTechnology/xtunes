@@ -26,11 +26,11 @@ pub use memory::InMemoryLibraryStore;
 
 use query::{sort_tracks, track_matches_search};
 use schema::{
-    DELETE_SMART_SHUFFLE_MODEL_SQL, DELETE_TRACK_SYNCED_LYRICS_SQL, FILL_TRACK_BPM_IF_NULL_SQL,
+    DELETE_SMART_SHUFFLE_INDEX_SQL, DELETE_TRACK_SYNCED_LYRICS_SQL, FILL_TRACK_BPM_IF_NULL_SQL,
     FILL_TRACK_MUSICAL_KEY_IF_NULL_SQL, SAVE_TRACK_SQL, SCHEMA_SQL, SELECT_ALL_TRACKS_SQL,
-    SELECT_SMART_SHUFFLE_MODEL_SQL, SELECT_TRACK_BY_CONTENT_HASH_SQL, SELECT_TRACK_BY_ID_SQL,
+    SELECT_SMART_SHUFFLE_INDEX_SQL, SELECT_TRACK_BY_CONTENT_HASH_SQL, SELECT_TRACK_BY_ID_SQL,
     SELECT_TRACK_SYNCED_LYRICS_SQL, SELECT_TRACK_WAVEFORM_SQL, SELECT_TRACKS_NEEDING_ANALYSIS_SQL,
-    SELECT_TRACKS_NEEDING_ONLINE_SQL, UPSERT_SMART_SHUFFLE_MODEL_SQL, UPSERT_TRACK_ANALYSIS_SQL,
+    SELECT_TRACKS_NEEDING_ONLINE_SQL, UPSERT_SMART_SHUFFLE_INDEX_SQL, UPSERT_TRACK_ANALYSIS_SQL,
     UPSERT_TRACK_ONLINE_STATUS_SQL, UPSERT_TRACK_SYNCED_LYRICS_SQL, UPSERT_TRACK_WAVEFORM_SQL,
 };
 use sqlite_rows::{
@@ -178,19 +178,17 @@ pub struct StoredSyncedLyrics {
     pub source: String,
 }
 
-/// Persisted Smart Shuffle engagement model — the trainer writes one
-/// of these into the `smart_shuffle_model` table, and the picker
-/// reads it back at runtime. The bookkeeping fields drive the
-/// Preferences "last trained" caption and let the runtime refuse to
-/// load a blob whose feature shape no longer matches the live
-/// extractor without paying the cost of deserialisation first.
+/// Persisted Smart Shuffle index — the background rebuild writes one
+/// of these into the `smart_shuffle_index` table, and the runtime
+/// reads it back at startup. There is no trained model; the blob holds
+/// the prepared, library-dependent state (genre IDF and, later,
+/// normalization statistics) defined by `sustain_smart_shuffle`.
+/// `schema_version` is broken out of the blob so the runtime can
+/// discard a stale-shaped blob without paying to deserialise it first.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StoredSmartShuffleModel {
-    pub model_blob: Vec<u8>,
-    pub feature_schema_version: u32,
-    pub positive_label_count: u32,
-    pub negative_label_count: u32,
-    pub trained_at_unix: i64,
+pub struct StoredSmartShuffleIndex {
+    pub index_blob: Vec<u8>,
+    pub schema_version: u32,
 }
 
 pub trait LibraryStore: Send + Sync {
@@ -371,26 +369,22 @@ pub trait LibraryStore: Send + Sync {
         provider_version: u32,
     ) -> StoreResult<Vec<TrackId>>;
 
-    /// Write (or overwrite) the singleton Smart Shuffle model. The
-    /// blob format is opaque to the store; the trainer crate decides
-    /// on the on-disk shape, and the `feature_schema_version` lets a
-    /// future incompatible change cause the runtime to skip the
-    /// stored row at load time. `positive_label_count` and
-    /// `negative_label_count` summarise the training set so the
-    /// Preferences UI can surface "trained on N positives / M
-    /// negatives" without reading the blob.
-    fn save_smart_shuffle_model(&self, model: &StoredSmartShuffleModel) -> StoreResult<()>;
+    /// Write (or overwrite) the singleton Smart Shuffle index. The
+    /// blob format is opaque to the store; `sustain_smart_shuffle`
+    /// decides its shape, and `schema_version` lets a future
+    /// incompatible change cause the runtime to discard the stored row
+    /// at load time without deserialising it.
+    fn save_smart_shuffle_index(&self, index: &StoredSmartShuffleIndex) -> StoreResult<()>;
 
-    /// Load the Smart Shuffle model, if one has been written.
-    /// Returns `None` when the table is empty (cold start, model has
-    /// never been trained yet).
-    fn load_smart_shuffle_model(&self) -> StoreResult<Option<StoredSmartShuffleModel>>;
+    /// Load the Smart Shuffle index, if one has been written. Returns
+    /// `None` when the table is empty (the index has never been built
+    /// yet).
+    fn load_smart_shuffle_index(&self) -> StoreResult<Option<StoredSmartShuffleIndex>>;
 
-    /// Drop any stored Smart Shuffle model. Used by the "Retrain
-    /// now" flow when the user wants to force a rebuild from
-    /// scratch, and by the runtime when a load discovers a
-    /// feature-schema mismatch.
-    fn clear_smart_shuffle_model(&self) -> StoreResult<()>;
+    /// Drop any stored Smart Shuffle index. Used by the runtime when a
+    /// load discovers a schema mismatch, so the next rebuild starts
+    /// from a clean slate.
+    fn clear_smart_shuffle_index(&self) -> StoreResult<()>;
 
     fn tracks_matching(&self, query: LibraryQuery) -> StoreResult<Vec<Track>> {
         let mut tracks = if let Some(playlist_id) = query.playlist_id {
@@ -1360,64 +1354,42 @@ impl LibraryStore for SqliteLibraryStore {
             .map_err(StoreError::from)
     }
 
-    fn save_smart_shuffle_model(&self, model: &StoredSmartShuffleModel) -> StoreResult<()> {
+    fn save_smart_shuffle_index(&self, index: &StoredSmartShuffleIndex) -> StoreResult<()> {
         let connection = self.connection_guard()?;
         connection
             .execute(
-                UPSERT_SMART_SHUFFLE_MODEL_SQL,
-                params![
-                    model.model_blob,
-                    i64::from(model.feature_schema_version),
-                    i64::from(model.positive_label_count),
-                    i64::from(model.negative_label_count),
-                    model.trained_at_unix,
-                ],
+                UPSERT_SMART_SHUFFLE_INDEX_SQL,
+                params![index.index_blob, i64::from(index.schema_version)],
             )
             .map(|_| ())
             .map_err(StoreError::from)
     }
 
-    fn load_smart_shuffle_model(&self) -> StoreResult<Option<StoredSmartShuffleModel>> {
+    fn load_smart_shuffle_index(&self) -> StoreResult<Option<StoredSmartShuffleIndex>> {
         let connection = self.connection_guard()?;
         let mut statement = connection
-            .prepare(SELECT_SMART_SHUFFLE_MODEL_SQL)
+            .prepare(SELECT_SMART_SHUFFLE_INDEX_SQL)
             .map_err(StoreError::from)?;
         let row = statement
             .query_row([], |row| {
                 let blob: Vec<u8> = row.get(0)?;
-                let feature_schema_version: i64 = row.get(1)?;
-                let positive_label_count: i64 = row.get(2)?;
-                let negative_label_count: i64 = row.get(3)?;
-                let trained_at_unix: i64 = row.get(4)?;
-                Ok((
-                    blob,
-                    feature_schema_version,
-                    positive_label_count,
-                    negative_label_count,
-                    trained_at_unix,
-                ))
+                let schema_version: i64 = row.get(1)?;
+                Ok((blob, schema_version))
             })
             .optional()
             .map_err(StoreError::from)?;
-        Ok(
-            row.map(|(blob, feature_schema, positive, negative, trained_at)| {
-                StoredSmartShuffleModel {
-                    model_blob: blob,
-                    // Schema version is a non-negative integer; widen at
-                    // the boundary so the in-memory model carries a u32.
-                    feature_schema_version: feature_schema.max(0) as u32,
-                    positive_label_count: positive.max(0) as u32,
-                    negative_label_count: negative.max(0) as u32,
-                    trained_at_unix: trained_at,
-                }
-            }),
-        )
+        Ok(row.map(|(blob, schema_version)| StoredSmartShuffleIndex {
+            index_blob: blob,
+            // Schema version is a non-negative integer; widen at the
+            // boundary so the in-memory value carries a u32.
+            schema_version: schema_version.max(0) as u32,
+        }))
     }
 
-    fn clear_smart_shuffle_model(&self) -> StoreResult<()> {
+    fn clear_smart_shuffle_index(&self) -> StoreResult<()> {
         let connection = self.connection_guard()?;
         connection
-            .execute(DELETE_SMART_SHUFFLE_MODEL_SQL, [])
+            .execute(DELETE_SMART_SHUFFLE_INDEX_SQL, [])
             .map(|_| ())
             .map_err(StoreError::from)
     }

@@ -246,9 +246,54 @@ Click or drag on the progress bar to seek. The clickable hit area
 extends above the visual bar so the target isn't a one-pixel hairline.
 
 ### Shuffle and repeat — *iso-iTunes*
-Shuffle and repeat toggle buttons sit in the now-playing tile. Repeat
-cycles through Off → Repeat-One → Repeat-All. State is session-only and
-not persisted across restarts.
+Shuffle and repeat toggle buttons sit in the now-playing tile.
+Shuffle cycles through Off → Pure → Smart (see *Smart Shuffle*
+below) and the chosen mode is persisted across restarts. Repeat
+cycles through Off → Repeat-One → Repeat-All; repeat state is
+session-only and not persisted.
+
+### Smart Shuffle — *Sustain-native*
+A "Smart" third state on the transport's shuffle button chooses each
+next track as a *continuation* of the one playing now, rather than
+jumping at random. It is a sequencer, not a recommender, and it does
+no learning: in a hand-curated library every track is already liked,
+so the only question worth answering is whether one track *follows*
+another well — a largely objective, perceptual judgement.
+
+Each candidate is scored against the currently-playing track by a
+fixed, transparent perceptual metric — a masked weighted sum of
+per-feature similarities: genre (IDF-weighted, so a shared rare genre
+counts for more than a shared ubiquitous one), tempo (log-scaled with
+octave folding, so 90 and 180 BPM match), musical key
+(circle-of-fifths proximity plus mode), release year (era of
+creation), date added (era of discovery), grouping, composer,
+duration, and artist identity. A feature missing on either side is
+masked out rather than guessed, and a coverage term keeps a
+two-feature match from outscoring a ten-feature one. Small
+candidate-side nudges (a gentle rating prior) and penalties
+(recency/fatigue, a same-artist-streak guard, an anti-album-walk-back)
+shape the final score. The surviving candidates form a bounded pool
+and one is softmax-sampled; both the pool width and the temperature
+are driven by the user-facing **Exploration** preset (Focused /
+Balanced / Adventurous). Picks are deterministic given identical
+inputs, so the `SUSTAIN_LOG_SMART_SHUFFLE=1` debug trace — a full
+per-feature decomposition of every pick — is reproducible after the
+fact.
+
+The genre IDF weights are prepared in a small **index** recomputed on
+a background worker thread — milliseconds of work, but genuinely
+library-dependent. The Shuffle preferences tab exposes an **Automatic
+rebuild** cadence (Never / Hourly / Daily / Weekly) plus an explicit
+**Rebuild index** button; the index is persisted alongside the library
+database so it survives restarts. There is no cold-start gate: Smart
+Shuffle works from the first track, degrading gracefully on tracks
+with sparse metadata.
+
+Smart Shuffle only applies to library-wide queues. Single-album or
+single-playlist playback uses Pure shuffle even when Smart is the
+persisted setting, because "what follows this well from the whole
+library" is not a meaningful question inside a closed set the user has
+already chosen.
 
 ### Up Next queue — *iTunes-adjacent*
 A `Play Next` action inserts selected tracks at the head of the queue

@@ -11,7 +11,7 @@ use sustain_domain::TrackAnalysis;
 use crate::{
     AnalysisCapabilities, AnalysisContext, LibraryStore, OnlineCapabilities, OnlineContext,
     Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, SmartPlaylist, SmartPlaylistId,
-    StoreError, StoreResult, StoredSmartShuffleModel, StoredSyncedLyrics, StoredWaveform,
+    StoreError, StoreResult, StoredSmartShuffleIndex, StoredSyncedLyrics, StoredWaveform,
     SyncedLyrics, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
 };
 
@@ -28,7 +28,7 @@ pub struct InMemoryLibraryStore {
     waveforms: Mutex<BTreeMap<TrackId, StoredWaveform>>,
     synced_lyrics: Mutex<BTreeMap<TrackId, StoredSyncedLyrics>>,
     online_bookkeeping: Mutex<BTreeMap<TrackId, OnlineBookkeeping>>,
-    smart_shuffle_model: Mutex<Option<StoredSmartShuffleModel>>,
+    smart_shuffle_index: Mutex<Option<StoredSmartShuffleIndex>>,
 }
 
 /// In-memory mirror of one `track_analysis` row. Mirrors the SQLite
@@ -541,25 +541,25 @@ impl LibraryStore for InMemoryLibraryStore {
         Ok(())
     }
 
-    fn save_smart_shuffle_model(&self, model: &StoredSmartShuffleModel) -> StoreResult<()> {
+    fn save_smart_shuffle_index(&self, index: &StoredSmartShuffleIndex) -> StoreResult<()> {
         *self
-            .smart_shuffle_model
+            .smart_shuffle_index
             .lock()
-            .map_err(|_| StoreError::StoreUnavailable)? = Some(model.clone());
+            .map_err(|_| StoreError::StoreUnavailable)? = Some(index.clone());
         Ok(())
     }
 
-    fn load_smart_shuffle_model(&self) -> StoreResult<Option<StoredSmartShuffleModel>> {
+    fn load_smart_shuffle_index(&self) -> StoreResult<Option<StoredSmartShuffleIndex>> {
         Ok(self
-            .smart_shuffle_model
+            .smart_shuffle_index
             .lock()
             .map_err(|_| StoreError::StoreUnavailable)?
             .clone())
     }
 
-    fn clear_smart_shuffle_model(&self) -> StoreResult<()> {
+    fn clear_smart_shuffle_index(&self) -> StoreResult<()> {
         *self
-            .smart_shuffle_model
+            .smart_shuffle_index
             .lock()
             .map_err(|_| StoreError::StoreUnavailable)? = None;
         Ok(())

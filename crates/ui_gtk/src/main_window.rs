@@ -21,8 +21,8 @@ use super::{
     LibraryChangedHolder, MetadataWriteResultReceiver, MprisCommandReceiver,
     OnlineProgressReceiver, PLAYLISTS_VIEW, PlaybackChangedCallback, SIDEBAR_DEFAULT_WIDTH,
     SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SONGS_VIEW, SharedMprisService, SharedRuntime,
-    ShowAlbumAction, ShowAlbumHolder, SmartPlaylistTrackStatus, TrackRowChangedCallback,
-    TrackRowChangedHolder, TrackUpdatedReceiver,
+    ShowAlbumAction, ShowAlbumHolder, SmartPlaylistTrackStatus, SmartShuffleRebuildResultReceiver,
+    TrackRowChangedCallback, TrackRowChangedHolder, TrackUpdatedReceiver,
     accent::install_accent_css,
     albums::AlbumsView,
     app_css::install_app_css,
@@ -90,6 +90,7 @@ pub(crate) struct MainWindowAsyncReceivers {
     pub analysis_progress_rx: Option<AnalysisProgressReceiver>,
     pub online_progress_rx: Option<OnlineProgressReceiver>,
     pub track_updated_rx: Option<TrackUpdatedReceiver>,
+    pub smart_shuffle_rebuild_result_rx: Option<SmartShuffleRebuildResultReceiver>,
 }
 
 pub(crate) fn build_main_window(
@@ -105,6 +106,7 @@ pub(crate) fn build_main_window(
         analysis_progress_rx,
         online_progress_rx,
         track_updated_rx,
+        smart_shuffle_rebuild_result_rx,
     } = receivers;
     let tbw = std::time::Instant::now();
     macro_rules! tlog {
@@ -413,6 +415,8 @@ pub(crate) fn build_main_window(
     install_online_progress_consumer(online_progress_rx, runtime.clone());
     install_track_data_observer(&runtime, track_row_changed_holder.clone());
     install_track_updated_consumer(track_updated_rx, runtime.clone());
+    install_smart_shuffle_rebuild_result_consumer(smart_shuffle_rebuild_result_rx, runtime.clone());
+    install_smart_shuffle_periodic_rebuild(&runtime);
     // The sidebar is now the sole navigation surface: its selection
     // chooses which content-stack page is visible (Music → SONGS_VIEW,
     // Albums → ALBUMS_VIEW, an Item → PLAYLISTS_VIEW). The non-default
@@ -1873,6 +1877,79 @@ fn install_track_updated_consumer(receiver: Option<TrackUpdatedReceiver>, runtim
             runtime.borrow_mut().apply_track_updated(track_id);
         }
     });
+}
+
+/// Drains
+/// [`SmartShuffleRebuildResult`](sustain_app_runtime::SmartShuffleRebuildResult)s
+/// posted by the background Smart Shuffle rebuild thread and feeds
+/// them into
+/// [`ApplicationRuntime::apply_smart_shuffle_rebuild_result`], which
+/// adopts the new index in memory and persists its blob through the
+/// library store. Without this drain, completed rebuilds would queue
+/// forever in the `async_channel` and a freshly-rebuilt index would
+/// never be picked up.
+fn install_smart_shuffle_rebuild_result_consumer(
+    receiver: Option<SmartShuffleRebuildResultReceiver>,
+    runtime: SharedRuntime,
+) {
+    let Some(receiver) = receiver else {
+        return;
+    };
+    glib::MainContext::default().spawn_local(async move {
+        while let Ok(result) = receiver.recv().await {
+            runtime
+                .borrow_mut()
+                .apply_smart_shuffle_rebuild_result(result);
+        }
+    });
+}
+
+/// Tick interval, in seconds, for the periodic Smart Shuffle rebuild
+/// check. 60 s is the documented cadence in
+/// `smart_shuffle_scheduler.rs`: fine-grained enough that the
+/// "Hourly" preset triggers within a minute of becoming due, coarse
+/// enough to be free at the system level (a glib timer at this
+/// cadence is in the noise next to background analysis work).
+const SMART_SHUFFLE_PERIODIC_TICK_SECS: u32 = 60;
+
+/// Install the timer that drives Smart Shuffle's
+/// `SmartShuffleRebuildInterval` setting. Each tick compares
+/// `now() - smart_shuffle_metadata().built_at` against the configured
+/// interval and requests an index rebuild when due. Runs for the
+/// lifetime of the application — there is no "stop" path because the
+/// timer is cheap, and the runtime guards re-entrant requests
+/// internally.
+///
+/// Intentionally a no-op when:
+///   * the interval setting is `Off`,
+///   * a rebuild is already in flight (the scheduler would reject the
+///     request anyway, but checking here avoids the redundant borrow),
+///   * the index has never been built — the very first build is
+///     triggered by an explicit "Rebuild index" click or by the
+///     enable path inside `on_shuffle_mode_changed`, not by this
+///     timer. Auto-rebuild is for refreshing an index that has gone
+///     stale as the library grows, not for nudging a user who has not
+///     yet engaged with Smart Shuffle.
+fn install_smart_shuffle_periodic_rebuild(runtime: &SharedRuntime) {
+    let runtime = runtime.clone();
+    glib::timeout_add_seconds_local(SMART_SHUFFLE_PERIODIC_TICK_SECS, move || {
+        maybe_request_smart_shuffle_rebuild(&runtime);
+        glib::ControlFlow::Continue
+    });
+}
+
+fn maybe_request_smart_shuffle_rebuild(runtime: &SharedRuntime) {
+    // Read-only borrow asks the runtime if its policy gates are open
+    // right now. The policy itself (interval, last-built, worker-busy)
+    // lives next to the data in `ApplicationRuntime` so it can be
+    // unit-tested through the injected clock without a GTK main loop.
+    // We only re-borrow mutably to issue the request — which has its
+    // own re-entrancy guard in the scheduler — so a worker that flips
+    // `is_rebuilding` between the two borrows still ends up consistent.
+    if !runtime.borrow().should_run_periodic_smart_shuffle_rebuild() {
+        return;
+    }
+    runtime.borrow_mut().request_smart_shuffle_rebuild();
 }
 
 /// Drains [`ArtworkFetchResult`](sustain_app_runtime::ArtworkFetchResult)s

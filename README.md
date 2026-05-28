@@ -69,11 +69,11 @@ Implemented:
 - Real-time search, sortable and customizable columns (*iso-iTunes*)
 - Background BPM and musical-key detection, with a tempo/harmony-aware smart-playlist rule engine (*Sustain-native*)
 - Background backfill of artwork, ID3 tags, and lyrics via MusicBrainz, Cover Art Archive, AcoustID, and LRClib (*iTunes-adjacent*)
+- Smart Shuffle that picks each next track as a continuation of the one playing — a local, transparent perceptual match, no cloud, no learning (*Sustain-native*)
 - Native light / dark theme and system accent color (*Sustain-native*)
 
 ## Roadmap
 
-- "Smart shuffle" powered by a local machine learning model
 - Duplicates consolidation (preserve the best audio version, aggregate tags)
 - Sync to Android / Export to [XDJ](https://github.com/AnnoyingTechnology/rhythmbox-to-pioneer-xdj-exporter)
 

@@ -14,6 +14,7 @@ mod about_tab;
 mod analysis_tab;
 mod library_tab;
 mod online_tab;
+mod shuffle_tab;
 mod switch_row;
 
 /// Pixel size of the icon stacked above each tab label. The strip is
@@ -50,6 +51,7 @@ pub(super) const PATH_ENTRY_VISIBLE_CHARS: i32 = 36;
 const TAB_LIBRARY: &str = "library";
 const TAB_ANALYSIS: &str = "analysis";
 const TAB_ONLINE: &str = "online";
+const TAB_SHUFFLE: &str = "shuffle";
 const TAB_ABOUT: &str = "about";
 
 pub(crate) fn install_preferences_action(
@@ -189,8 +191,11 @@ fn open_preferences_window(
     let analysis_page = analysis_tab::build(command_controller.clone());
     stack.add_named(&analysis_page, Some(TAB_ANALYSIS));
 
-    let online_page = online_tab::build(command_controller);
+    let online_page = online_tab::build(command_controller.clone());
     stack.add_named(&online_page, Some(TAB_ONLINE));
+
+    let shuffle_page = shuffle_tab::build(window.upcast_ref(), command_controller);
+    stack.add_named(&shuffle_page, Some(TAB_SHUFFLE));
 
     let about_page = about_tab::build(&window);
     stack.add_named(&about_page, Some(TAB_ABOUT));
@@ -223,18 +228,21 @@ fn build_tab_strip(stack: &gtk::Stack, window: &gtk::Window) -> gtk::Widget {
     let library_button = build_tab_button("folder-music-symbolic", "Library");
     let analysis_button = build_tab_button("applications-science-symbolic", "Analysis");
     let online_button = build_tab_button("network-transmit-receive-symbolic", "Online");
+    let shuffle_button = build_tab_button("media-playlist-shuffle-symbolic", "Shuffle");
     let about_button = build_tab_button("help-about-symbolic", "About");
 
-    // Group all four so exactly one is active at a time. The Library tab
+    // Group all five so exactly one is active at a time. The Library tab
     // is the default landing.
     analysis_button.set_group(Some(&library_button));
     online_button.set_group(Some(&library_button));
+    shuffle_button.set_group(Some(&library_button));
     about_button.set_group(Some(&library_button));
     library_button.set_active(true);
 
     wire_tab_button(&library_button, stack, TAB_LIBRARY);
     wire_tab_button(&analysis_button, stack, TAB_ANALYSIS);
     wire_tab_button(&online_button, stack, TAB_ONLINE);
+    wire_tab_button(&shuffle_button, stack, TAB_SHUFFLE);
     wire_tab_button(&about_button, stack, TAB_ABOUT);
 
     let tab_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -243,6 +251,7 @@ fn build_tab_strip(stack: &gtk::Stack, window: &gtk::Window) -> gtk::Widget {
     tab_box.append(&library_button);
     tab_box.append(&analysis_button);
     tab_box.append(&online_button);
+    tab_box.append(&shuffle_button);
     tab_box.append(&about_button);
 
     let close_icon = gtk::Image::from_icon_name("window-close-symbolic");

@@ -1,68 +1,74 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-//! Smart Shuffle for Sustain — trains a Random Forest engagement
-//! classifier on the user's library and uses it together with a
-//! deterministic similarity-to-seed scorer to pick the next track
-//! during Smart Shuffle playback.
+//! Smart Shuffle for Sustain — a local, deterministic,
+//! seed-conditioned *perceptual transition scorer*.
 //!
-//! This crate intentionally has no Sustain runtime dependency: it
-//! borrows `&[Track]` slices, produces a [`TrainingOutcome`] or a
-//! [`PickedTrack`], and otherwise stays pure. The runtime
-//! (`sustain_app_runtime`) is responsible for scheduling training,
-//! persisting the model blob via the library store, and feeding
-//! pick context to [`pick_next_track`]. See `docs/features.md` for
-//! the user-facing description.
+//! Given the track playing now, Smart Shuffle chooses a next track
+//! from the library that feels like a *continuation* of it — the same
+//! mood, flow, and thread the listener is already inside. It is a
+//! **sequencer**, not a recommender: every score is a function of the
+//! *pair* (X, Y), never of the candidate Y in isolation. In a
+//! hand-curated library every track is already liked, so there is
+//! nothing to learn about whether the user likes Y; what remains is
+//! the largely-objective, perceptual question of whether Y *follows* X
+//! well.
 //!
-//! ## Cold start
+//! ## No learning, by design
 //!
-//! Until [`SmartShuffleTrainer::train`] has succeeded once (at
-//! least [`MIN_LABELED_TRACKS`] tracks with clear positive /
-//! negative engagement signals), the picker still works — it just
-//! treats every candidate's engagement probability as the neutral
-//! 0.5 baseline and lets the similarity-to-seed signal carry the
-//! decision. The runtime surfaces a notification on first Smart
-//! Shuffle enable while in this state.
+//! There is no model and no training. Continuation is scored by a
+//! fixed, interpretable, hand-weighted perceptual metric over track
+//! pairs. This is deliberate: the only behavioural labels available
+//! (play/skip counts, album order, playlist adjacency) are *dishonest*
+//! for this task — they measure track-level engagement or teach
+//! "stay on the album," the inverse of a library-wide shuffle. Fixed
+//! weights here do not mean "there is nothing to learn"; they mean
+//! "we refuse to learn from dishonest labels." The architecture
+//! reserves a seam to learn later from *explicit* user transition
+//! feedback — the one label source that actually scores the pair —
+//! but builds no learning machinery now.
 //!
-//! ## Determinism
+//! ## Shape
 //!
-//! Both training and picking are seeded by inputs the runtime
-//! controls — the library content for training, the current seed
-//! track id plus history length for picking — so identical
-//! inputs always produce identical outputs. This makes the
-//! `SUSTAIN_LOG_SMART_SHUFFLE=1` debug surface useful even after
-//! the fact.
+//! * [`index`] — the prepared, library-dependent state ([`SmartShuffleIndex`]):
+//!   genre-token IDF (and, later, robust normalization statistics).
+//!   Rebuilt on a cadence; persisted as an opaque, schema-versioned
+//!   blob. *Not* a fitted model.
+//! * [`similarity`] — the per-feature, seed-conditioned similarity
+//!   functions, each masked (`None`) when its feature is absent.
+//! * [`affinity`] — the masked weighted sum with the coverage
+//!   correction for thin evidence.
+//! * [`picker`] — the four-term pipeline (guards → affinity → priors →
+//!   penalties), bounded-pool temperature sampling, and the debug log.
+//!
+//! This crate has no Sustain-runtime dependency: it borrows `&[Track]`
+//! slices and returns plain data. The runtime (`sustain_app_runtime`)
+//! schedules the index rebuild, persists the blob, and feeds pick
+//! context to [`pick_next_track`].
 
 #![forbid(unsafe_code)]
 
-pub mod feature;
-pub mod forest;
-mod model;
+pub mod affinity;
+pub mod index;
 pub mod picker;
+mod rng;
 pub mod similarity;
-mod trainer;
 
-pub use feature::{FEATURE_SCHEMA_VERSION, FeatureExtractor, FeatureVector};
-pub use forest::{ForestHyperparameters, RandomForest};
-pub use model::SmartShuffleModel;
+pub use affinity::{AffinityBreakdown, AffinityFeature, NEUTRAL_PRIOR, compute_affinity};
+pub use index::{INDEX_SCHEMA_VERSION, SmartShuffleIndex, genre_tokens};
 pub use picker::{
     PickContext, PickDebug, PickDebugEntry, PickMode, PickedTrack, format_debug, pick_next_track,
 };
-pub use trainer::{MIN_LABELED_TRACKS, SmartShuffleTrainer, TrainingOutcome, label_for_track};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Errors surfaced by the Smart Shuffle index blob round-trip. The
+/// runtime treats either as "discard the stored blob and rebuild from
+/// scratch" — there is no migration path (pre-release).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SmartShuffleError {
-    /// Library does not (yet) contain enough labelled tracks to
-    /// train a model. The runtime translates this into the
-    /// cold-start notification surfaced to the user.
-    InsufficientTrainingData { positives: u32, negatives: u32 },
-    /// Stored model blob could not be decoded — either it was
-    /// written by a different `FEATURE_SCHEMA_VERSION` or the row
-    /// is corrupt. Either way the runtime clears the row and
-    /// schedules a retrain.
-    ModelDeserialisationFailed,
-    /// Failure while persisting a newly trained model. Bubbled up
-    /// to the runtime so it can surface a notification rather than
-    /// silently dropping the model.
-    ModelSerialisationFailed,
+    /// The prepared index could not be serialised to its persisted
+    /// blob form.
+    IndexSerialisationFailed,
+    /// A stored blob could not be decoded — a different
+    /// [`INDEX_SCHEMA_VERSION`], or a corrupt row.
+    IndexDeserialisationFailed,
 }

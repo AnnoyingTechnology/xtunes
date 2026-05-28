@@ -178,18 +178,18 @@ CREATE TABLE IF NOT EXISTS track_synced_lyrics (
     source     TEXT NOT NULL
 );
 
--- Smart Shuffle's trained engagement model. A singleton row (id = 1)
--- holding the serialised model blob plus enough bookkeeping for the
--- preferences UI to surface "last trained at" / "what's in the
--- model" and for the runtime to skip-load a stale shape after the
--- feature schema is bumped.
-CREATE TABLE IF NOT EXISTS smart_shuffle_model (
+-- The Smart Shuffle index: the prepared, library-dependent state the
+-- picker needs — genre-token IDF and, later, normalization statistics
+-- — serialised as an opaque blob in a singleton row (id = 1). There
+-- is no trained model; see `sustain_smart_shuffle`. The bookkeeping
+-- the preferences caption shows (indexed track count, analysis
+-- coverage, build time) lives *inside* the blob; only `schema_version`
+-- is broken out, so the runtime can discard a stale-shaped blob
+-- without paying to deserialise it.
+CREATE TABLE IF NOT EXISTS smart_shuffle_index (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    model_blob BLOB NOT NULL,
-    feature_schema_version INTEGER NOT NULL,
-    positive_label_count INTEGER NOT NULL,
-    negative_label_count INTEGER NOT NULL,
-    trained_at_unix INTEGER NOT NULL
+    index_blob BLOB NOT NULL,
+    schema_version INTEGER NOT NULL
 );
 
 -- Per-track bookkeeping for network-bound retrievals (artwork, tag
@@ -500,33 +500,26 @@ LIMIT ?5
 ///   ?3 = include_waveform   (1 or 0)
 ///   ?4 = current analyzer_version
 ///   ?5 = LIMIT
-pub(super) const UPSERT_SMART_SHUFFLE_MODEL_SQL: &str = r#"
-INSERT INTO smart_shuffle_model (
+pub(super) const UPSERT_SMART_SHUFFLE_INDEX_SQL: &str = r#"
+INSERT INTO smart_shuffle_index (
     id,
-    model_blob,
-    feature_schema_version,
-    positive_label_count,
-    negative_label_count,
-    trained_at_unix
+    index_blob,
+    schema_version
 )
-VALUES (1, ?1, ?2, ?3, ?4, ?5)
+VALUES (1, ?1, ?2)
 ON CONFLICT(id) DO UPDATE SET
-    model_blob = excluded.model_blob,
-    feature_schema_version = excluded.feature_schema_version,
-    positive_label_count = excluded.positive_label_count,
-    negative_label_count = excluded.negative_label_count,
-    trained_at_unix = excluded.trained_at_unix
+    index_blob = excluded.index_blob,
+    schema_version = excluded.schema_version
 "#;
 
-pub(super) const SELECT_SMART_SHUFFLE_MODEL_SQL: &str = r#"
-SELECT model_blob, feature_schema_version, positive_label_count,
-       negative_label_count, trained_at_unix
-FROM smart_shuffle_model
+pub(super) const SELECT_SMART_SHUFFLE_INDEX_SQL: &str = r#"
+SELECT index_blob, schema_version
+FROM smart_shuffle_index
 WHERE id = 1
 "#;
 
-pub(super) const DELETE_SMART_SHUFFLE_MODEL_SQL: &str =
-    r#"DELETE FROM smart_shuffle_model WHERE id = 1"#;
+pub(super) const DELETE_SMART_SHUFFLE_INDEX_SQL: &str =
+    r#"DELETE FROM smart_shuffle_index WHERE id = 1"#;
 
 pub(super) const SELECT_TRACKS_NEEDING_ANALYSIS_SQL: &str = r#"
 SELECT t.id

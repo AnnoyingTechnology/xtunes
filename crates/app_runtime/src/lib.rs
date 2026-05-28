@@ -23,7 +23,7 @@ pub use sustain_domain::{
     SmartPlaylistId, SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind,
     SmartPlaylistNumberField, SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet,
     SmartPlaylistTextField, SmartPlaylistTextOperator, SmartShuffleEntropy,
-    SmartShuffleTrainingInterval, SystemClock, Track, TrackAvailability, TrackColumnEntry,
+    SmartShuffleRebuildInterval, SystemClock, Track, TrackAvailability, TrackColumnEntry,
     TrackColumnLayout, TrackColumnLayoutScope, TrackContentHash, TrackId, TrackLocation,
     TrackMetadata, TrackPlaybackSource, TrackRelativePath, UiSettings, UiSidebarSelection,
     UserSettings, VolumePercent, matching_tracks, track_matches_rule_set,
@@ -78,10 +78,10 @@ mod playlist_items;
 mod playlists;
 mod smart_playlists;
 pub mod smart_shuffle_scheduler;
-pub use smart_shuffle_scheduler::{SmartShuffleScheduler, SmartShuffleTrainingResult};
+pub use smart_shuffle_scheduler::{SmartShuffleRebuildResult, SmartShuffleScheduler};
 pub use sustain_smart_shuffle::{
-    FEATURE_SCHEMA_VERSION as SMART_SHUFFLE_FEATURE_SCHEMA_VERSION, MIN_LABELED_TRACKS, PickMode,
-    SmartShuffleError, SmartShuffleModel, TrainingOutcome,
+    INDEX_SCHEMA_VERSION as SMART_SHUFFLE_INDEX_SCHEMA_VERSION, PickMode, SmartShuffleError,
+    SmartShuffleIndex,
 };
 
 pub use artwork_fetcher::{ArtworkFetchOutcome, ArtworkFetchResult};
@@ -273,25 +273,20 @@ pub struct ApplicationRuntime {
     online_scheduler: Option<online_scheduler::OnlineScheduler>,
     online_progress_sink: Option<async_channel::Sender<online_scheduler::SchedulerProgress>>,
     online_notification_id: Option<NotificationId>,
-    // Background worker for Smart Shuffle model training. Owns
-    // the thread spawn + result channel; the model itself lives
-    // here in the runtime so the picker can borrow it without
-    // crossing thread boundaries.
+    // Background worker for Smart Shuffle index rebuilds. Owns the
+    // thread spawn + result channel; the index itself lives here in
+    // the runtime so the picker can borrow it without crossing thread
+    // boundaries.
     smart_shuffle_scheduler: SmartShuffleScheduler,
-    /// In-memory copy of the trained Smart Shuffle engagement model.
-    /// `None` when no model has been trained yet (cold start) or
-    /// when the persisted blob's feature schema doesn't match the
-    /// current extractor.
-    smart_shuffle_model: Option<SmartShuffleModel>,
-    /// Bookkeeping carried alongside the model so the Preferences
-    /// "last trained at" caption and the cold-start refusal
-    /// notification can reach it without reading the blob.
-    smart_shuffle_metadata: Option<SmartShuffleModelMetadata>,
-    /// Set after the runtime has surfaced the cold-start
-    /// notification once in the current process. Prevents the
-    /// notification from re-firing on every Smart Shuffle toggle
-    /// in the same session.
-    smart_shuffle_cold_start_notified: bool,
+    /// In-memory copy of the prepared Smart Shuffle index (genre IDF
+    /// and, later, normalization statistics). `None` when the index
+    /// has never been built yet, or when the persisted blob's schema
+    /// version did not match the current scorer.
+    smart_shuffle_index: Option<SmartShuffleIndex>,
+    /// Bookkeeping mirrored from the live index so the Preferences
+    /// status caption (indexed tracks, analysis coverage, last
+    /// rebuild) can reach it without re-reading the index each tick.
+    smart_shuffle_metadata: Option<SmartShuffleIndexMetadata>,
     // Channel handed to background workers that mutate the persisted
     // copy of a track behind the runtime's back (analysis fills BPM /
     // key, online lyrics/tags writes a row). Workers push the touched
@@ -319,6 +314,13 @@ pub struct ApplicationRuntime {
     // store. The UI shell installs this once to drive its targeted
     // per-row refresh — see [`TrackDataObserver`].
     track_data_observer: Option<TrackDataObserver>,
+    // Fires whenever Smart Shuffle's user-visible state changes: an
+    // index rebuild starts or completes, or a freshly-loaded index is
+    // adopted. The Shuffle preferences tab installs this on open and
+    // clears it on close so its status caption and Rebuild-index
+    // button state stay live. Same re-entrancy contract as the other
+    // observers — defer any re-borrow onto the main loop.
+    smart_shuffle_state_observer: Option<SmartShuffleStateObserver>,
 }
 
 /// Callback fired after every mutation of [`NotificationCenter`]. Held
@@ -345,16 +347,22 @@ pub type TrackAvailabilityObserver = Box<dyn Fn()>;
 /// defer back-into-runtime work onto the main loop.
 pub type TrackDataObserver = Box<dyn Fn(TrackId)>;
 
-/// Cached bookkeeping for the live Smart Shuffle model, mirroring
-/// the columns of [`sustain_library_store::StoredSmartShuffleModel`]
-/// minus the blob (the blob is materialised into
-/// `smart_shuffle_model` once it has been deserialised). Used by the
-/// Preferences "last trained" caption and by the cold-start logic.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SmartShuffleModelMetadata {
-    pub positive_label_count: u32,
-    pub negative_label_count: u32,
-    pub trained_at: std::time::SystemTime,
+/// Callback fired whenever Smart Shuffle's user-visible state
+/// changes. Same shape and re-entrancy contract as
+/// [`NotificationObserver`]; the runtime is mid-borrow when this
+/// fires, so observers must defer back-into-runtime reads onto the
+/// main loop (e.g. `glib::idle_add_local_once`).
+pub type SmartShuffleStateObserver = Box<dyn Fn()>;
+
+/// Cached bookkeeping for the live Smart Shuffle index, mirrored from
+/// it so the Preferences status caption can read the indexed track
+/// count, the DSP analysis coverage, and the last rebuild time without
+/// re-walking the index on every observer tick.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SmartShuffleIndexMetadata {
+    pub indexed_track_count: u32,
+    pub analysis_coverage: f32,
+    pub built_at: std::time::SystemTime,
 }
 
 impl ApplicationRuntime {
@@ -394,15 +402,15 @@ impl ApplicationRuntime {
             online_progress_sink: None,
             online_notification_id: None,
             smart_shuffle_scheduler: SmartShuffleScheduler::new(),
-            smart_shuffle_model: None,
+            smart_shuffle_index: None,
             smart_shuffle_metadata: None,
-            smart_shuffle_cold_start_notified: false,
             track_updated_sink: None,
             clock: Arc::new(SystemClock),
             notifications: NotificationCenter::new(),
             notification_observer: None,
             track_availability_observer: None,
             track_data_observer: None,
+            smart_shuffle_state_observer: None,
         }
     }
 
@@ -452,15 +460,15 @@ impl ApplicationRuntime {
             online_progress_sink: None,
             online_notification_id: None,
             smart_shuffle_scheduler: SmartShuffleScheduler::new(),
-            smart_shuffle_model: None,
+            smart_shuffle_index: None,
             smart_shuffle_metadata: None,
-            smart_shuffle_cold_start_notified: false,
             track_updated_sink: None,
             clock: Arc::new(SystemClock),
             notifications: NotificationCenter::new(),
             notification_observer: None,
             track_availability_observer: None,
             track_data_observer: None,
+            smart_shuffle_state_observer: None,
         })
     }
 
@@ -501,6 +509,12 @@ impl ApplicationRuntime {
             .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
         self.library_store = Some(library_store);
         self.metadata_service = Some(metadata_service);
+        // Restore the previously-built Smart Shuffle index (if any).
+        // Sits after the library store assignment because the loader
+        // reads `self.library_store`; a fresh database leaves the
+        // index fields at `None` and the next Smart-enable triggers a
+        // background rebuild.
+        self.load_smart_shuffle_index_from_store()?;
         Ok(())
     }
 
@@ -1122,6 +1136,30 @@ impl ApplicationRuntime {
         self.track_data_observer = Some(observer);
     }
 
+    /// Install the observer fired whenever Smart Shuffle's state
+    /// changes — a training run starts, completes, or a previously
+    /// persisted model is adopted. The Shuffle preferences tab
+    /// installs this on open so its captions stay live; it must
+    /// pair with [`Self::clear_smart_shuffle_state_observer`] on
+    /// close. Same re-entrancy contract as the other observers.
+    pub fn set_smart_shuffle_state_observer(&mut self, observer: SmartShuffleStateObserver) {
+        self.smart_shuffle_state_observer = Some(observer);
+    }
+
+    /// Drop the observer installed by
+    /// [`Self::set_smart_shuffle_state_observer`]. Called by the
+    /// Shuffle preferences tab when its window closes so the closure
+    /// (and any widgets it captures) can be dropped.
+    pub fn clear_smart_shuffle_state_observer(&mut self) {
+        self.smart_shuffle_state_observer = None;
+    }
+
+    fn fire_smart_shuffle_state_observer(&self) {
+        if let Some(observer) = &self.smart_shuffle_state_observer {
+            observer();
+        }
+    }
+
     /// Reload the named track from the library store, replace its
     /// entry in `library_tracks` (preserving sort order: the vec is
     /// kept sorted by id and we never reorder), and fire the
@@ -1234,180 +1272,145 @@ impl ApplicationRuntime {
     }
 
     /// Result channel the UI shell drains on idle ticks to receive
-    /// completed Smart Shuffle training outcomes.
-    pub fn smart_shuffle_training_result_receiver(
+    /// completed Smart Shuffle index rebuilds.
+    pub fn smart_shuffle_rebuild_result_receiver(
         &self,
-    ) -> async_channel::Receiver<SmartShuffleTrainingResult> {
+    ) -> async_channel::Receiver<SmartShuffleRebuildResult> {
         self.smart_shuffle_scheduler.result_receiver()
     }
 
-    pub fn smart_shuffle_is_training(&self) -> bool {
-        self.smart_shuffle_scheduler.is_training()
+    pub fn smart_shuffle_is_rebuilding(&self) -> bool {
+        self.smart_shuffle_scheduler.is_rebuilding()
     }
 
-    pub fn smart_shuffle_metadata(&self) -> Option<SmartShuffleModelMetadata> {
+    pub fn smart_shuffle_metadata(&self) -> Option<SmartShuffleIndexMetadata> {
         self.smart_shuffle_metadata
     }
 
-    pub fn smart_shuffle_model_is_loaded(&self) -> bool {
-        self.smart_shuffle_model.is_some()
+    pub fn smart_shuffle_index_is_loaded(&self) -> bool {
+        self.smart_shuffle_index.is_some()
     }
 
-    /// Try to load the persisted Smart Shuffle model from the
-    /// library store. Called once during runtime setup; silently
-    /// drops a blob whose feature schema no longer matches the
-    /// current extractor so we never feed mismatched inputs to the
-    /// model.
-    pub fn load_smart_shuffle_model_from_store(&mut self) -> ApplicationRuntimeResult<()> {
+    /// Try to load the persisted Smart Shuffle index from the library
+    /// store. Called once during runtime setup; silently discards a
+    /// blob whose schema version no longer matches the current scorer
+    /// so we never feed a stale-shaped index to the picker.
+    pub fn load_smart_shuffle_index_from_store(&mut self) -> ApplicationRuntimeResult<()> {
         let Some(store) = self.library_store.as_ref() else {
             return Ok(());
         };
         let stored = store
-            .load_smart_shuffle_model()
+            .load_smart_shuffle_index()
             .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?;
         let Some(stored) = stored else {
             return Ok(());
         };
-        if stored.feature_schema_version != SMART_SHUFFLE_FEATURE_SCHEMA_VERSION {
-            // Stale shape — clear so we can rebuild cleanly.
-            let _ = store.clear_smart_shuffle_model();
+        if stored.schema_version != SMART_SHUFFLE_INDEX_SCHEMA_VERSION {
+            // Stale shape — clear so the next rebuild starts clean.
+            let _ = store.clear_smart_shuffle_index();
             return Ok(());
         }
-        match SmartShuffleModel::from_blob(&stored.model_blob) {
-            Ok(model) => {
-                self.smart_shuffle_model = Some(model);
-                self.smart_shuffle_metadata = Some(SmartShuffleModelMetadata {
-                    positive_label_count: stored.positive_label_count,
-                    negative_label_count: stored.negative_label_count,
-                    trained_at: std::time::UNIX_EPOCH
-                        + std::time::Duration::from_secs(stored.trained_at_unix.max(0) as u64),
-                });
+        match SmartShuffleIndex::from_blob(&stored.index_blob) {
+            Ok(index) => {
+                self.smart_shuffle_metadata = Some(index_metadata(&index));
+                self.smart_shuffle_index = Some(index);
             }
             Err(_) => {
-                let _ = store.clear_smart_shuffle_model();
+                let _ = store.clear_smart_shuffle_index();
             }
         }
         Ok(())
     }
 
-    /// Schedule a fresh Smart Shuffle training run on the
-    /// background worker. Returns `false` when the scheduler is
-    /// already busy or there is no library to train from. The
-    /// result is delivered through the channel exposed by
-    /// [`Self::smart_shuffle_training_result_receiver`] and applied
-    /// via [`Self::apply_smart_shuffle_training_result`].
-    pub fn request_smart_shuffle_training(&mut self) -> bool {
+    /// Schedule a fresh Smart Shuffle index rebuild on the background
+    /// worker. Returns `false` when the scheduler is already busy or
+    /// there is no library to index. The result is delivered through
+    /// [`Self::smart_shuffle_rebuild_result_receiver`] and applied via
+    /// [`Self::apply_smart_shuffle_rebuild_result`].
+    pub fn request_smart_shuffle_rebuild(&mut self) -> bool {
         if self.library_tracks.is_empty() {
             return false;
         }
         let tracks = self.library_tracks.clone();
         let now = self.clock.now();
-        self.smart_shuffle_scheduler.request_training(tracks, now)
-    }
-
-    /// Apply a completed training outcome. On success: store the
-    /// model in the library store and adopt it in memory. On
-    /// failure: surface the cold-start notification if it has not
-    /// already been shown this session.
-    pub fn apply_smart_shuffle_training_result(&mut self, result: SmartShuffleTrainingResult) {
-        match result.outcome {
-            Ok(outcome) => {
-                let trained_at_unix = result
-                    .trained_at
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                let Ok(blob) = outcome.model.to_blob() else {
-                    self.notifications.push_ephemeral(
-                        NotificationCategory::SmartShuffle,
-                        NotificationSeverity::Warning,
-                        "Smart Shuffle: failed to serialise trained model.".to_owned(),
-                    );
-                    return;
-                };
-                let stored = sustain_library_store::StoredSmartShuffleModel {
-                    model_blob: blob,
-                    feature_schema_version: SMART_SHUFFLE_FEATURE_SCHEMA_VERSION,
-                    positive_label_count: outcome.positive_label_count,
-                    negative_label_count: outcome.negative_label_count,
-                    trained_at_unix,
-                };
-                if let Some(store) = self.library_store.as_ref()
-                    && store.save_smart_shuffle_model(&stored).is_err()
-                {
-                    self.notifications.push_ephemeral(
-                        NotificationCategory::SmartShuffle,
-                        NotificationSeverity::Warning,
-                        "Smart Shuffle: failed to persist trained model.".to_owned(),
-                    );
-                    return;
-                }
-                self.smart_shuffle_metadata = Some(SmartShuffleModelMetadata {
-                    positive_label_count: outcome.positive_label_count,
-                    negative_label_count: outcome.negative_label_count,
-                    trained_at: result.trained_at,
-                });
-                self.smart_shuffle_model = Some(outcome.model);
-                self.smart_shuffle_cold_start_notified = false;
-                self.notifications.push_ephemeral(
-                    NotificationCategory::SmartShuffle,
-                    NotificationSeverity::Info,
-                    "Smart Shuffle: model trained.".to_owned(),
-                );
-            }
-            Err(SmartShuffleError::InsufficientTrainingData {
-                positives,
-                negatives,
-            }) => {
-                self.notify_smart_shuffle_cold_start(positives, negatives);
-            }
-            Err(_) => {
-                self.notifications.push_ephemeral(
-                    NotificationCategory::SmartShuffle,
-                    NotificationSeverity::Warning,
-                    "Smart Shuffle: training failed.".to_owned(),
-                );
-            }
+        let scheduled = self.smart_shuffle_scheduler.request_rebuild(tracks, now);
+        if scheduled {
+            self.fire_smart_shuffle_state_observer();
         }
+        scheduled
     }
 
-    pub(crate) fn notify_smart_shuffle_cold_start(&mut self, positives: u32, negatives: u32) {
-        if self.smart_shuffle_cold_start_notified {
+    /// Policy gate for the UI shell's periodic auto-rebuild timer.
+    /// Centralised here so the rule lives next to the data it queries
+    /// (settings, scheduler flag, the index's build time) and is
+    /// exercised through the runtime's injected clock — no
+    /// `SystemTime::now` reads in the UI shell. Thin wrapper over the
+    /// private `should_run_periodic_smart_shuffle_rebuild_for` so the
+    /// policy itself stays a pure, unit-testable function.
+    pub fn should_run_periodic_smart_shuffle_rebuild(&self) -> bool {
+        should_run_periodic_smart_shuffle_rebuild_for(
+            self.smart_shuffle_scheduler.is_rebuilding(),
+            self.settings.playback.smart_shuffle_rebuild_interval,
+            self.smart_shuffle_metadata.map(|meta| meta.built_at),
+            self.clock.now(),
+        )
+    }
+
+    /// Apply a completed index rebuild: persist the new index's blob
+    /// and adopt it in memory. The Smart Shuffle state observer is
+    /// fired exactly once on the way out — the scheduler's
+    /// `is_rebuilding` flag flipped from true to false, so a
+    /// subscribed preferences tab must re-read its state. Rebuilds are
+    /// otherwise silent (they happen on a background cadence; a toast
+    /// on every daily rebuild would be noise).
+    pub fn apply_smart_shuffle_rebuild_result(&mut self, result: SmartShuffleRebuildResult) {
+        self.apply_smart_shuffle_rebuild_result_inner(result);
+        self.fire_smart_shuffle_state_observer();
+    }
+
+    fn apply_smart_shuffle_rebuild_result_inner(&mut self, result: SmartShuffleRebuildResult) {
+        let index = result.index;
+        let Ok(blob) = index.to_blob() else {
+            self.notifications.push_ephemeral(
+                NotificationCategory::SmartShuffle,
+                NotificationSeverity::Warning,
+                "Smart Shuffle: failed to serialise the rebuilt index.".to_owned(),
+            );
+            return;
+        };
+        let stored = sustain_library_store::StoredSmartShuffleIndex {
+            index_blob: blob,
+            schema_version: SMART_SHUFFLE_INDEX_SCHEMA_VERSION,
+        };
+        if let Some(store) = self.library_store.as_ref()
+            && store.save_smart_shuffle_index(&stored).is_err()
+        {
+            self.notifications.push_ephemeral(
+                NotificationCategory::SmartShuffle,
+                NotificationSeverity::Warning,
+                "Smart Shuffle: failed to persist the rebuilt index.".to_owned(),
+            );
             return;
         }
-        self.smart_shuffle_cold_start_notified = true;
-        let body = format!(
-            "Smart Shuffle: model not trained yet — keep listening (currently {positives} liked and {negatives} skipped tracks; need at least {min} labelled total).",
-            min = MIN_LABELED_TRACKS,
-        );
-        self.notifications.push_ephemeral(
-            NotificationCategory::SmartShuffle,
-            NotificationSeverity::Info,
-            body,
-        );
+        self.smart_shuffle_metadata = Some(index_metadata(&index));
+        self.smart_shuffle_index = Some(index);
     }
 
-    /// Hook invoked from the shuffle-mode command handler so the
-    /// runtime can react to the user picking Smart for the first
-    /// time without a model. On the very first cold-start enable,
-    /// kicks off a training run so the user gets a model on the
-    /// next listening session — synchronous failures still surface
-    /// the cold-start notification.
+    /// Hook invoked from the shuffle-mode command handler. When the
+    /// user switches to Smart and no index exists yet, kick off a
+    /// background rebuild so the picker has genre IDF to work with;
+    /// until it lands the picker degrades gracefully to near-uniform
+    /// picks rather than refusing to play.
     pub(crate) fn on_shuffle_mode_changed(&mut self) {
         let mode = self.playback_queue.options().shuffle_mode;
         if !matches!(mode, ShuffleMode::Smart) {
             return;
         }
-        if self.smart_shuffle_model.is_some() {
+        if self.smart_shuffle_index.is_some() {
             return;
         }
-        // No model yet — request a training run. If the library
-        // does not have enough labelled tracks the worker will
-        // emit InsufficientTrainingData, which `apply_smart_
-        // shuffle_training_result` translates into the cold-start
-        // notification.
-        if !self.smart_shuffle_scheduler.is_training() {
-            self.request_smart_shuffle_training();
+        if !self.smart_shuffle_scheduler.is_rebuilding() {
+            self.request_smart_shuffle_rebuild();
         }
     }
 
@@ -1756,6 +1759,57 @@ fn already_complete_text(count: usize, label: &str) -> String {
     } else {
         format!("All {count} tracks already have {label} — nothing to queue.")
     }
+}
+
+/// Mirror the live index's bookkeeping into the cached metadata the
+/// Preferences caption reads.
+fn index_metadata(index: &SmartShuffleIndex) -> SmartShuffleIndexMetadata {
+    SmartShuffleIndexMetadata {
+        indexed_track_count: index.indexed_track_count(),
+        analysis_coverage: index.analysis_coverage(),
+        built_at: std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(index.built_at_unix().max(0) as u64),
+    }
+}
+
+/// Pure policy for whether the periodic Smart Shuffle auto-rebuild
+/// timer should fire a new request right now. Extracted from
+/// [`ApplicationRuntime::should_run_periodic_smart_shuffle_rebuild`]
+/// so the rule itself is unit-testable without standing up a
+/// runtime, a scheduler, or a library store.
+///
+/// Returns `true` only when every gate aligns:
+///   * the user has not picked
+///     [`SmartShuffleRebuildInterval::Off`],
+///   * a previous rebuild is not still in flight,
+///   * the index has been built at least once — the first build is
+///     intentionally driven by an explicit gesture (the handler that
+///     runs when the transport switches to Smart, or the Rebuild-index
+///     button), not by this timer, so users who have never tried Smart
+///     Shuffle do no background work, and
+///   * the elapsed wall-clock time since `built_at` meets or exceeds
+///     the configured interval. `Err(_)` from `duration_since` (i.e.
+///     `now < built_at`, the wall clock went backwards) collapses to
+///     `false` rather than panicking or rolling over.
+pub(crate) fn should_run_periodic_smart_shuffle_rebuild_for(
+    is_rebuilding: bool,
+    interval: SmartShuffleRebuildInterval,
+    built_at: Option<std::time::SystemTime>,
+    now: std::time::SystemTime,
+) -> bool {
+    if is_rebuilding {
+        return false;
+    }
+    let Some(interval_secs) = interval.interval_secs() else {
+        return false;
+    };
+    let Some(built_at) = built_at else {
+        return false;
+    };
+    let Ok(elapsed) = now.duration_since(built_at) else {
+        return false;
+    };
+    elapsed.as_secs() >= interval_secs
 }
 
 /// Outcome of [`ApplicationRuntime::smart_playlist_track_status`].
@@ -5626,5 +5680,134 @@ mod tests {
             ),
             RunDecision::SchedulerUnavailable
         );
+    }
+
+    mod periodic_smart_shuffle_rebuild_policy {
+        use std::time::{Duration, SystemTime};
+
+        use super::super::should_run_periodic_smart_shuffle_rebuild_for;
+        use sustain_domain::SmartShuffleRebuildInterval;
+
+        const ONE_SECOND: Duration = Duration::from_secs(1);
+
+        fn base_time() -> SystemTime {
+            // Fixed reference so a flaky CI clock can't shift relative
+            // results — every elapsed-time assertion is derived from
+            // this one anchor.
+            SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000)
+        }
+
+        #[test]
+        fn refuses_when_a_rebuild_is_already_in_flight() {
+            assert!(!should_run_periodic_smart_shuffle_rebuild_for(
+                true,
+                SmartShuffleRebuildInterval::Daily,
+                Some(base_time() - Duration::from_secs(7 * 24 * 60 * 60)),
+                base_time(),
+            ));
+        }
+
+        #[test]
+        fn refuses_when_interval_is_off() {
+            assert!(!should_run_periodic_smart_shuffle_rebuild_for(
+                false,
+                SmartShuffleRebuildInterval::Off,
+                Some(base_time() - Duration::from_secs(10 * 24 * 60 * 60)),
+                base_time(),
+            ));
+        }
+
+        #[test]
+        fn refuses_when_the_index_has_never_been_built() {
+            assert!(!should_run_periodic_smart_shuffle_rebuild_for(
+                false,
+                SmartShuffleRebuildInterval::Daily,
+                None,
+                base_time(),
+            ));
+        }
+
+        #[test]
+        fn refuses_while_elapsed_is_below_the_interval_threshold() {
+            let interval_secs = SmartShuffleRebuildInterval::Hourly
+                .interval_secs()
+                .expect("hourly is a non-Off interval");
+            let built_at = base_time() - Duration::from_secs(interval_secs - 1);
+            assert!(!should_run_periodic_smart_shuffle_rebuild_for(
+                false,
+                SmartShuffleRebuildInterval::Hourly,
+                Some(built_at),
+                base_time(),
+            ));
+        }
+
+        #[test]
+        fn fires_exactly_at_the_interval_threshold() {
+            // Boundary check: `>=`, not `>`, so a rebuild that
+            // landed exactly one Hourly ago must trigger now.
+            // Without this, an interval-aligned cadence would drift
+            // by one tick on every run.
+            let interval_secs = SmartShuffleRebuildInterval::Hourly
+                .interval_secs()
+                .expect("hourly is a non-Off interval");
+            let built_at = base_time() - Duration::from_secs(interval_secs);
+            assert!(should_run_periodic_smart_shuffle_rebuild_for(
+                false,
+                SmartShuffleRebuildInterval::Hourly,
+                Some(built_at),
+                base_time(),
+            ));
+        }
+
+        #[test]
+        fn fires_when_elapsed_well_exceeds_the_interval() {
+            let interval_secs = SmartShuffleRebuildInterval::Daily
+                .interval_secs()
+                .expect("daily is a non-Off interval");
+            let built_at =
+                base_time() - Duration::from_secs(interval_secs) - Duration::from_secs(3600);
+            assert!(should_run_periodic_smart_shuffle_rebuild_for(
+                false,
+                SmartShuffleRebuildInterval::Daily,
+                Some(built_at),
+                base_time(),
+            ));
+        }
+
+        #[test]
+        fn refuses_when_clock_went_backwards() {
+            // `now < built_at` is the "wall clock just jumped
+            // backwards" case (NTP step, manual time change). The
+            // policy must collapse to "do nothing this tick"
+            // rather than treating the giant negative duration as
+            // "due now" or panicking on underflow.
+            let built_at = base_time() + ONE_SECOND;
+            assert!(!should_run_periodic_smart_shuffle_rebuild_for(
+                false,
+                SmartShuffleRebuildInterval::Weekly,
+                Some(built_at),
+                base_time(),
+            ));
+        }
+
+        #[test]
+        fn weekly_interval_holds_until_seven_days_elapse() {
+            // Spot-check the longest cadence: at six days it must
+            // hold, at seven days it must fire.
+            let built_at_6_days = base_time() - Duration::from_secs(6 * 24 * 60 * 60);
+            assert!(!should_run_periodic_smart_shuffle_rebuild_for(
+                false,
+                SmartShuffleRebuildInterval::Weekly,
+                Some(built_at_6_days),
+                base_time(),
+            ));
+            let built_at_7_days = base_time() - Duration::from_secs(7 * 24 * 60 * 60);
+            assert!(should_run_periodic_smart_shuffle_rebuild_for(
+                false,
+                SmartShuffleRebuildInterval::Weekly,
+                Some(built_at_7_days),
+                base_time(),
+            ));
+        }
     }
 }

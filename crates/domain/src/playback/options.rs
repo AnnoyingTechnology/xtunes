@@ -6,10 +6,11 @@
 /// chosen variant determines both how the queue lays out its next-track
 /// sequence and how the now-playing icon paints.
 ///
-/// `Pure` is the historical Fisher-Yates random walk over the ordered
-/// list. `Smart` defers next-track selection to the smart-shuffle
-/// picker, which scores candidates with a trained engagement model
-/// combined with a deterministic similarity-to-seed signal.
+/// `Pure` is the Fisher-Yates random walk over the ordered list.
+/// `Smart` defers next-track selection to the Smart Shuffle picker,
+/// which scores each candidate as a *continuation* of the currently
+/// playing track using a fixed, interpretable perceptual transition
+/// metric (no learned model).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ShuffleMode {
     #[default]
