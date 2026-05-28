@@ -2,3 +2,7 @@
 # Timing-instrumentation variable names. `t0`/`tact`/`tbw`/`trun` are
 # short identifiers, not English words; typos misreads `trun` as `turn`.
 trun = "trun"
+# `typos` splits on hyphens, so hyphenated English compounds with the
+# `mis-` prefix (`mis-reported`, `mis-spelled`, ...) trip on the bare
+# token `mis`, which it wants to "correct" to `miss`/`mist`.
+mis = "mis"

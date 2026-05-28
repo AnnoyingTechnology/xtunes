@@ -70,7 +70,7 @@ jobs:
             libgtk-4-dev \
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
-            xvfb
+            xvfb xauth
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
