@@ -186,7 +186,12 @@ jobs:
     name: Build Flatpak bundle (amd64)
     runs-on: ubuntu-24.04
     container:
-      image: bilelmoussaoui/flatpak-github-actions:gnome-48
+      # The flatpak-builder container moved from Docker Hub
+      # (bilelmoussaoui/flatpak-github-actions) to the flathub-infra
+      # org on ghcr.io; the old Docker Hub path now returns
+      # `manifest unknown`. ghcr.io is also more reliable than
+      # Docker Hub for GitHub-hosted runners.
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
       options: --privileged
     steps:
       - uses: actions/checkout@v6
