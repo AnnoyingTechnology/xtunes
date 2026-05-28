@@ -555,7 +555,7 @@ listview.album-track-table > row:focus-visible {
 
 .track-context-menu,
 .sidebar-context-menu {
-    padding: 2px;
+    padding: 4px;
 }
 
 .sidebar-context-menu,

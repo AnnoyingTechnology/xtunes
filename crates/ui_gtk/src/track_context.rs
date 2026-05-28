@@ -562,6 +562,12 @@ struct MainPageTriggers {
 /// the main page and shows the submenu; clicking the submenu's back
 /// button reverses the swap. No-op if `trigger` is `None` (the
 /// submenu was not installed).
+///
+/// Known limitation: the popover does NOT shrink when the swap
+/// surfaces a shorter page (e.g. main page → Analyze submenu).
+/// GTK4 popovers cache the surface they were popped up at and
+/// don't downsize on `queue_resize` or child re-attach. Tracked
+/// in <https://github.com/open-sustain/sustain/issues/52>.
 fn wire_submenu(
     main_page: &gtk::Box,
     trigger: Option<gtk::Button>,

@@ -276,6 +276,12 @@ fn build_retrieve_submenu_page(popover: &gtk::Popover, context: &SidebarRowConte
 /// Wire a main-page submenu trigger to its submenu page: clicking the
 /// trigger hides the main page and shows the submenu; clicking the
 /// submenu's back button (the page's first child) reverses the swap.
+///
+/// Known limitation: the popover does NOT shrink when the swap
+/// surfaces a shorter page (e.g. main page → Analyze submenu).
+/// GTK4 popovers cache the surface they were popped up at and
+/// don't downsize on `queue_resize` or child re-attach. Tracked
+/// in <https://github.com/open-sustain/sustain/issues/52>.
 fn wire_submenu_trigger(main_page: &gtk::Box, trigger: &gtk::Button, submenu: &gtk::Box) {
     let main_weak = main_page.downgrade();
     let submenu_weak = submenu.downgrade();
