@@ -98,14 +98,12 @@ pub(crate) fn install_resize_handles(shell: &gtk::Overlay, window: &gtk::Applica
             RESIZE_CORNER_SIZE,
             "se-resize",
         ),
-        (
-            gdk::SurfaceEdge::SouthWest,
-            gtk::Align::Start,
-            gtk::Align::End,
-            RESIZE_CORNER_SIZE,
-            RESIZE_CORNER_SIZE,
-            "sw-resize",
-        ),
+        // SouthWest is intentionally omitted: the bottom-left corner
+        // is occupied by the sidebar collapse / expand toggle in the
+        // status bar. The South and West edge handles still cover the
+        // rest of the bottom and left sides, so window resize from
+        // that quadrant remains possible — just not from the exact
+        // corner that hosts the button.
     ] {
         let handle = resize_handle(edge, window, cursor);
         handle.set_halign(halign);

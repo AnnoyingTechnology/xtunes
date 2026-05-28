@@ -34,7 +34,7 @@ use sustain_app_runtime::{ApplicationCommand, PlaylistId, PlaylistItem};
 use super::{
     LibraryChangedHolder, PLAYLISTS_VIEW, SONGS_VIEW, SharedRuntime, TrackRowChangedHolder,
     command_controller::SharedCommandController,
-    mode_bar::ShowPlaylistsViewCallback,
+    main_window::SidebarCollapseController,
     sidebar::PlaylistSidebar,
     sidebar_context::{
         NEW_PLAYLIST_DEFAULT_NAME, NEW_SMART_PLAYLIST_DEFAULT_NAME, unique_default_name,
@@ -51,11 +51,11 @@ pub(crate) struct GlobalShortcutContext {
     pub(crate) command_controller: SharedCommandController,
     pub(crate) runtime: SharedRuntime,
     pub(crate) sidebar: PlaylistSidebar,
+    pub(crate) sidebar_collapse: SidebarCollapseController,
     pub(crate) titlebar: Titlebar,
     pub(crate) songs_table: TrackTable,
     pub(crate) playlists_table: TrackTable,
     pub(crate) content_stack: gtk::Stack,
-    pub(crate) show_playlists: ShowPlaylistsViewCallback,
     pub(crate) library_changed_holder: LibraryChangedHolder,
     pub(crate) track_row_changed_holder: TrackRowChangedHolder,
 }
@@ -76,14 +76,11 @@ fn install_new_playlist(context: &GlobalShortcutContext) {
     let command_controller = context.command_controller.clone();
     let runtime = context.runtime.clone();
     let sidebar = context.sidebar.clone();
-    let show_playlists = context.show_playlists.clone();
+    let sidebar_collapse = context.sidebar_collapse.clone();
     action.connect_activate(move |_action, _parameter| {
-        // Switch to Playlists view first so the just-created entry, and
-        // its armed inline rename, are visible. The sidebar is hidden
-        // in Songs and Albums modes, where arming a rename on an
-        // off-screen widget would silently lose the keystrokes the user
-        // expects to follow Ctrl+N.
-        show_playlists();
+        // The just-created playlist row needs to be visible for its
+        // armed inline rename to receive visible keystrokes.
+        sidebar_collapse.expand_if_collapsed();
         create_new_playlist(&command_controller, &runtime, &sidebar);
     });
     context.app.add_action(&action);
@@ -101,9 +98,9 @@ fn install_new_smart_playlist(context: &GlobalShortcutContext) {
     let command_controller = context.command_controller.clone();
     let runtime = context.runtime.clone();
     let sidebar = context.sidebar.clone();
-    let show_playlists = context.show_playlists.clone();
+    let sidebar_collapse = context.sidebar_collapse.clone();
     action.connect_activate(move |_action, _parameter| {
-        show_playlists();
+        sidebar_collapse.expand_if_collapsed();
         open_new_smart_playlist_editor(&parent, command_controller.clone(), &runtime, &sidebar);
     });
     context.app.add_action(&action);

@@ -24,8 +24,8 @@ pub use sustain_domain::{
     SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField,
     SmartPlaylistTextOperator, SystemClock, Track, TrackAvailability, TrackColumnEntry,
     TrackColumnLayout, TrackColumnLayoutScope, TrackContentHash, TrackId, TrackLocation,
-    TrackMetadata, TrackPlaybackSource, TrackRelativePath, UiSettings, UiViewMode, UserSettings,
-    VolumePercent, matching_tracks, track_matches_rule_set,
+    TrackMetadata, TrackPlaybackSource, TrackRelativePath, UiSettings, UiSidebarSelection,
+    UserSettings, VolumePercent, matching_tracks, track_matches_rule_set,
 };
 use sustain_library_store::{AnalysisCapabilities, LibraryStore, OnlineCapabilities};
 pub use sustain_metadata::MetadataService;
@@ -1735,7 +1735,7 @@ mod tests {
         PlaylistItem, Rating, RepeatMode, SmartPlaylist, SmartPlaylistDateField, SmartPlaylistId,
         SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistRule,
         SmartPlaylistRuleSet, SmartPlaylistTextField, SmartPlaylistTextOperator, Track, TrackId,
-        TrackLocation, TrackMetadata, UiSettings, UiViewMode, UserSettings, VolumePercent,
+        TrackLocation, TrackMetadata, UiSettings, UiSidebarSelection, UserSettings, VolumePercent,
     };
     use sustain_library_store::{InMemoryLibraryStore, LibraryStore, StoreResult};
     use sustain_metadata::{MetadataChange, MetadataError, MetadataResult};
@@ -2848,8 +2848,9 @@ mod tests {
             ApplicationRuntime::with_settings_store(store).expect("load settings from test store");
         let ui = UiSettings {
             search_text: "jazz".to_owned(),
-            view_mode: UiViewMode::Albums,
-            playlist_selection: None,
+            sidebar_selection: UiSidebarSelection::Albums,
+            sidebar_collapsed: true,
+            sidebar_width: Some(212),
         };
 
         assert_eq!(runtime.save_ui_settings(ui.clone()), Ok(()));

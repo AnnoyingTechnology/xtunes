@@ -51,16 +51,17 @@ pub(crate) type SidebarAnalysisEnabledQuery = Rc<dyn Fn(AnalysisCapability) -> b
 /// Queries whether a given online capability is enabled globally.
 pub(crate) type SidebarOnlineEnabledQuery = Rc<dyn Fn(OnlineCapability) -> bool>;
 
-/// One of the sidebar's two selection targets.
+/// The sidebar's three selection targets.
 ///
-/// `Library` is the whole-library access point — the row presented in the
-/// sidebar UI as **"Music"** under the LIBRARY section header. The variant
-/// name stays `Library` because that is what the entry semantically *is*
-/// (the user's full library), independent of how it happens to be labelled
-/// in the chrome.
+/// The sidebar drives every top-level navigation choice:
+/// - `Music` — the LIBRARY → Music row, the whole-library track table.
+/// - `Albums` — the LIBRARY → Albums row, the album-cover grid.
+/// - `Item` — a row under the PLAYLISTS section (regular playlist,
+///   smart playlist, or folder).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SidebarSelection {
-    Library,
+    Music,
+    Albums,
     Item(PlaylistItem),
 }
 
@@ -74,12 +75,26 @@ type OnlineRunCallbackHolder = Rc<RefCell<Option<SidebarOnlineRunCallback>>>;
 type AnalysisEnabledQueryHolder = Rc<RefCell<Option<SidebarAnalysisEnabledQuery>>>;
 type OnlineEnabledQueryHolder = Rc<RefCell<Option<SidebarOnlineEnabledQuery>>>;
 
+/// Which row under the LIBRARY section is currently active. Mutually
+/// exclusive with a playlist selection in the list view.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum LibraryRowState {
+    #[default]
+    Music,
+    Albums,
+    /// A playlist (or no row at all) is selected — neither library row
+    /// paints itself active.
+    None,
+}
+
 #[derive(Clone)]
 pub(crate) struct PlaylistSidebar {
     root: gtk::Box,
+    footer: gtk::Box,
     selection: gtk::SingleSelection,
-    library_row: gtk::TreeExpander,
-    library_selected: Rc<Cell<bool>>,
+    music_row: gtk::TreeExpander,
+    albums_row: gtk::TreeExpander,
+    library_state: Rc<Cell<LibraryRowState>>,
     runtime: SharedRuntime,
     on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>>,
     on_move: MoveCallbackHolder,
@@ -103,8 +118,10 @@ impl PlaylistSidebar {
 
         root.append(&build_section_header("LIBRARY"));
 
-        let library_row = build_library_row();
-        root.append(&library_row);
+        let music_row = build_library_row("Music", "audio-x-generic-symbolic");
+        let albums_row = build_library_row("Albums", "media-optical-symbolic");
+        root.append(&music_row);
+        root.append(&albums_row);
 
         root.append(&build_section_header("PLAYLISTS"));
 
@@ -149,34 +166,62 @@ impl PlaylistSidebar {
         scroller.set_child(Some(&list_view));
         root.append(&scroller);
 
-        let library_selected = Rc::new(Cell::new(false));
+        // Sidebar footer. Built empty here; the main window appends the
+        // [cog] Settings button after construction. The footer is a
+        // full-width horizontal Box so a second button can sit beside
+        // Settings later without re-layout.
+        let footer = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        footer.add_css_class("playlist-sidebar-footer");
+        footer.set_hexpand(true);
+        root.append(&footer);
+
+        let library_state = Rc::new(Cell::new(LibraryRowState::Music));
         let on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>> =
             Rc::new(RefCell::new(None));
 
         connect_library_row(
-            &library_row,
-            &library_selected,
+            &music_row,
+            LibraryRowState::Music,
+            &music_row,
+            &albums_row,
+            &library_state,
+            &selection,
+            on_selection_changed.clone(),
+        );
+        connect_library_row(
+            &albums_row,
+            LibraryRowState::Albums,
+            &music_row,
+            &albums_row,
+            &library_state,
             &selection,
             on_selection_changed.clone(),
         );
         connect_selection_signal(
             &selection,
-            &library_row,
-            &library_selected,
+            &music_row,
+            &albums_row,
+            &library_state,
             on_selection_changed.clone(),
         );
 
-        // Library starts selected by default, matching the user's "Songs" mental
-        // model — opening the Playlists view shows the whole library until a
-        // specific playlist is picked.
-        library_row.add_css_class("selected");
-        library_selected.set(true);
+        // Music is the default landing entry for a fresh session.
+        // The SingleSelection's default behavior could otherwise pick
+        // the first row of the playlist tree as "selected", which
+        // would render two rows highlighted simultaneously (Music via
+        // its CSS class and a playlist via the list selection). Force
+        // an empty playlist selection up front; the LIBRARY state is
+        // the only thing live at this point.
+        music_row.add_css_class("selected");
+        selection.set_selected(gtk::INVALID_LIST_POSITION);
 
         Self {
             root,
+            footer,
             selection,
-            library_row,
-            library_selected,
+            music_row,
+            albums_row,
+            library_state,
             runtime,
             on_selection_changed,
             on_move,
@@ -194,6 +239,12 @@ impl PlaylistSidebar {
 
     pub(crate) fn widget(&self) -> gtk::Box {
         self.root.clone()
+    }
+
+    /// The empty container at the bottom of the sidebar where chrome
+    /// like the Settings button is appended after construction.
+    pub(crate) fn footer(&self) -> gtk::Box {
+        self.footer.clone()
     }
 
     pub(crate) fn set_selection_changed(&self, callback: SidebarSelectionChangedCallback) {
@@ -250,26 +301,51 @@ impl PlaylistSidebar {
     }
 
     pub(crate) fn current_selection(&self) -> Option<SidebarSelection> {
-        if self.library_selected.get() {
-            return Some(SidebarSelection::Library);
+        match self.library_state.get() {
+            LibraryRowState::Music => Some(SidebarSelection::Music),
+            LibraryRowState::Albums => Some(SidebarSelection::Albums),
+            LibraryRowState::None => selected_item(&self.selection).map(SidebarSelection::Item),
         }
-        selected_item(&self.selection).map(SidebarSelection::Item)
+    }
+
+    pub(crate) fn select_music(&self) {
+        self.activate_library_row(LibraryRowState::Music);
+    }
+
+    pub(crate) fn select_albums(&self) {
+        self.activate_library_row(LibraryRowState::Albums);
     }
 
     pub(crate) fn select_item(&self, item: PlaylistItem) {
-        self.library_selected.set(false);
-        self.library_row.remove_css_class("selected");
+        self.library_state.set(LibraryRowState::None);
+        self.music_row.remove_css_class("selected");
+        self.albums_row.remove_css_class("selected");
         if !select_item(&self.selection, item) {
-            self.select_library();
+            // The playlist no longer exists (e.g. deleted between
+            // sessions). Fall back to the default landing surface.
+            self.activate_library_row(LibraryRowState::Music);
         }
     }
 
-    fn select_library(&self) {
-        self.library_selected.set(true);
-        self.library_row.add_css_class("selected");
+    fn activate_library_row(&self, target: LibraryRowState) {
+        self.library_state.set(target);
+        match target {
+            LibraryRowState::Music => {
+                self.music_row.add_css_class("selected");
+                self.albums_row.remove_css_class("selected");
+            }
+            LibraryRowState::Albums => {
+                self.albums_row.add_css_class("selected");
+                self.music_row.remove_css_class("selected");
+            }
+            LibraryRowState::None => {
+                self.music_row.remove_css_class("selected");
+                self.albums_row.remove_css_class("selected");
+            }
+        }
         self.selection.set_selected(gtk::INVALID_LIST_POSITION);
         if let Some(callback) = self.on_selection_changed.borrow().as_ref() {
-            callback(Some(SidebarSelection::Library));
+            callback(self.current_selection());
         }
     }
 
@@ -292,15 +368,17 @@ impl PlaylistSidebar {
         self.selection.set_model(Some(&tree_model));
         match previous {
             Some(SidebarSelection::Item(item)) => {
-                self.library_selected.set(false);
-                self.library_row.remove_css_class("selected");
+                self.library_state.set(LibraryRowState::None);
+                self.music_row.remove_css_class("selected");
+                self.albums_row.remove_css_class("selected");
                 if !select_item(&self.selection, item) {
-                    self.library_selected.set(true);
-                    self.library_row.add_css_class("selected");
+                    self.library_state.set(LibraryRowState::Music);
+                    self.music_row.add_css_class("selected");
                 }
             }
-            Some(SidebarSelection::Library) | None => {
-                // Library stays selected (its CSS class was unchanged).
+            Some(SidebarSelection::Music) | Some(SidebarSelection::Albums) | None => {
+                // The library-row CSS state was left untouched; only
+                // ensure the playlist list view shows no selection.
                 self.selection.set_selected(gtk::INVALID_LIST_POSITION);
             }
         }
@@ -311,32 +389,30 @@ impl PlaylistSidebar {
     }
 }
 
-/// Builds the whole-library access row.
+/// Builds a row under the LIBRARY section (Music, Albums, …).
 ///
-/// Internally this is the [`SidebarSelection::Library`] entry; in the
-/// chrome it is labelled **"Music"** and rendered with the same
-/// `.playlist-sidebar-row` styling as a playlist row, so the LIBRARY and
-/// PLAYLISTS sections present a uniform list of selectable items.
+/// Rendered with the same `.playlist-sidebar-row` styling as a playlist
+/// row so the LIBRARY and PLAYLISTS sections present a uniform list of
+/// selectable items.
 ///
-/// The outer wrapper is a [`gtk::TreeExpander`] so Music sits at the
-/// same horizontal indent as the playlist-row factory's TreeExpanders.
-/// That column is only reserved when the expander has a real
-/// [`gtk::TreeListRow`] attached — without one, TreeExpander renders
-/// its child flush-left and Music ends up several pixels closer to the
-/// sidebar's left edge than the playlist rows. We have no real tree to
-/// mint a row from (Music is the library, not a playlist), so the
-/// helper below builds a one-item stub [`gtk::TreeListModel`] purely to
-/// obtain a depth-0, no-children row whose only job is to convince the
-/// expander to allocate its toggle column. The expander keeps a
-/// reference to the row (which keeps the stub model alive), so the
-/// model does not need to be stored on the sidebar struct.
-fn build_library_row() -> gtk::TreeExpander {
+/// The outer wrapper is a [`gtk::TreeExpander`] so each library row
+/// sits at the same horizontal indent as the playlist-row factory's
+/// TreeExpanders. That column is only reserved when the expander has a
+/// real [`gtk::TreeListRow`] attached — without one, TreeExpander
+/// renders its child flush-left. Library rows are not part of any tree
+/// model, so the helper below builds a one-item stub
+/// [`gtk::TreeListModel`] purely to obtain a depth-0, no-children row
+/// whose only job is to convince the expander to allocate its toggle
+/// column. The expander keeps a reference to the row (which keeps the
+/// stub model alive), so the model does not need to be stored on the
+/// sidebar struct.
+fn build_library_row(label_text: &str, icon_name: &str) -> gtk::TreeExpander {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
 
-    let icon = gtk::Image::from_icon_name("audio-x-generic-symbolic");
+    let icon = gtk::Image::from_icon_name(icon_name);
     icon.add_css_class("playlist-sidebar-icon");
 
-    let label = gtk::Label::new(Some("Music"));
+    let label = gtk::Label::new(Some(label_text));
     label.set_xalign(0.0);
     label.set_hexpand(true);
     label.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -376,52 +452,79 @@ fn build_section_header(text: &str) -> gtk::Label {
 }
 
 fn connect_library_row(
-    library_row: &gtk::TreeExpander,
-    library_selected: &Rc<Cell<bool>>,
+    target_row: &gtk::TreeExpander,
+    target_state: LibraryRowState,
+    music_row: &gtk::TreeExpander,
+    albums_row: &gtk::TreeExpander,
+    library_state: &Rc<Cell<LibraryRowState>>,
     selection: &gtk::SingleSelection,
     on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>>,
 ) {
     let gesture = gtk::GestureClick::new();
     gesture.set_button(gdk::BUTTON_PRIMARY);
 
-    let library_row_for_click = library_row.clone();
-    let library_selected_for_click = library_selected.clone();
-    let selection_for_click = selection.clone();
+    let music_row = music_row.clone();
+    let albums_row = albums_row.clone();
+    let library_state = library_state.clone();
+    let selection = selection.clone();
     gesture.connect_pressed(move |gesture, _n_press, _x, _y| {
         gesture.set_state(gtk::EventSequenceState::Claimed);
-        if !library_selected_for_click.get() {
-            library_selected_for_click.set(true);
-            library_row_for_click.add_css_class("selected");
-            selection_for_click.set_selected(gtk::INVALID_LIST_POSITION);
+        let already_active = library_state.get() == target_state;
+        if !already_active {
+            library_state.set(target_state);
+            match target_state {
+                LibraryRowState::Music => {
+                    music_row.add_css_class("selected");
+                    albums_row.remove_css_class("selected");
+                }
+                LibraryRowState::Albums => {
+                    albums_row.add_css_class("selected");
+                    music_row.remove_css_class("selected");
+                }
+                LibraryRowState::None => {}
+            }
+            selection.set_selected(gtk::INVALID_LIST_POSITION);
         }
         if let Some(callback) = on_selection_changed.borrow().as_ref() {
-            callback(Some(SidebarSelection::Library));
+            let selection = match target_state {
+                LibraryRowState::Music => SidebarSelection::Music,
+                LibraryRowState::Albums => SidebarSelection::Albums,
+                LibraryRowState::None => return,
+            };
+            callback(Some(selection));
         }
     });
-    library_row.add_controller(gesture);
+    target_row.add_controller(gesture);
 }
 
 fn connect_selection_signal(
     selection: &gtk::SingleSelection,
-    library_row: &gtk::TreeExpander,
-    library_selected: &Rc<Cell<bool>>,
+    music_row: &gtk::TreeExpander,
+    albums_row: &gtk::TreeExpander,
+    library_state: &Rc<Cell<LibraryRowState>>,
     on_selection_changed: Rc<RefCell<Option<SidebarSelectionChangedCallback>>>,
 ) {
     let selection_clone = selection.clone();
-    let library_row = library_row.clone();
-    let library_selected = library_selected.clone();
+    let music_row = music_row.clone();
+    let albums_row = albums_row.clone();
+    let library_state = library_state.clone();
     selection.connect_selected_notify(move |_selection| {
         let item = selected_item(&selection_clone);
         let new_selection = if let Some(item) = item {
-            if library_selected.get() {
-                library_selected.set(false);
-                library_row.remove_css_class("selected");
+            // A playlist row was just picked. Any active LIBRARY row
+            // loses its highlight.
+            if library_state.get() != LibraryRowState::None {
+                library_state.set(LibraryRowState::None);
+                music_row.remove_css_class("selected");
+                albums_row.remove_css_class("selected");
             }
             Some(SidebarSelection::Item(item))
-        } else if library_selected.get() {
-            Some(SidebarSelection::Library)
         } else {
-            None
+            match library_state.get() {
+                LibraryRowState::Music => Some(SidebarSelection::Music),
+                LibraryRowState::Albums => Some(SidebarSelection::Albums),
+                LibraryRowState::None => None,
+            }
         };
         if let Some(callback) = on_selection_changed.borrow().as_ref() {
             callback(new_selection);
@@ -606,13 +709,19 @@ fn build_row_factory(
     factory
 }
 
+/// Assembles the horizontal split between the sidebar and the main
+/// content column. The Paned is the single layout authority for the
+/// sidebar's width: drag-resize stays clamped between
+/// [`SIDEBAR_MIN_WIDTH`] and [`SIDEBAR_MAX_WIDTH`], and the
+/// collapse-toggle animation operates by tweening the Paned's
+/// position rather than by hiding the sidebar widget.
 pub(crate) fn build_content_area(sidebar: &gtk::Box, main_content: &gtk::Box) -> gtk::Paned {
     let content_area = gtk::Paned::new(gtk::Orientation::Horizontal);
     content_area.set_hexpand(true);
     content_area.set_vexpand(true);
     content_area.set_wide_handle(false);
     content_area.set_resize_start_child(false);
-    content_area.set_shrink_start_child(false);
+    content_area.set_shrink_start_child(true);
     content_area.set_resize_end_child(true);
     content_area.set_shrink_end_child(false);
     content_area.set_start_child(Some(sidebar));
@@ -622,8 +731,17 @@ pub(crate) fn build_content_area(sidebar: &gtk::Box, main_content: &gtk::Box) ->
     content_area
 }
 
+/// Clamps a user drag-resize back into the [`SIDEBAR_MIN_WIDTH`] /
+/// [`SIDEBAR_MAX_WIDTH`] band. Position `0` is treated as the
+/// collapsed state and is allowed through — the collapse-toggle
+/// animation drives the Paned through zero on its way to collapsed,
+/// and clamping that to MIN_WIDTH would visibly snap the sidebar back
+/// open mid-animation.
 fn clamp_sidebar_width(content_area: &gtk::Paned) {
     let current_width = content_area.position();
+    if current_width == 0 {
+        return;
+    }
     let clamped_width = current_width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
     if clamped_width != current_width {
         content_area.set_position(clamped_width);

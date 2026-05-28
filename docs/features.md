@@ -51,7 +51,7 @@ via `mtime + size` rather than re-decoded.
 
 ### Drag-and-drop import — *iso-iTunes*
 Dragging files or folders from Files (or any GNOME-compatible source) onto
-the Songs view imports them into the library. Folders are walked
+the Music view imports them into the library. Folders are walked
 recursively for supported audio formats. The drop zone shows an active
 state while a drag is hovered.
 
@@ -108,27 +108,41 @@ the next rescan.
 
 ## Views
 
-Sustain has three top-level view modes, switched from a segmented control
-sitting at the top of the main content column (not in the window chrome):
+Sustain has a single navigation surface: a sidebar to the left of the
+main content. The sidebar's LIBRARY section lists **Music** and
+**Albums**; the PLAYLISTS section lists every playlist, smart playlist,
+and folder. Clicking any entry swaps the right-hand content. There is
+no separate horizontal mode switcher.
 
-### Songs — *iso-iTunes*
-The default mode. A dense, full-width track table with multi-select,
-inline rating editing, column sorting, customizable columns, and a row
+### Music — *iso-iTunes*
+The default entry under LIBRARY, and the landing page for a fresh
+session. A dense, full-width track table with multi-select, inline
+rating editing, column sorting, customizable columns, and a row
 context menu.
 
 ### Albums — *iTunes-adjacent*
-A full-width album-cover grid. Tiles group by album (title + album
-artist + year). Clicking the cover button on a tile plays the album in
-isolation. The grid intentionally searches album-level fields only
-(title, artist, year), not individual track titles.
+The Albums entry under LIBRARY opens a full-width album-cover grid.
+Tiles group by album (title + album artist + year). Clicking the
+cover button on a tile plays the album in isolation. The grid
+intentionally searches album-level fields only (title, artist, year),
+not individual track titles.
 
 ### Playlists — *iso-iTunes*
-A sidebar of playlists, smart playlists, and folders, with the selected
-playlist's tracks shown to the right. The sidebar lives below the media
-top bar, left of the main content (not at the full window root).
+Selecting any row under the PLAYLISTS section opens that playlist's
+track table to the right of the sidebar, with a header strip
+summarising the playlist.
 
-### Mode persistence — *Sustain-native*
-The last active mode is restored on next launch.
+### Sidebar collapse toggle — *Sustain-native*
+A floating button in the bottom-left corner of the content area
+slides the sidebar in and out. Collapsed, the Music and Albums views
+occupy the full window width; the button stays in place so the
+sidebar can be brought back. The collapsed state is persisted across
+launches. While the sidebar is collapsed there is no in-app switcher
+for the LIBRARY entries — bring the sidebar back to change view.
+
+### Selection persistence — *Sustain-native*
+The sidebar's active row (Music, Albums, or a specific playlist) and
+its collapsed state are restored on next launch.
 
 ---
 
@@ -166,7 +180,7 @@ the top, one row per rule with field/operator/value widgets, a limit
 section, and OK/Cancel.
 
 ### Playlist header — *iTunes-adjacent*
-The Playlists view draws a header strip above the track table, the
+The playlist view draws a header strip above the track table, the
 same height as the integrated top bar. The strip shows the selected
 playlist's name in bold next to Play and Shuffle buttons that match the
 album-detail header's behaviour, with a muted second line summarising
@@ -194,7 +208,7 @@ tracks of their own.
 
 ### Per-track analysis & online retrieval — *Sustain-native*
 The same **Analyze** and **Retrieve** submenus appear on the track
-context menu (Songs view and Playlists view), so the user can target
+context menu (Music view and the playlist track table), so the user can target
 the currently-selected tracks instead of a whole playlist. Naming,
 menu shape, and insensitive-when-globally-covered semantics match
 the per-playlist version exactly.
@@ -337,7 +351,7 @@ case-insensitive and whitespace-normalized. The current search string
 is persisted across restarts.
 
 ### Column sorting — *iso-iTunes*
-Click a column header in the Songs or Playlists table to sort by it;
+Click a column header in the Music or playlist track table to sort by it;
 click again to reverse direction. Albums view is grid-based and does
 not sort by columns.
 
@@ -348,7 +362,8 @@ SQLite. Skips, Last Skipped, and Music Key ship hidden by default.
 
 ### Context-sensitive search scope — *iso-iTunes*
 The search bar filters whatever is currently visible: full library in
-Songs, the active playlist in Playlists, album-level fields in Albums.
+Music, the active playlist in a playlist view, album-level fields in
+Albums.
 
 ---
 
@@ -392,8 +407,9 @@ focus rings. Changing the system accent updates Sustain immediately.
 
 ## Track context menu — *iso-iTunes*
 
-Right-clicking a track (or selection) in Songs or Playlists exposes the
-following actions, separated into visually distinct groups:
+Right-clicking a track (or selection) in the Music view or a playlist
+view exposes the following actions, separated into visually distinct
+groups:
 
 - **Add to Playlist** — submenu showing all playlists, nested by folder
 - **Play Next** — insert at head of the Up Next queue

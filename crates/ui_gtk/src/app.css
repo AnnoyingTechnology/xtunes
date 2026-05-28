@@ -244,25 +244,8 @@ button.preferences-tab-button:checked {
     font-weight: 500;
 }
 
-.mode-button {
-    min-height: 22px;
-    border-radius: 999px;
-    padding-top: 0;
-    padding-bottom: 0;
-}
-
-.mode-button label {
-    padding-top: 0;
-    padding-bottom: 0;
-}
-
-.mode-bar,
 .status-bar {
     background-color: alpha(@theme_fg_color, 0.04);
-}
-
-.mode-bar {
-    border-bottom: 1px solid alpha(@theme_fg_color, 0.08);
 }
 
 .topbar-search,
@@ -638,6 +621,49 @@ listview.playlist-sidebar-list > row:focus {
     min-height: 0;
     padding-top: 0;
     padding-bottom: 0;
+}
+
+/* Sidebar footer strip. Full-width container at the bottom of the
+   sidebar; the [cog] Settings button currently fills it, and the
+   layout leaves room for a second button beside it later. A subtle
+   top hairline marks the footer as separate chrome from the
+   playlists list above. */
+.playlist-sidebar-footer {
+    padding: 4px 6px;
+    border-top: 1px solid alpha(@theme_fg_color, 0.08);
+}
+
+.sidebar-settings-button {
+    padding: 4px 8px;
+    border-radius: 4px;
+    color: alpha(@theme_fg_color, 0.78);
+}
+
+.sidebar-settings-button:hover {
+    background-color: alpha(@theme_fg_color, 0.06);
+    color: @theme_fg_color;
+}
+
+.sidebar-settings-icon {
+    opacity: 0.7;
+}
+
+/* Status-bar sidebar collapse / expand toggle. Lives at the start of
+   the status bar's CenterBox; flat by default so it reads as chrome
+   rather than as a primary action. Intentionally shorter than the
+   status bar's full height so the button doesn't dominate the strip. */
+.sidebar-collapse-toggle {
+    margin: 0 4px;
+    padding: 0 6px;
+    min-height: 14px;
+    min-width: 22px;
+    border-radius: 8px;
+    color: alpha(@theme_fg_color, 0.7);
+}
+
+.sidebar-collapse-toggle:hover {
+    background-color: alpha(@theme_fg_color, 0.08);
+    color: @theme_fg_color;
 }
 
 button.track-context-menu-item,

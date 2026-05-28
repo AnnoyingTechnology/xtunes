@@ -12,16 +12,17 @@ use gtk::{gdk, glib};
 use sustain_app_runtime::{
     PlaybackCommand, PlaybackQueueRequest, PlaybackQueueSource, Playlist, PlaylistEntry,
     PlaylistFolder, PlaylistFolderId, PlaylistItem, Rating, Track, TrackColumnLayout,
-    TrackColumnLayoutScope, TrackId, UiSettings, UiViewMode, track_matches_search_text,
+    TrackColumnLayoutScope, TrackId, UiSettings, UiSidebarSelection, track_matches_search_text,
 };
 
 use super::{
     ALBUMS_VIEW, APP_ID, AnalysisProgressReceiver, ApplicationCommand, ApplicationRuntime,
     ArtworkFetchResultReceiver, AvailabilityChangedCallback, LibraryChangedCallback,
     LibraryChangedHolder, MetadataWriteResultReceiver, MprisCommandReceiver,
-    OnlineProgressReceiver, PLAYLISTS_VIEW, PlaybackChangedCallback, SONGS_VIEW,
-    SharedMprisService, SharedRuntime, ShowAlbumAction, ShowAlbumHolder, SmartPlaylistTrackStatus,
-    TrackRowChangedCallback, TrackRowChangedHolder, TrackUpdatedReceiver,
+    OnlineProgressReceiver, PLAYLISTS_VIEW, PlaybackChangedCallback, SIDEBAR_DEFAULT_WIDTH,
+    SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SONGS_VIEW, SharedMprisService, SharedRuntime,
+    ShowAlbumAction, ShowAlbumHolder, SmartPlaylistTrackStatus, TrackRowChangedCallback,
+    TrackRowChangedHolder, TrackUpdatedReceiver,
     accent::install_accent_css,
     albums::AlbumsView,
     app_css::install_app_css,
@@ -35,13 +36,9 @@ use super::{
         LIBRARY_DROP_INDICATOR_CLASS, install_file_drop_target, library_import_requested_callback,
     },
     library_scan::library_scan_requested_callback,
-    mode_bar::{
-        ShowSongsViewCallback, ViewModeChangedCallback, build_mode_bar,
-        stack_child_for_playlists_mode,
-    },
     now_playing::NowPlayingView,
     playlists_header::{PlaylistsHeader, PlaylistsHeaderState},
-    preferences::install_preferences_action,
+    preferences::{install_preferences_action, settings_button},
     shortcuts::{
         GlobalShortcutContext, create_new_playlist, install_global_shortcuts,
         open_new_smart_playlist_editor,
@@ -74,6 +71,11 @@ use super::{
     },
     window_chrome::{install_resize_handles, install_window_state_chrome},
 };
+
+/// Recompute the status-bar summary (track count, total duration) for
+/// whichever view is currently visible. Fired after sidebar-driven
+/// view switches, library mutations, and search keystrokes.
+pub(crate) type VisibleSummaryRefreshCallback = Rc<dyn Fn()>;
 
 /// Channel receivers the main window installs as glib consumers on
 /// the GTK main loop. Bundled into a struct rather than passed as
@@ -219,7 +221,6 @@ pub(crate) fn build_main_window(
 
     let sidebar = PlaylistSidebar::new(runtime.clone());
     let sidebar_widget = sidebar.widget();
-    sidebar_widget.set_visible(false);
 
     let library_track_activated = library_track_activated_callback(
         &command_controller,
@@ -412,29 +413,23 @@ pub(crate) fn build_main_window(
     install_online_progress_consumer(online_progress_rx, runtime.clone());
     install_track_data_observer(&runtime, track_row_changed_holder.clone());
     install_track_updated_consumer(track_updated_rx, runtime.clone());
-    // Authoritative record of the user's top-bar view-mode choice.
-    //
-    // The mode used to be inferred from `content_stack.visible_child_name()`
-    // alone, but Playlists mode now multiplexes that stack between
-    // `SONGS_VIEW` (Library/Music selection) and `PLAYLISTS_VIEW` (playlist
-    // selection) depending on the sidebar — so the stack child is no longer
-    // a faithful witness of the mode. This cell is the single source of
-    // truth, written by `mode_bar::apply_view_mode` and read by everything
-    // that needs to persist or branch on the active mode.
-    let current_view_mode: Rc<Cell<UiViewMode>> = Rc::new(Cell::new(UiViewMode::Songs));
+    // The sidebar is now the sole navigation surface: its selection
+    // chooses which content-stack page is visible (Music → SONGS_VIEW,
+    // Albums → ALBUMS_VIEW, an Item → PLAYLISTS_VIEW). The non-default
+    // selections are applied AFTER first-frame by
+    // [`DeferredStartup`] so the cold-start budget covers only the
+    // cheap Music page.
     sidebar.set_selection_changed(sidebar_selection_changed_callback(
         &runtime,
         &playlists_table,
         &playlists_header,
         &content_stack,
-        &current_view_mode,
         &playlists_dirty,
         visible_summary_refresh.clone(),
         &current_search_text,
     ));
-    if let Some(selection) = initial_ui_settings.playlist_selection {
-        sidebar.select_item(selection);
-    }
+    let deferred_startup =
+        DeferredStartup::new(initial_ui_settings.sidebar_selection, sidebar.clone());
     install_search_wiring(
         &titlebar,
         SearchWiringContext {
@@ -499,22 +494,39 @@ pub(crate) fn build_main_window(
     main_content.set_vexpand(true);
     let command_controller_for_shortcuts = command_controller.clone();
     let command_controller_for_global_shortcuts = command_controller.clone();
-    let mode_bar = build_mode_bar(
+
+    // Sidebar footer: the [cog] Settings button is the visual
+    // entry-point to Preferences (the Ctrl+, accelerator is the power-
+    // user path, registered separately by `install_preferences_action`).
+    sidebar.footer().append(&settings_button(
         &window,
-        &sidebar,
-        &content_stack,
-        &current_view_mode,
         command_controller,
         scan_requested,
         consolidation_requested.clone(),
-        UiViewMode::Songs,
-        visible_summary_refresh,
+    ));
+
+    main_content.append(&content_stack);
+
+    // gtk::Paned keeps drag-resize between SIDEBAR_MIN_WIDTH and
+    // SIDEBAR_MAX_WIDTH, with the user's manually-set width preserved
+    // for the next launch via the sidebar collapse controller. The
+    // collapse animation tweens the Paned position rather than
+    // hiding the sidebar widget, so the existing min/max clamp and
+    // drag handle survive untouched. Construct the controller before
+    // wiring shortcuts so Ctrl+N / Ctrl+Alt+N can re-expand a
+    // collapsed sidebar before arming a row rename.
+    let content_area = build_content_area(&sidebar_widget, &main_content);
+    let collapse_controller = SidebarCollapseController::new(
+        content_area.clone(),
+        initial_ui_settings.sidebar_collapsed,
+        initial_ui_settings.sidebar_width,
     );
-    let deferred_startup = DeferredStartup::new(initial_ui_settings.view_mode, &mode_bar);
+    status_bar.install_sidebar_collapse_toggle(collapse_controller.toggle_widget());
+
     let albums_view_for_reveal = albums_view.clone();
-    let show_albums_view = mode_bar.show_albums.clone();
+    let sidebar_for_show_album = sidebar.clone();
     let show_album_action: ShowAlbumAction = Rc::new(move |track_id| {
-        show_albums_view();
+        sidebar_for_show_album.select_albums();
         albums_view_for_reveal.reveal_album_for_track(track_id);
     });
     show_album_holder.replace(Some(show_album_action));
@@ -528,7 +540,7 @@ pub(crate) fn build_main_window(
             playlists_table: playlists_table.clone(),
             albums_view: albums_view.clone(),
             content_stack: content_stack.clone(),
-            show_songs: mode_bar.show_songs.clone(),
+            sidebar: sidebar.clone(),
         },
     );
     install_global_shortcuts(GlobalShortcutContext {
@@ -537,18 +549,14 @@ pub(crate) fn build_main_window(
         command_controller: command_controller_for_global_shortcuts,
         runtime: runtime.clone(),
         sidebar: sidebar.clone(),
+        sidebar_collapse: collapse_controller.clone(),
         titlebar: titlebar.clone(),
         songs_table: songs_table.clone(),
         playlists_table: playlists_table.clone(),
         content_stack: content_stack.clone(),
-        show_playlists: mode_bar.show_playlists.clone(),
         library_changed_holder: library_changed_holder.clone(),
         track_row_changed_holder: track_row_changed_holder.clone(),
     });
-    main_content.append(&mode_bar.widget);
-    main_content.append(&content_stack);
-
-    let content_area = build_content_area(&sidebar_widget, &main_content);
 
     root.append(&titlebar.widget);
     root.append(&content_area);
@@ -576,8 +584,8 @@ pub(crate) fn build_main_window(
     let playlists_table_for_close = playlists_table.clone();
     let titlebar_for_close = titlebar.clone();
     let runtime_for_close = runtime.clone();
-    let current_view_mode_for_close = current_view_mode.clone();
     let sidebar_for_close = sidebar.clone();
+    let collapse_controller_for_close = collapse_controller.clone();
     window.connect_close_request(move |_window| {
         songs_table_for_close.flush_pending_layout_save();
         playlists_table_for_close.flush_pending_layout_save();
@@ -586,8 +594,9 @@ pub(crate) fn build_main_window(
             .borrow_mut()
             .save_ui_settings(ui_settings_from_widgets(
                 &titlebar_for_close,
-                current_view_mode_for_close.get(),
                 &sidebar_for_close,
+                collapse_controller_for_close.is_collapsed(),
+                collapse_controller_for_close.expanded_width(),
             ));
         glib::Propagation::Proceed
     });
@@ -617,28 +626,30 @@ impl BuiltMainWindow {
     }
 }
 
+/// Post-first-frame work scheduled to keep the cold-start budget tight.
+///
+/// The Music view is the cheap default and is already built into the
+/// content stack by the time `present()` returns. Restoring Albums or a
+/// specific playlist as the persisted selection would otherwise drag
+/// album-grouping or playlist-table population into the startup
+/// critical path — both can run on the first idle instead, after the
+/// window has had a chance to paint.
 struct DeferredStartup {
-    restore_view_mode: Option<Box<dyn FnOnce()>>,
+    restore_selection: Option<Box<dyn FnOnce()>>,
 }
 
 impl DeferredStartup {
-    fn new(view_mode: UiViewMode, mode_bar: &super::mode_bar::ModeBar) -> Self {
-        let restore_view_mode = match view_mode {
-            UiViewMode::Songs => None,
-            UiViewMode::Albums => {
-                let show_albums = mode_bar.show_albums.clone();
-                Some(Box::new(move || show_albums()) as Box<dyn FnOnce()>)
-            }
-            UiViewMode::Playlists => {
-                let show_playlists = mode_bar.show_playlists.clone();
-                Some(Box::new(move || show_playlists()) as Box<dyn FnOnce()>)
-            }
+    fn new(selection: UiSidebarSelection, sidebar: PlaylistSidebar) -> Self {
+        let restore_selection: Option<Box<dyn FnOnce()>> = match selection {
+            UiSidebarSelection::Music => None,
+            UiSidebarSelection::Albums => Some(Box::new(move || sidebar.select_albums())),
+            UiSidebarSelection::Playlist(item) => Some(Box::new(move || sidebar.select_item(item))),
         };
-        Self { restore_view_mode }
+        Self { restore_selection }
     }
 
     fn run(self) {
-        if let Some(restore) = self.restore_view_mode {
+        if let Some(restore) = self.restore_selection {
             restore();
         }
     }
@@ -647,11 +658,10 @@ impl DeferredStartup {
 /// Defer the cost of populating the Albums view until the user
 /// actually switches to it. Activation groups the current library into
 /// album rows and lets the virtualized Albums view bind only visible
-/// rows; doing that at startup still provides no benefit while Songs is
-/// the initial mode. Hooking into the content stack's visible-child
-/// notification keeps the activation trigger in one place — any caller
-/// that flips the stack to ALBUMS_VIEW
-/// (the mode-bar toggle, the reveal-album action, future shortcuts)
+/// rows; doing that at startup provides no benefit while Music is the
+/// initial visible page. Hooking into the content stack's
+/// visible-child notification keeps the activation trigger in one
+/// place — any caller that flips the stack to `ALBUMS_VIEW`
 /// automatically picks it up. `activate()` is idempotent, so the
 /// notification firing on every later switch is harmless.
 fn install_albums_view_activator(content_stack: &gtk::Stack, albums_view: &AlbumsView) {
@@ -664,13 +674,14 @@ fn install_albums_view_activator(content_stack: &gtk::Stack, albums_view: &Album
 }
 
 /// Mirror of `install_albums_view_activator` for the Playlists view.
-/// The table is built empty and stays empty as long as Songs is the
-/// visible view; library_changed / selection-changed / search rebuilds
-/// flip a `dirty` flag instead of running `replace_rows`. When the user
-/// switches to Playlists, the activator pays the rebuild cost once with
-/// the current state and clears the flag. Songs is the default mode, so
-/// in the common case the playlists table is never populated for a
-/// session that does not visit it.
+/// The table is built empty and stays empty while another page is
+/// visible; `library_changed` / selection-changed / search rebuilds
+/// flip a `dirty` flag instead of running `replace_rows`. When the
+/// user picks a playlist row in the sidebar, the activator pays the
+/// rebuild cost once with the current state and clears the flag.
+/// Music is the default landing page, so in the common case the
+/// playlists table is never populated for a session that does not
+/// visit a playlist.
 fn install_playlists_view_activator(
     content_stack: &gtk::Stack,
     runtime: &SharedRuntime,
@@ -707,16 +718,19 @@ fn install_playlists_view_activator(
 
 fn ui_settings_from_widgets(
     titlebar: &Titlebar,
-    view_mode: UiViewMode,
     sidebar: &PlaylistSidebar,
+    sidebar_collapsed: bool,
+    sidebar_width: u32,
 ) -> UiSettings {
     UiSettings {
         search_text: titlebar.search_text(),
-        view_mode,
-        playlist_selection: match sidebar.current_selection() {
-            Some(SidebarSelection::Item(item)) => Some(item),
-            Some(SidebarSelection::Library) | None => None,
+        sidebar_selection: match sidebar.current_selection() {
+            Some(SidebarSelection::Music) | None => UiSidebarSelection::Music,
+            Some(SidebarSelection::Albums) => UiSidebarSelection::Albums,
+            Some(SidebarSelection::Item(item)) => UiSidebarSelection::Playlist(item),
         },
+        sidebar_collapsed,
+        sidebar_width: Some(sidebar_width),
     }
 }
 
@@ -774,7 +788,6 @@ fn playlists_header_state_for(
     rows: &[TrackTableRow],
 ) -> Option<PlaylistsHeaderState> {
     let title = match selection {
-        Some(SidebarSelection::Library) => "Music".to_string(),
         Some(SidebarSelection::Item(PlaylistItem::Playlist(id))) => runtime
             .playlists()
             .iter()
@@ -789,8 +802,13 @@ fn playlists_header_state_for(
             .clone(),
         // Folders aggregate their children in the sidebar but are not
         // themselves a playable track set, so the header has nothing
-        // meaningful to show.
-        Some(SidebarSelection::Item(PlaylistItem::Folder(_))) | None => return None,
+        // meaningful to show. Music / Albums selections do not render
+        // the playlists header at all (the stack shows a different
+        // child).
+        Some(SidebarSelection::Item(PlaylistItem::Folder(_)))
+        | Some(SidebarSelection::Music)
+        | Some(SidebarSelection::Albums)
+        | None => return None,
     };
     Some(PlaylistsHeaderState {
         title,
@@ -804,7 +822,7 @@ fn library_changed_callback(
     songs_table: &TrackTable,
     albums_view: &AlbumsView,
     sidebar: &PlaylistSidebar,
-    visible_summary_refresh: ViewModeChangedCallback,
+    visible_summary_refresh: VisibleSummaryRefreshCallback,
     current_search_text: &Rc<RefCell<String>>,
 ) -> LibraryChangedCallback {
     let runtime = runtime.clone();
@@ -875,7 +893,7 @@ fn visible_summary_refresh_callback(
     sidebar: &PlaylistSidebar,
     status_bar: &StatusBar,
     current_search_text: &Rc<RefCell<String>>,
-) -> ViewModeChangedCallback {
+) -> VisibleSummaryRefreshCallback {
     let runtime = runtime.clone();
     let content_stack = content_stack.clone();
     let sidebar = sidebar.clone();
@@ -1234,16 +1252,14 @@ fn sidebar_selection_changed_callback(
     playlists_table: &TrackTable,
     playlists_header: &PlaylistsHeader,
     content_stack: &gtk::Stack,
-    current_view_mode: &Rc<Cell<UiViewMode>>,
     playlists_dirty: &Rc<Cell<bool>>,
-    visible_summary_refresh: ViewModeChangedCallback,
+    visible_summary_refresh: VisibleSummaryRefreshCallback,
     current_search_text: &Rc<RefCell<String>>,
 ) -> super::sidebar::SidebarSelectionChangedCallback {
     let runtime = runtime.clone();
     let playlists_table = playlists_table.clone();
     let playlists_header = playlists_header.clone();
     let content_stack = content_stack.clone();
-    let current_view_mode = current_view_mode.clone();
     let playlists_dirty = playlists_dirty.clone();
     let current_search_text = current_search_text.clone();
 
@@ -1260,17 +1276,17 @@ fn sidebar_selection_changed_callback(
         ) {
             playlists_table.apply_playlist_default_sort();
         }
-        // In Playlists mode, the sidebar selection chooses which page of
-        // the content stack is visible: Library/Music routes to the
-        // already-populated songs view (no rebuild), a real playlist
-        // routes to the playlist-detail view (header + per-selection
-        // table). Outside Playlists mode the stack child is owned by the
-        // top-bar mode and must not be touched here.
-        if current_view_mode.get() == UiViewMode::Playlists {
-            let target = stack_child_for_playlists_mode(selection);
-            if content_stack.visible_child_name().as_deref() != Some(target) {
-                content_stack.set_visible_child_name(target);
-            }
+        // The sidebar selection is the sole driver of the content
+        // stack: Music → SONGS_VIEW, Albums → ALBUMS_VIEW, a playlist
+        // item → PLAYLISTS_VIEW. A null selection means nothing is
+        // active and we fall back to the cheap Songs page.
+        let target = match selection {
+            Some(SidebarSelection::Music) | None => SONGS_VIEW,
+            Some(SidebarSelection::Albums) => ALBUMS_VIEW,
+            Some(SidebarSelection::Item(_)) => PLAYLISTS_VIEW,
+        };
+        if content_stack.visible_child_name().as_deref() != Some(target) {
+            content_stack.set_visible_child_name(target);
         }
         let search_text = current_search_text.borrow().clone();
         refresh_playlists_view_if_visible(
@@ -1287,18 +1303,18 @@ fn sidebar_selection_changed_callback(
 }
 
 /// Wires the topbar SearchEntry to a debounced callback that re-filters
-/// all three view modes (Songs, Albums, Playlists) plus the status-bar
-/// summary against the new query. All three views are rebuilt on each
-/// fire so that switching modes mid-query never shows stale unfiltered
-/// content.
+/// all three content pages (Music, Albums, Playlists) plus the
+/// status-bar summary against the new query. All three are rebuilt on
+/// each fire so that switching pages mid-query never shows stale
+/// unfiltered content.
 ///
 /// Filtering follows the agreed product semantics:
-/// - Songs view filters across the 7 track-level fields covered by
+/// - Music view filters across the 7 track-level fields covered by
 ///   [`track_matches_search_text`].
 /// - Albums view filters by album-level fields only (title, artist,
 ///   year) via [`AlbumsView::set_search_text`].
-/// - Playlists view filters within the currently selected playlist /
-///   smart playlist / Library pseudo-entry, again on track fields.
+/// - Playlist view filters within the currently selected playlist /
+///   smart playlist, again on track fields.
 ///
 /// Debouncing: rebuilding the visible track table on every keystroke is
 /// expensive — not because of the in-memory filter (microseconds) but
@@ -1321,7 +1337,7 @@ struct SearchWiringContext {
     sidebar: PlaylistSidebar,
     content_stack: gtk::Stack,
     playlists_dirty: Rc<Cell<bool>>,
-    visible_summary_refresh: ViewModeChangedCallback,
+    visible_summary_refresh: VisibleSummaryRefreshCallback,
 }
 
 fn install_search_wiring(titlebar: &Titlebar, context: SearchWiringContext) {
@@ -1492,7 +1508,11 @@ fn playlist_table_rows_for(
     // collate equal under the status column sorter and are unaffected by
     // the play-order sort.
     let candidates: Vec<(Track, Option<u32>)> = match selection {
-        Some(SidebarSelection::Library) => runtime
+        // The playlists table mirrors the Music view's rows when the
+        // Music entry is selected — same library track set, no
+        // play-position. (PLAYLISTS_VIEW is not actually shown for
+        // Music / Albums, but the table-rebuild path is shared.)
+        Some(SidebarSelection::Music) => runtime
             .library_tracks()
             .iter()
             .map(|track| (track.clone(), None))
@@ -2090,7 +2110,7 @@ fn queue_request_for_playlist_selection(
     selection: Option<SidebarSelection>,
     search_text: &str,
 ) -> PlaybackQueueRequest {
-    if matches!(selection, Some(SidebarSelection::Library)) {
+    if matches!(selection, Some(SidebarSelection::Music)) {
         return queue_request_for_library(runtime, search_text);
     }
 
@@ -2320,7 +2340,7 @@ struct TrackRowChangedContext<'a> {
     sidebar: &'a PlaylistSidebar,
     content_stack: &'a gtk::Stack,
     playlists_dirty: &'a Rc<Cell<bool>>,
-    visible_summary_refresh: ViewModeChangedCallback,
+    visible_summary_refresh: VisibleSummaryRefreshCallback,
     current_search_text: &'a Rc<RefCell<String>>,
 }
 
@@ -2693,7 +2713,7 @@ struct KeyboardShortcutContext {
     playlists_table: TrackTable,
     albums_view: AlbumsView,
     content_stack: gtk::Stack,
-    show_songs: ShowSongsViewCallback,
+    sidebar: PlaylistSidebar,
 }
 
 fn install_keyboard_shortcuts(window: &gtk::ApplicationWindow, context: KeyboardShortcutContext) {
@@ -2705,7 +2725,7 @@ fn install_keyboard_shortcuts(window: &gtk::ApplicationWindow, context: Keyboard
         playlists_table,
         albums_view,
         content_stack,
-        show_songs,
+        sidebar,
     } = context;
 
     let key_controller = gtk::EventControllerKey::new();
@@ -2734,7 +2754,7 @@ fn install_keyboard_shortcuts(window: &gtk::ApplicationWindow, context: Keyboard
                 &playlists_table,
                 &albums_view,
                 &content_stack,
-                &show_songs,
+                &sidebar,
             );
             return glib::Propagation::Stop;
         }
@@ -2744,23 +2764,23 @@ fn install_keyboard_shortcuts(window: &gtk::ApplicationWindow, context: Keyboard
     window.add_controller(key_controller);
 }
 
-/// Reveal the currently playing track in the active view, or fall back to
-/// Songs if the active view cannot show it. Does nothing when nothing has
-/// ever played (no current `now_playing.track`). Paused tracks still
-/// qualify — they remain the current track until something else loads.
+/// Reveal the currently playing track in the active view, or fall back
+/// to Music if the active view cannot show it. Does nothing when
+/// nothing has ever played (no current `now_playing.track`). Paused
+/// tracks still qualify — they remain the current track until
+/// something else loads.
 ///
-/// In Playlists mode with the Library/Music entry selected the visible
-/// stack child is `SONGS_VIEW`, so this dispatches to `songs_table` and
-/// behaves identically to a Ctrl-L from Songs mode. The per-playlist
-/// table only receives the reveal when a real playlist or smart
-/// playlist is the current selection.
+/// The fallback path picks the Music entry in the sidebar so the
+/// content stack flips to `SONGS_VIEW` and the songs table receives
+/// the reveal. The per-playlist table only receives the reveal when a
+/// real playlist or smart playlist is the current selection.
 fn jump_to_current_track(
     runtime: &SharedRuntime,
     songs_table: &TrackTable,
     playlists_table: &TrackTable,
     albums_view: &AlbumsView,
     content_stack: &gtk::Stack,
-    show_songs: &ShowSongsViewCallback,
+    sidebar: &PlaylistSidebar,
 ) {
     let Some(track_id) = runtime
         .borrow()
@@ -2784,7 +2804,7 @@ fn jump_to_current_track(
         return;
     }
 
-    show_songs();
+    sidebar.select_music();
     songs_table.reveal_track(track_id);
 }
 
@@ -2803,6 +2823,139 @@ fn focus_accepts_text(window: &gtk::ApplicationWindow) -> bool {
         };
         focus = parent;
     }
+}
+
+/// Owns the sidebar collapse / expand state, the toggle button that
+/// drives it, and the last manually-set expanded width so a user who
+/// drag-resized the sidebar keeps that width on re-expand.
+///
+/// State transitions snap the [`gtk::Paned`]'s position instantly —
+/// the right-hand content column hosts views (Albums grid, track
+/// table virtualisation) whose layout cost makes a continuously-
+/// resizing animation visibly choppy. An instant flip is also closer
+/// to the iTunes 11 sidebar toggle, which had no slide animation.
+#[derive(Clone)]
+pub(crate) struct SidebarCollapseController {
+    inner: Rc<SidebarCollapseControllerInner>,
+}
+
+struct SidebarCollapseControllerInner {
+    paned: gtk::Paned,
+    toggle: gtk::Button,
+    collapsed: Cell<bool>,
+    last_expanded_position: Cell<i32>,
+}
+
+impl SidebarCollapseController {
+    fn new(paned: gtk::Paned, initial_collapsed: bool, initial_width: Option<u32>) -> Self {
+        let toggle = gtk::Button::new();
+        toggle.add_css_class("flat");
+        toggle.add_css_class("sidebar-collapse-toggle");
+        toggle.set_focus_on_click(false);
+        toggle.set_can_focus(false);
+
+        // Clamp the persisted width back into the legal band. The
+        // domain stores whatever the user last set; the UI is the
+        // authority on min/max, so out-of-band values are silently
+        // pulled into range rather than rejected.
+        let expanded_width = initial_width
+            .map(|width| (width as i32).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH))
+            .unwrap_or(SIDEBAR_DEFAULT_WIDTH);
+
+        let inner = Rc::new(SidebarCollapseControllerInner {
+            paned: paned.clone(),
+            toggle: toggle.clone(),
+            collapsed: Cell::new(initial_collapsed),
+            last_expanded_position: Cell::new(expanded_width),
+        });
+
+        // Apply the persisted collapsed state.
+        if initial_collapsed {
+            inner.paned.set_position(0);
+        } else {
+            inner.paned.set_position(expanded_width);
+        }
+        sync_collapse_toggle_icon(&toggle, initial_collapsed);
+
+        // Track user-driven drag-resizes so we restore the chosen
+        // width on the next expand.
+        let inner_for_position = inner.clone();
+        inner.paned.connect_position_notify(move |content_area| {
+            if inner_for_position.collapsed.get() {
+                return;
+            }
+            let position = content_area.position();
+            if position > 0 {
+                inner_for_position.last_expanded_position.set(position);
+            }
+        });
+
+        let inner_for_click = inner.clone();
+        toggle.connect_clicked(move |_| {
+            let controller = SidebarCollapseController {
+                inner: inner_for_click.clone(),
+            };
+            controller.toggle();
+        });
+
+        Self { inner }
+    }
+
+    fn toggle_widget(&self) -> gtk::Button {
+        self.inner.toggle.clone()
+    }
+
+    fn is_collapsed(&self) -> bool {
+        self.inner.collapsed.get()
+    }
+
+    /// The last manually-set expanded width, in pixels. Used at
+    /// shutdown to persist the user's preferred sidebar width. Always
+    /// the expanded width — collapsing does not zero this out, so
+    /// re-expanding restores the same value on next launch.
+    fn expanded_width(&self) -> u32 {
+        self.inner.last_expanded_position.get().max(0) as u32
+    }
+
+    /// No-op when the sidebar is already visible. Used by shortcuts
+    /// that need the sidebar on-screen for their UI affordance to be
+    /// visible (e.g. Ctrl+N's armed inline rename of a new playlist
+    /// row).
+    pub(crate) fn expand_if_collapsed(&self) {
+        if self.inner.collapsed.get() {
+            self.toggle();
+        }
+    }
+
+    fn toggle(&self) {
+        let collapse = !self.inner.collapsed.get();
+        self.inner.collapsed.set(collapse);
+        sync_collapse_toggle_icon(&self.inner.toggle, collapse);
+
+        let target = if collapse {
+            0
+        } else {
+            self.inner.last_expanded_position.get().max(1)
+        };
+        self.inner.paned.set_position(target);
+    }
+}
+
+/// Repaint the toggle's icon and tooltip to advertise the action the
+/// next click performs.
+///
+/// - When the sidebar is visible, the click collapses it — show a
+///   left-pointing arrow ("Collapse sidebar").
+/// - When the sidebar is hidden, the click brings it back — show a
+///   right-pointing arrow ("Show sidebar").
+fn sync_collapse_toggle_icon(button: &gtk::Button, collapsed: bool) {
+    let (icon_name, tooltip) = if collapsed {
+        ("go-next-symbolic", "Show sidebar")
+    } else {
+        ("go-previous-symbolic", "Collapse sidebar")
+    };
+    button.set_icon_name(icon_name);
+    button.set_tooltip_text(Some(tooltip));
 }
 
 fn install_app_icon() {

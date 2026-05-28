@@ -16,7 +16,7 @@ pub use sustain_domain::{
     AnalysisSettings, BackgroundJobsSettings, BackgroundResourceUsage,
     DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings, OnlineSettings,
     PlaybackSettings, PlaylistFolderId, PlaylistId, PlaylistItem, SmartPlaylistId, UiSettings,
-    UiViewMode, UserSettings, VolumePercent,
+    UiSidebarSelection, UserSettings, VolumePercent,
 };
 
 pub type SettingsResult<T> = Result<T, SettingsError>;
@@ -155,9 +155,11 @@ struct UiSettingsDocument {
     #[serde(default)]
     search_text: String,
     #[serde(default)]
-    view_mode: UiViewModeDocument,
+    sidebar_selection: UiSidebarSelectionDocument,
     #[serde(default)]
-    playlist_selection: Option<PlaylistSelectionDocument>,
+    sidebar_collapsed: bool,
+    #[serde(default)]
+    sidebar_width: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -216,18 +218,16 @@ enum LibraryManagementModeDocument {
     CopyAddedFilesIntoLibrary,
 }
 
+/// Persisted form of [`UiSidebarSelection`]. Serialised as a tagged
+/// table with a `kind` discriminant; playlist-typed selections carry
+/// the numeric id under `id`. Unknown or missing tables fall back to
+/// the default Music selection on load.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum UiViewModeDocument {
-    #[default]
-    Songs,
-    Albums,
-    Playlists,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
-enum PlaylistSelectionDocument {
+enum UiSidebarSelectionDocument {
+    #[default]
+    Music,
+    Albums,
     Playlist(i64),
     SmartPlaylist(i64),
     Folder(i64),
@@ -248,11 +248,11 @@ impl SettingsDocument {
             },
             ui: UiSettingsDocument {
                 search_text: settings.ui.search_text,
-                view_mode: UiViewModeDocument::from_domain(settings.ui.view_mode),
-                playlist_selection: settings
-                    .ui
-                    .playlist_selection
-                    .map(PlaylistSelectionDocument::from_domain),
+                sidebar_selection: UiSidebarSelectionDocument::from_domain(
+                    settings.ui.sidebar_selection,
+                ),
+                sidebar_collapsed: settings.ui.sidebar_collapsed,
+                sidebar_width: settings.ui.sidebar_width,
             },
             analysis: AnalysisSettingsDocument {
                 bpm: settings.analysis.bpm,
@@ -284,11 +284,9 @@ impl SettingsDocument {
             },
             ui: UiSettings {
                 search_text: self.ui.search_text,
-                view_mode: self.ui.view_mode.into_domain(),
-                playlist_selection: self
-                    .ui
-                    .playlist_selection
-                    .and_then(PlaylistSelectionDocument::into_domain),
+                sidebar_selection: self.ui.sidebar_selection.into_domain(),
+                sidebar_collapsed: self.ui.sidebar_collapsed,
+                sidebar_width: self.ui.sidebar_width,
             },
             analysis: AnalysisSettings {
                 bpm: self.analysis.bpm,
@@ -341,38 +339,41 @@ impl LibraryManagementModeDocument {
     }
 }
 
-impl UiViewModeDocument {
-    fn from_domain(mode: UiViewMode) -> Self {
-        match mode {
-            UiViewMode::Songs => Self::Songs,
-            UiViewMode::Albums => Self::Albums,
-            UiViewMode::Playlists => Self::Playlists,
-        }
-    }
-
-    fn into_domain(self) -> UiViewMode {
-        match self {
-            Self::Songs => UiViewMode::Songs,
-            Self::Albums => UiViewMode::Albums,
-            Self::Playlists => UiViewMode::Playlists,
-        }
-    }
-}
-
-impl PlaylistSelectionDocument {
-    fn from_domain(selection: PlaylistItem) -> Self {
+impl UiSidebarSelectionDocument {
+    fn from_domain(selection: UiSidebarSelection) -> Self {
         match selection {
-            PlaylistItem::Playlist(id) => Self::Playlist(id.get()),
-            PlaylistItem::SmartPlaylist(id) => Self::SmartPlaylist(id.get()),
-            PlaylistItem::Folder(id) => Self::Folder(id.get()),
+            UiSidebarSelection::Music => Self::Music,
+            UiSidebarSelection::Albums => Self::Albums,
+            UiSidebarSelection::Playlist(PlaylistItem::Playlist(id)) => Self::Playlist(id.get()),
+            UiSidebarSelection::Playlist(PlaylistItem::SmartPlaylist(id)) => {
+                Self::SmartPlaylist(id.get())
+            }
+            UiSidebarSelection::Playlist(PlaylistItem::Folder(id)) => Self::Folder(id.get()),
         }
     }
 
-    fn into_domain(self) -> Option<PlaylistItem> {
+    /// Lossy in one direction: a persisted playlist/smart/folder id that
+    /// no longer exists in the library (deleted between sessions) is
+    /// silently demoted to the default Music selection rather than
+    /// surfaced as an error. The caller has no UI affordance for "your
+    /// last selection is gone" and falling back to Music is the same
+    /// place a fresh install lands.
+    fn into_domain(self) -> UiSidebarSelection {
         match self {
-            Self::Playlist(id) => PlaylistId::new(id).map(PlaylistItem::Playlist),
-            Self::SmartPlaylist(id) => SmartPlaylistId::new(id).map(PlaylistItem::SmartPlaylist),
-            Self::Folder(id) => PlaylistFolderId::new(id).map(PlaylistItem::Folder),
+            Self::Music => UiSidebarSelection::Music,
+            Self::Albums => UiSidebarSelection::Albums,
+            Self::Playlist(id) => PlaylistId::new(id)
+                .map(PlaylistItem::Playlist)
+                .map(UiSidebarSelection::Playlist)
+                .unwrap_or_default(),
+            Self::SmartPlaylist(id) => SmartPlaylistId::new(id)
+                .map(PlaylistItem::SmartPlaylist)
+                .map(UiSidebarSelection::Playlist)
+                .unwrap_or_default(),
+            Self::Folder(id) => PlaylistFolderId::new(id)
+                .map(PlaylistItem::Folder)
+                .map(UiSidebarSelection::Playlist)
+                .unwrap_or_default(),
         }
     }
 }
@@ -385,7 +386,7 @@ mod tests {
         AnalysisSettings, BackgroundJobsSettings, BackgroundResourceUsage,
         DEFAULT_PLAYBACK_VOLUME_PERCENT, InMemorySettingsStore, LibraryManagementMode,
         OnlineSettings, PlaylistId, PlaylistItem, SettingsStore, TomlSettingsStore, UiSettings,
-        UiViewMode, UserSettings, VolumePercent,
+        UiSidebarSelection, UserSettings, VolumePercent,
     };
 
     #[test]
@@ -471,10 +472,11 @@ mod tests {
         let settings = UserSettings {
             ui: UiSettings {
                 search_text: "radiohead".to_owned(),
-                view_mode: UiViewMode::Playlists,
-                playlist_selection: Some(PlaylistItem::Playlist(
+                sidebar_selection: UiSidebarSelection::Playlist(PlaylistItem::Playlist(
                     PlaylistId::new(7).expect("positive playlist id"),
                 )),
+                sidebar_collapsed: true,
+                sidebar_width: Some(248),
             },
             ..UserSettings::default()
         };

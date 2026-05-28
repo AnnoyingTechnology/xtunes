@@ -78,6 +78,13 @@ pub(crate) fn install_preferences_action(
     app.set_accels_for_action("app.preferences", &["<Primary>comma"]);
 }
 
+/// Build the sidebar footer's "cog + Settings" entry.
+///
+/// Lives in the sidebar's bottom footer Box. Icon-plus-label so a user
+/// with no iTunes muscle memory can find Preferences without hunting;
+/// power users still have the Ctrl+, accelerator registered by
+/// [`install_preferences_action`]. Sized to its content so the hover
+/// surface only covers the button itself, not the whole footer width.
 pub(crate) fn settings_button(
     window: &gtk::ApplicationWindow,
     command_controller: SharedCommandController,
@@ -85,14 +92,29 @@ pub(crate) fn settings_button(
     consolidation_requested: LibraryConsolidationRequestedCallback,
 ) -> gtk::Button {
     let icon = gtk::Image::from_icon_name("preferences-system-symbolic");
-    icon.set_pixel_size(18);
+    icon.set_pixel_size(16);
+    icon.add_css_class("sidebar-settings-icon");
+
+    let label = gtk::Label::new(Some("Settings"));
+    label.set_xalign(0.0);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    content.append(&icon);
+    content.append(&label);
 
     let button = gtk::Button::new();
     button.add_css_class("flat");
-    button.add_css_class("settings-button");
-    button.set_child(Some(&icon));
-    button.set_tooltip_text(Some("Preferences"));
-    button.set_valign(gtk::Align::Center);
+    button.add_css_class("sidebar-settings-button");
+    button.set_child(Some(&content));
+    button.set_tooltip_text(Some("Preferences (Ctrl+,)"));
+    // hexpand=true asks the footer Box for all available horizontal
+    // space; halign=Center then centers the natural-width button
+    // within that allocation. The hover surface stays glued to the
+    // icon + label — GTK paints the button background within its
+    // *aligned* size, not its allocation.
+    button.set_hexpand(true);
+    button.set_halign(gtk::Align::Center);
 
     let window = window.clone();
     let command_controller = command_controller.clone();

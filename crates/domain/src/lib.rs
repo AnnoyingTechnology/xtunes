@@ -45,7 +45,7 @@ pub use rating::Rating;
 pub use settings::{
     AnalysisSettings, BackgroundJobsSettings, BackgroundResourceUsage,
     DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings, OnlineSettings,
-    PlaybackSettings, UiSettings, UiViewMode, UserSettings,
+    PlaybackSettings, UiSettings, UiSidebarSelection, UserSettings,
 };
 pub use smart_playlist::{
     SmartPlaylist, SmartPlaylistDateField, SmartPlaylistLimit, SmartPlaylistLimitSelection,

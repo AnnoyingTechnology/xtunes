@@ -44,16 +44,36 @@ impl Default for PlaybackSettings {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UiSettings {
     pub search_text: String,
-    pub view_mode: UiViewMode,
-    pub playlist_selection: Option<PlaylistItem>,
+    /// What the sidebar currently has selected — i.e. which view the
+    /// user is looking at. The sidebar is the sole navigation surface,
+    /// so a single enum captures both *which page* (Music / Albums /
+    /// Playlists) and *which playlist* in one value.
+    pub sidebar_selection: UiSidebarSelection,
+    /// Whether the sidebar is slid out of view. The content beneath
+    /// still occupies the full window width; the sidebar comes back
+    /// from the floating bottom-left collapse toggle.
+    pub sidebar_collapsed: bool,
+    /// The user's manually-set sidebar width, in pixels. `None` means
+    /// "no override has been saved" — the UI falls back to its
+    /// default width. Always the last *expanded* width; collapsing
+    /// the sidebar does not zero this out, so re-expanding restores
+    /// the same width.
+    pub sidebar_width: Option<u32>,
 }
 
+/// The persisted sidebar entry the user had selected when the session
+/// ended. Drives both which content-stack page is shown on next launch
+/// and which row the sidebar paints as active.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum UiViewMode {
+pub enum UiSidebarSelection {
+    /// LIBRARY → Music. Default for a fresh install and the natural
+    /// landing surface — a full track table of the whole library.
     #[default]
-    Songs,
+    Music,
+    /// LIBRARY → Albums. Full-width album-cover grid.
     Albums,
-    Playlists,
+    /// PLAYLISTS → a specific playlist, smart playlist, or folder row.
+    Playlist(PlaylistItem),
 }
 
 /// Background-capability toggles for local audio analysis. Each flag enables

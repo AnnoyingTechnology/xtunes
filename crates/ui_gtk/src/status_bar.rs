@@ -64,6 +64,15 @@ impl StatusBar {
         self.root.clone()
     }
 
+    /// Mount the sidebar collapse / expand toggle on the status bar's
+    /// left side. The toggle is the only control that brings the
+    /// sidebar back once collapsed, so it lives in always-visible
+    /// chrome instead of inside the sidebar itself.
+    pub(crate) fn install_sidebar_collapse_toggle(&self, button: gtk::Button) {
+        button.set_valign(gtk::Align::Center);
+        self.root.set_start_widget(Some(&button));
+    }
+
     pub(crate) fn update_summary(&self, library_tracks: &[TrackTableRow]) {
         let duration_seconds = library_tracks
             .iter()

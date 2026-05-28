@@ -59,7 +59,8 @@ See [docs/features.md](docs/features.md) for the full reference.
 
 Implemented:
 - Library management with two modes — "Don't touch my files" or "Keep my library organized" (*iso-iTunes*)
-- Songs / Albums / Playlists views with a dense, keyboard-friendly table (*iso-iTunes*)
+- Sidebar-driven navigation — LIBRARY (Music, Albums) and PLAYLISTS — with a collapsible left column (*Sustain-native*)
+- Dense, keyboard-friendly Music and playlist track tables, full-width album grid (*iso-iTunes*)
 - Playlists, smart playlists, and playlist folders (*iso-iTunes*)
 - Get Info multi-tab metadata editor with tag mirroring to ID3/Vorbis/MP4 (*iso-iTunes*)
 - 5-star ratings, play count, skip count, last played, last skipped (*iso-iTunes*)
@@ -112,9 +113,19 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 ```
 
+
+### A note on the AI development
+
+It’s easy to look at this and write it off as "just another AI app."
+
+But directing this project took weeks of full-time work, even with the best LLM agents available. Even without writing a single line of code, crafting a mature, high-quality app still takes serious human expertise.
+
+A huge amount of time went into the engineering details: anticipating race conditions, resolving conflicting features, optimizing performance, and making sure the code quality doesn't degrade. It still requires doing the research, choosing between different technical approaches, ensuring the app is a good citizen with online services, making sure it’s gentle on the user's hardware, testing features, and maintaining strict visual consistency.
+
 ### Sidenote
 
 Apple has lost its way, but 2010-era Apple really nailed music playback. I just wanted to build on top of what made that era great. Honestly, seeing where Apple Music is today, there’s probably room for a deshitified iTunes on macOS, too.
+
 
 ## No Apple intellectual property
 
