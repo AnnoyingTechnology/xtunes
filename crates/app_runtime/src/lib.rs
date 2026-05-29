@@ -1998,7 +1998,7 @@ mod tests {
         VolumePercent,
     };
     use sustain_library_store::{InMemoryLibraryStore, LibraryStore, StoreResult};
-    use sustain_metadata::{MetadataChange, MetadataError, MetadataResult};
+    use sustain_metadata::{InitialTags, MetadataChange, MetadataError, MetadataResult};
     use sustain_playback::NullPlaybackService;
     use sustain_settings::{SettingsError, SettingsResult, SettingsStore};
 
@@ -4706,19 +4706,19 @@ mod tests {
     struct TestMetadataService;
 
     impl MetadataService for TestMetadataService {
-        fn read_metadata(&self, _path: &Path) -> MetadataResult<TrackMetadata> {
-            Ok(TrackMetadata {
-                title: Some("Track".to_owned()),
-                ..TrackMetadata::default()
+        fn read_initial_tags(&self, _path: &Path) -> MetadataResult<InitialTags> {
+            Ok(InitialTags {
+                metadata: TrackMetadata {
+                    title: Some("Track".to_owned()),
+                    ..TrackMetadata::default()
+                },
+                rating: Rating::new(3).expect("valid test rating"),
+                has_embedded_artwork: false,
             })
         }
 
         fn write_metadata(&self, _path: &Path, _change: MetadataChange) -> MetadataResult<()> {
             Ok(())
-        }
-
-        fn read_rating(&self, _path: &Path) -> MetadataResult<Option<Rating>> {
-            Ok(Some(Rating::new(3).expect("valid test rating")))
         }
 
         fn write_rating(&self, _path: &Path, _rating: Rating) -> MetadataResult<()> {
@@ -4777,10 +4777,14 @@ mod tests {
     }
 
     impl MetadataService for RecordingMetadataService {
-        fn read_metadata(&self, _path: &Path) -> MetadataResult<TrackMetadata> {
-            Ok(TrackMetadata {
-                title: Some("Track".to_owned()),
-                ..TrackMetadata::default()
+        fn read_initial_tags(&self, _path: &Path) -> MetadataResult<InitialTags> {
+            Ok(InitialTags {
+                metadata: TrackMetadata {
+                    title: Some("Track".to_owned()),
+                    ..TrackMetadata::default()
+                },
+                rating: Rating::new(3).expect("valid test rating"),
+                has_embedded_artwork: false,
             })
         }
 
@@ -4794,10 +4798,6 @@ mod tests {
             } else {
                 Ok(())
             }
-        }
-
-        fn read_rating(&self, _path: &Path) -> MetadataResult<Option<Rating>> {
-            Ok(Some(Rating::new(3).expect("valid test rating")))
         }
 
         fn write_rating(&self, path: &Path, rating: Rating) -> MetadataResult<()> {

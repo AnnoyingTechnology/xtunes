@@ -22,7 +22,7 @@ use sustain_domain::{
     MetadataChange, PlayStatistics, Rating, Track, TrackAvailability, TrackContentHash, TrackId,
     TrackLocation, TrackRelativePath,
 };
-use sustain_metadata::{audio_format_from_path, hash_file_content};
+use sustain_metadata::{InitialTags, audio_format_from_path, hash_file_content};
 
 use crate::{
     ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult,
@@ -438,20 +438,14 @@ impl LibraryImportContext {
                 continue;
             }
 
-            let mut metadata = self
+            let InitialTags {
+                metadata,
+                rating,
+                has_embedded_artwork,
+            } = self
                 .metadata_service
-                .read_metadata(&source_path)
+                .read_initial_tags(&source_path)
                 .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
-            metadata.ensure_title_from_filename(&source_path);
-            let rating = self
-                .metadata_service
-                .read_rating(&source_path)
-                .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?
-                .unwrap_or_else(Rating::unrated);
-            let has_embedded_artwork = self
-                .metadata_service
-                .has_embedded_artwork(&source_path)
-                .unwrap_or(false);
             let plan = plan_destination(
                 &planner,
                 &mut occupied_paths,
@@ -572,23 +566,17 @@ impl LibraryImportContext {
                 continue;
             }
 
-            let mut metadata = self
+            let InitialTags {
+                metadata,
+                rating,
+                has_embedded_artwork,
+            } = self
                 .metadata_service
-                .read_metadata(&source_path)
+                .read_initial_tags(&source_path)
                 .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
-            metadata.ensure_title_from_filename(&source_path);
-            let rating = self
-                .metadata_service
-                .read_rating(&source_path)
-                .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?
-                .unwrap_or_else(Rating::unrated);
             let file_size_bytes = fs::metadata(&source_path)
                 .map(|metadata| metadata.len())
                 .ok();
-            let has_embedded_artwork = self
-                .metadata_service
-                .has_embedded_artwork(&source_path)
-                .unwrap_or(false);
 
             let Some(track_id) = sustain_domain::TrackId::new(next_track_id) else {
                 return Err(ApplicationRuntimeError::LibraryStoreFailed);

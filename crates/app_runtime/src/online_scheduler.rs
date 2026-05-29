@@ -1061,7 +1061,7 @@ mod tests {
         MetadataChange, OnlineSettings, SyncedLyrics, Track, TrackLocation, TrackRelativePath,
     };
     use sustain_library_store::{InMemoryLibraryStore, LibraryStore, OnlineCapabilities, TrackId};
-    use sustain_metadata::{MetadataError, MetadataResult, MetadataService};
+    use sustain_metadata::{InitialTags, MetadataError, MetadataResult, MetadataService};
     use sustain_metadata_remote::{
         FetchedArtwork, FetchedLyrics, RemoteError, RemoteMetadataService, RemoteResult,
         TrackMatch, TrackQuery,
@@ -1216,15 +1216,16 @@ mod tests {
     }
 
     impl MetadataService for StubMetadata {
-        fn read_metadata(&self, _path: &Path) -> MetadataResult<sustain_domain::TrackMetadata> {
-            Ok(Default::default())
+        fn read_initial_tags(&self, _path: &Path) -> MetadataResult<InitialTags> {
+            Ok(InitialTags {
+                metadata: Default::default(),
+                rating: sustain_domain::Rating::unrated(),
+                has_embedded_artwork: false,
+            })
         }
         fn write_metadata(&self, _path: &Path, change: MetadataChange) -> MetadataResult<()> {
             self.metadata_writes.lock().expect("lock").push(change);
             Ok(())
-        }
-        fn read_rating(&self, _path: &Path) -> MetadataResult<Option<sustain_domain::Rating>> {
-            Ok(None)
         }
         fn write_rating(
             &self,

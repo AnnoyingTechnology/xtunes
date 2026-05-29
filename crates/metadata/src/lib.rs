@@ -43,23 +43,43 @@ pub enum MetadataError {
 }
 
 pub trait MetadataService: Send + Sync {
-    fn read_metadata(&self, path: &Path) -> MetadataResult<TrackMetadata>;
+    /// Reads, in a single parse, the tag-derived values Sustain
+    /// captures the first time a file enters the library: its
+    /// editable metadata, star rating, and whether it carries an
+    /// embedded cover.
+    ///
+    /// Both the library scan and the managed-library import call this
+    /// to seed a brand-new track. Reading the three together is the
+    /// point — answering each with its own file open would parse
+    /// every track three times per scan. Per Sustain's persistence
+    /// policy these are *initial* values only: once a track has a
+    /// library row, SQLite is authoritative and the file's tags are
+    /// never again consulted to override it.
+    ///
+    /// The returned title is backfilled from the filename stem when
+    /// the tag carries none, so callers receive a display-ready
+    /// [`TrackMetadata`].
+    fn read_initial_tags(&self, path: &Path) -> MetadataResult<InitialTags>;
+
     fn write_metadata(&self, path: &Path, change: MetadataChange) -> MetadataResult<()>;
-    fn read_rating(&self, path: &Path) -> MetadataResult<Option<Rating>>;
     fn write_rating(&self, path: &Path, rating: Rating) -> MetadataResult<()>;
     fn read_artwork(&self, path: &Path) -> MetadataResult<Option<Vec<u8>>>;
     fn write_artwork(&self, path: &Path, artwork: Option<Vec<u8>>) -> MetadataResult<()>;
+}
 
-    /// Cheaper-than-[`Self::read_artwork`] probe: returns whether
-    /// the file carries at least one embedded picture, without
-    /// copying the bytes. Used at scan time so the
-    /// `has_embedded_artwork` column on `tracks` can be populated in
-    /// the same pass. Default implementation falls back to
-    /// `read_artwork(path)?.is_some()`; implementations that can
-    /// answer without decoding the picture payload should override.
-    fn has_embedded_artwork(&self, path: &Path) -> MetadataResult<bool> {
-        Ok(self.read_artwork(path)?.is_some())
-    }
+/// The tag-derived values captured the first time a file enters the
+/// library — its editable metadata, star rating, and whether it
+/// carries embedded artwork — read together by
+/// [`MetadataService::read_initial_tags`] in a single parse.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InitialTags {
+    pub metadata: TrackMetadata,
+    pub rating: Rating,
+    /// True when the file's tag carried at least one embedded picture
+    /// (any `PictureType`). Captured here so the online artwork
+    /// retriever can filter candidates with a SQL predicate instead
+    /// of re-probing every file on every cycle.
+    pub has_embedded_artwork: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -193,30 +213,17 @@ where
             }
         };
 
-        let mut metadata = match self.metadata_service.read_metadata(&path) {
-            Ok(metadata) => metadata,
+        let InitialTags {
+            metadata,
+            rating,
+            has_embedded_artwork,
+        } = match self.metadata_service.read_initial_tags(&path) {
+            Ok(tags) => tags,
             Err(error) => {
                 scan.failures.push(ScanFailure { path, error });
                 return;
             }
         };
-        metadata.ensure_title_from_filename(&path);
-        let rating = match self.metadata_service.read_rating(&path) {
-            Ok(Some(rating)) => rating,
-            Ok(None) => Rating::unrated(),
-            Err(error) => {
-                scan.failures.push(ScanFailure { path, error });
-                return;
-            }
-        };
-        // Probe at scan time so the online artwork scheduler can use
-        // a SQL predicate instead of re-opening the file per pass. A
-        // probe failure here is not fatal — treat it as "unknown,
-        // assume no artwork" so the scheduler may still try to fetch.
-        let has_embedded_artwork = self
-            .metadata_service
-            .has_embedded_artwork(&path)
-            .unwrap_or(false);
         scan.tracks.push(ScannedTrack {
             relative_path,
             metadata,
@@ -231,7 +238,7 @@ where
 pub struct LoftyMetadataService;
 
 impl MetadataService for LoftyMetadataService {
-    fn read_metadata(&self, path: &Path) -> MetadataResult<TrackMetadata> {
+    fn read_initial_tags(&self, path: &Path) -> MetadataResult<InitialTags> {
         audio_format_from_path(path)?;
         let tagged_file = lofty::read_from_path(path).map_err(|_| MetadataError::ReadFailed)?;
         let tag = tagged_file
@@ -239,7 +246,7 @@ impl MetadataService for LoftyMetadataService {
             .or_else(|| tagged_file.first_tag());
         let properties = tagged_file.properties();
 
-        Ok(TrackMetadata {
+        let mut metadata = TrackMetadata {
             title: tag.and_then(|tag| tag.title().map(|value| value.into_owned())),
             artist: tag.and_then(|tag| tag.artist().map(|value| value.into_owned())),
             album: tag.and_then(|tag| tag.album().map(|value| value.into_owned())),
@@ -275,6 +282,21 @@ impl MetadataService for LoftyMetadataService {
             bitrate_kbps: properties.audio_bitrate().or(properties.overall_bitrate()),
             sample_rate_hz: properties.sample_rate(),
             channels: properties.channels(),
+        };
+        metadata.ensure_title_from_filename(path);
+
+        let rating = tag
+            .and_then(|tag| tag.ratings().next())
+            .and_then(|rating| Rating::new(star_rating_value(rating.rating())))
+            .unwrap_or_else(Rating::unrated);
+
+        // Captured from the already-parsed tag — no extra file open.
+        let has_embedded_artwork = tag.is_some_and(|tag| !tag.pictures().is_empty());
+
+        Ok(InitialTags {
+            metadata,
+            rating,
+            has_embedded_artwork,
         })
     }
 
@@ -305,18 +327,6 @@ impl MetadataService for LoftyMetadataService {
         apply_text_change(tag, ItemKey::Lyrics, change.lyrics);
 
         atomic_save_to_path(&tagged_file, path, WriteOptions::default())
-    }
-
-    fn read_rating(&self, path: &Path) -> MetadataResult<Option<Rating>> {
-        audio_format_from_path(path)?;
-        let tagged_file = lofty::read_from_path(path).map_err(|_| MetadataError::ReadFailed)?;
-        let tag = tagged_file
-            .primary_tag()
-            .or_else(|| tagged_file.first_tag());
-
-        Ok(tag
-            .and_then(|tag| tag.ratings().next())
-            .and_then(|rating| Rating::new(star_rating_value(rating.rating()))))
     }
 
     fn write_rating(&self, path: &Path, rating: Rating) -> MetadataResult<()> {
@@ -372,18 +382,6 @@ impl MetadataService for LoftyMetadataService {
             .get_picture_type(PictureType::CoverFront)
             .or_else(|| tag.pictures().first());
         Ok(picture.map(|picture| picture.data().to_vec()))
-    }
-
-    fn has_embedded_artwork(&self, path: &Path) -> MetadataResult<bool> {
-        audio_format_from_path(path)?;
-        let tagged_file = lofty::read_from_path(path).map_err(|_| MetadataError::ReadFailed)?;
-        let Some(tag) = tagged_file
-            .primary_tag()
-            .or_else(|| tagged_file.first_tag())
-        else {
-            return Ok(false);
-        };
-        Ok(!tag.pictures().is_empty())
     }
 
     fn write_artwork(&self, path: &Path, artwork: Option<Vec<u8>>) -> MetadataResult<()> {
@@ -617,8 +615,8 @@ mod tests {
     use sustain_domain::TrackMetadata;
 
     use super::{
-        AudioFormat, LibraryScanner, MetadataError, MetadataResult, MetadataService, Rating,
-        atomic_write_via_rename, audio_format_from_path, hash_file_content,
+        AudioFormat, InitialTags, LibraryScanner, MetadataError, MetadataResult, MetadataService,
+        Rating, atomic_write_via_rename, audio_format_from_path, hash_file_content,
     };
 
     #[test]
@@ -827,11 +825,17 @@ mod tests {
     }
 
     impl MetadataService for FakeMetadataService {
-        fn read_metadata(&self, path: &Path) -> MetadataResult<TrackMetadata> {
-            self.tracks
+        fn read_initial_tags(&self, path: &Path) -> MetadataResult<InitialTags> {
+            let metadata = self
+                .tracks
                 .get(path)
                 .cloned()
-                .ok_or(MetadataError::ReadFailed)
+                .ok_or(MetadataError::ReadFailed)?;
+            Ok(InitialTags {
+                metadata,
+                rating: Rating::new(4).expect("valid test rating"),
+                has_embedded_artwork: false,
+            })
         }
 
         fn write_metadata(
@@ -840,10 +844,6 @@ mod tests {
             _change: super::MetadataChange,
         ) -> MetadataResult<()> {
             Ok(())
-        }
-
-        fn read_rating(&self, _path: &Path) -> MetadataResult<Option<Rating>> {
-            Ok(Some(Rating::new(4).expect("valid test rating")))
         }
 
         fn write_rating(&self, _path: &Path, _rating: Rating) -> MetadataResult<()> {
