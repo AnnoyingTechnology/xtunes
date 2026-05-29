@@ -1,0 +1,475 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 AnnoyingTechnology
+
+//! Adding external files to the library, in either management mode: copying
+//! verified files into the canonical layout, or referencing them in place.
+//! Both modes deduplicate by relative path and content hash and roll back any
+//! filesystem side effects when cancelled or on failure.
+
+use std::{
+    collections::{BTreeSet, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::SystemTime,
+};
+
+use sustain_domain::{
+    ManagedTrackPathInput, ManagedTrackPathPlanner, PlayStatistics, Rating, Track,
+    TrackContentHash, TrackLocation,
+};
+use sustain_metadata::{InitialTags, audio_format_from_path, hash_file_content};
+
+use crate::{
+    ApplicationRuntimeError, ApplicationRuntimeResult, LibraryImportResult, LibraryImportSummary,
+    LibraryImportTask, library_scan,
+};
+
+use super::file_ops::{copy_file_verified, remove_copied_files};
+
+pub fn run_library_import_task(
+    task: LibraryImportTask,
+) -> ApplicationRuntimeResult<LibraryImportResult> {
+    let mut context = LibraryImportContext {
+        settings: task.settings,
+        existing_tracks: task.existing_tracks,
+        library_store: task.library_store,
+        metadata_service: task.metadata_service,
+        cancellation_requested: task.cancellation_requested,
+    };
+
+    context.add_external_library_items(task.paths)
+}
+
+struct LibraryImportContext {
+    settings: sustain_domain::UserSettings,
+    existing_tracks: Vec<Track>,
+    library_store: std::sync::Arc<dyn sustain_library_store::LibraryStore>,
+    metadata_service: std::sync::Arc<dyn sustain_metadata::MetadataService>,
+    cancellation_requested: Arc<AtomicBool>,
+}
+
+impl LibraryImportContext {
+    fn add_external_library_items(
+        &mut self,
+        paths: Vec<PathBuf>,
+    ) -> ApplicationRuntimeResult<LibraryImportResult> {
+        if paths.is_empty() {
+            return Ok(LibraryImportResult {
+                tracks: Vec::new(),
+                summary: LibraryImportSummary::default(),
+            });
+        }
+
+        match self.settings.library.management_mode {
+            sustain_domain::LibraryManagementMode::ReferenceFilesInPlace => {
+                self.add_referenced_external_library_items(paths)
+            }
+            sustain_domain::LibraryManagementMode::CopyAddedFilesIntoLibrary => {
+                self.add_managed_external_library_items(paths)
+            }
+        }
+    }
+
+    fn add_managed_external_library_items(
+        &mut self,
+        paths: Vec<PathBuf>,
+    ) -> ApplicationRuntimeResult<LibraryImportResult> {
+        let library_path = self
+            .settings
+            .library_path()
+            .ok_or(ApplicationRuntimeError::LibraryPathUnavailable)?
+            .to_path_buf();
+        let canonical_library_path = fs::canonicalize(&library_path).ok();
+
+        let discovered_files =
+            collect_supported_audio_files(&paths, self.cancellation_requested.as_ref())?;
+        if self.cancellation_requested.load(Ordering::SeqCst) {
+            return Ok(cancelled_import_result(discovered_files.len()));
+        }
+
+        let mut occupied_paths = self
+            .existing_tracks
+            .iter()
+            .map(|track| track.location.relative_path.clone())
+            .collect::<BTreeSet<_>>();
+        let mut seen_hashes = self
+            .existing_tracks
+            .iter()
+            .filter_map(|track| track.content_hash.as_ref().map(TrackContentHash::as_str))
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+
+        let planner = ManagedTrackPathPlanner::default();
+        let mut imports = Vec::new();
+        let mut duplicate_files = 0;
+
+        for source_path in &discovered_files {
+            if self.cancellation_requested.load(Ordering::SeqCst) {
+                return Ok(cancelled_import_result(discovered_files.len()));
+            }
+            let source_path = fs::canonicalize(source_path)
+                .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
+            if let Some(relative_path) =
+                source_relative_path_inside_library(&source_path, canonical_library_path.as_deref())
+                && occupied_paths.contains(&relative_path)
+            {
+                duplicate_files += 1;
+                continue;
+            }
+
+            let source_size = fs::metadata(&source_path)
+                .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?
+                .len();
+            let content_hash = hash_file_content(&source_path)
+                .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
+            if seen_hashes.contains(content_hash.as_str())
+                || self.library_contains_matching_content(
+                    &library_path,
+                    source_size,
+                    &content_hash,
+                )?
+            {
+                duplicate_files += 1;
+                continue;
+            }
+
+            let InitialTags {
+                metadata,
+                rating,
+                has_embedded_artwork,
+            } = self
+                .metadata_service
+                .read_initial_tags(&source_path)
+                .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
+            let plan = plan_destination(
+                &planner,
+                &mut occupied_paths,
+                &library_path,
+                &source_path,
+                &metadata,
+            )?;
+            seen_hashes.insert(content_hash.as_str().to_owned());
+            imports.push(PlannedManagedImport {
+                source_path,
+                destination_path: library_path.join(plan.relative_path.as_path()),
+                relative_path: plan.relative_path,
+                content_hash,
+                metadata,
+                rating,
+                file_size_bytes: source_size,
+                has_embedded_artwork,
+            });
+        }
+
+        let mut copied_paths = Vec::new();
+        for import in &imports {
+            if self.cancellation_requested.load(Ordering::SeqCst) {
+                // Roll back the files we have copied so far so a
+                // cancelled import leaves zero filesystem side
+                // effects.
+                remove_copied_files(&copied_paths);
+                return Ok(cancelled_import_result(discovered_files.len()));
+            }
+            match copy_file_verified(
+                &import.source_path,
+                &import.destination_path,
+                &import.content_hash,
+            ) {
+                Ok(_) => copied_paths.push(import.destination_path.clone()),
+                Err(_) => {
+                    remove_copied_files(&copied_paths);
+                    return Err(ApplicationRuntimeError::LibraryImportFailed);
+                }
+            }
+        }
+
+        let first_track_id = library_scan::next_track_id(&self.existing_tracks)?;
+        let mut tracks = Vec::new();
+        for (next_track_id, import) in (first_track_id..).zip(imports) {
+            let Some(track_id) = sustain_domain::TrackId::new(next_track_id) else {
+                remove_copied_files(&copied_paths);
+                return Err(ApplicationRuntimeError::LibraryStoreFailed);
+            };
+            tracks.push(Track {
+                id: track_id,
+                location: TrackLocation::available(import.relative_path),
+                content_hash: Some(import.content_hash),
+                metadata: import.metadata,
+                rating: import.rating,
+                statistics: PlayStatistics {
+                    date_added_at: Some(SystemTime::now()),
+                    ..PlayStatistics::default()
+                },
+                file_size_bytes: Some(import.file_size_bytes),
+                has_embedded_artwork: Some(import.has_embedded_artwork),
+            });
+        }
+
+        if self.library_store.save_tracks(&tracks).is_err() {
+            remove_copied_files(&copied_paths);
+            return Err(ApplicationRuntimeError::LibraryStoreFailed);
+        }
+
+        Ok(LibraryImportResult {
+            tracks,
+            summary: LibraryImportSummary {
+                discovered_files: discovered_files.len(),
+                imported_tracks: copied_paths.len(),
+                duplicate_files,
+                cancelled: false,
+            },
+        })
+    }
+
+    fn add_referenced_external_library_items(
+        &mut self,
+        paths: Vec<PathBuf>,
+    ) -> ApplicationRuntimeResult<LibraryImportResult> {
+        let library_path = self
+            .settings
+            .library_path()
+            .ok_or(ApplicationRuntimeError::LibraryPathUnavailable)?
+            .to_path_buf();
+        let canonical_library_path = fs::canonicalize(&library_path)
+            .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
+
+        let discovered_files =
+            collect_supported_audio_files(&paths, self.cancellation_requested.as_ref())?;
+        if self.cancellation_requested.load(Ordering::SeqCst) {
+            return Ok(cancelled_import_result(discovered_files.len()));
+        }
+        let mut seen_locations = self
+            .existing_tracks
+            .iter()
+            .map(|track| track.location.relative_path.clone())
+            .collect::<BTreeSet<_>>();
+
+        let mut next_track_id = library_scan::next_track_id(&self.existing_tracks)?;
+        let mut tracks = Vec::new();
+        let mut duplicate_files = 0;
+
+        for source_path in &discovered_files {
+            if self.cancellation_requested.load(Ordering::SeqCst) {
+                return Ok(cancelled_import_result(discovered_files.len()));
+            }
+            let source_path = fs::canonicalize(source_path)
+                .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
+            let relative_path =
+                reference_relative_path_for_source(&source_path, &canonical_library_path)?;
+            if !seen_locations.insert(relative_path.clone()) {
+                duplicate_files += 1;
+                continue;
+            }
+
+            let InitialTags {
+                metadata,
+                rating,
+                has_embedded_artwork,
+            } = self
+                .metadata_service
+                .read_initial_tags(&source_path)
+                .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
+            let file_size_bytes = fs::metadata(&source_path)
+                .map(|metadata| metadata.len())
+                .ok();
+
+            let Some(track_id) = sustain_domain::TrackId::new(next_track_id) else {
+                return Err(ApplicationRuntimeError::LibraryStoreFailed);
+            };
+            next_track_id += 1;
+            tracks.push(Track {
+                id: track_id,
+                location: TrackLocation::available(relative_path),
+                content_hash: None,
+                metadata,
+                rating,
+                statistics: PlayStatistics {
+                    date_added_at: Some(SystemTime::now()),
+                    ..PlayStatistics::default()
+                },
+                file_size_bytes,
+                has_embedded_artwork: Some(has_embedded_artwork),
+            });
+        }
+
+        if self.library_store.save_tracks(&tracks).is_err() {
+            return Err(ApplicationRuntimeError::LibraryStoreFailed);
+        }
+
+        let imported_tracks = tracks.len();
+        Ok(LibraryImportResult {
+            tracks,
+            summary: LibraryImportSummary {
+                discovered_files: discovered_files.len(),
+                imported_tracks,
+                duplicate_files,
+                cancelled: false,
+            },
+        })
+    }
+
+    fn library_contains_matching_content(
+        &self,
+        library_path: &Path,
+        source_size: u64,
+        content_hash: &TrackContentHash,
+    ) -> ApplicationRuntimeResult<bool> {
+        if self
+            .library_store
+            .track_by_content_hash(content_hash)
+            .map_err(|_| ApplicationRuntimeError::LibraryStoreFailed)?
+            .is_some()
+        {
+            return Ok(true);
+        }
+
+        for track in &self.existing_tracks {
+            if track.content_hash.as_ref() == Some(content_hash) {
+                return Ok(true);
+            }
+            if track.content_hash.is_some() {
+                continue;
+            }
+
+            let track_path = track.location.absolute_path(library_path);
+            let Ok(metadata) = fs::metadata(&track_path) else {
+                continue;
+            };
+            if !metadata.is_file() || metadata.len() != source_size {
+                continue;
+            }
+            let Ok(existing_hash) = hash_file_content(&track_path) else {
+                continue;
+            };
+            if &existing_hash == content_hash {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+}
+
+struct PlannedManagedImport {
+    source_path: PathBuf,
+    destination_path: PathBuf,
+    relative_path: sustain_domain::TrackRelativePath,
+    content_hash: TrackContentHash,
+    metadata: sustain_domain::TrackMetadata,
+    rating: Rating,
+    file_size_bytes: u64,
+    has_embedded_artwork: bool,
+}
+
+fn collect_supported_audio_files(
+    paths: &[PathBuf],
+    cancellation: &AtomicBool,
+) -> ApplicationRuntimeResult<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for path in paths {
+        if cancellation.load(Ordering::SeqCst) {
+            return Ok(files);
+        }
+        collect_supported_audio_path(path, &mut files, cancellation)?;
+    }
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+fn collect_supported_audio_path(
+    path: &Path,
+    files: &mut Vec<PathBuf>,
+    cancellation: &AtomicBool,
+) -> ApplicationRuntimeResult<()> {
+    if cancellation.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
+    if metadata.file_type().is_dir() {
+        let entries =
+            fs::read_dir(path).map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
+        for entry in entries {
+            if cancellation.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            let entry = entry.map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
+            collect_supported_audio_path(&entry.path(), files, cancellation)?;
+        }
+    } else if metadata.file_type().is_file() && audio_format_from_path(path).is_ok() {
+        files.push(path.to_path_buf());
+    }
+    Ok(())
+}
+
+fn cancelled_import_result(discovered_files: usize) -> LibraryImportResult {
+    LibraryImportResult {
+        tracks: Vec::new(),
+        summary: LibraryImportSummary {
+            discovered_files,
+            imported_tracks: 0,
+            duplicate_files: 0,
+            cancelled: true,
+        },
+    }
+}
+
+fn plan_destination(
+    planner: &ManagedTrackPathPlanner,
+    occupied_paths: &mut BTreeSet<sustain_domain::TrackRelativePath>,
+    library_path: &Path,
+    source_path: &Path,
+    metadata: &sustain_domain::TrackMetadata,
+) -> ApplicationRuntimeResult<sustain_domain::ManagedTrackPathPlan> {
+    for _attempt in 0..10_000 {
+        let plan = planner
+            .plan(
+                ManagedTrackPathInput {
+                    metadata,
+                    source_path,
+                },
+                occupied_paths,
+            )
+            .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
+        if library_path.join(plan.relative_path.as_path()).exists() {
+            occupied_paths.insert(plan.relative_path);
+            continue;
+        }
+        occupied_paths.insert(plan.relative_path.clone());
+        return Ok(plan);
+    }
+
+    Err(ApplicationRuntimeError::LibraryImportFailed)
+}
+
+fn reference_relative_path_for_source(
+    source_path: &Path,
+    library_path: &Path,
+) -> ApplicationRuntimeResult<sustain_domain::TrackRelativePath> {
+    if let Ok(relative_path) = source_path.strip_prefix(library_path)
+        && let Some(relative_path) =
+            sustain_domain::TrackRelativePath::new(relative_path.to_path_buf())
+    {
+        return Ok(relative_path);
+    }
+
+    Err(ApplicationRuntimeError::LibraryImportFailed)
+}
+
+fn source_relative_path_inside_library(
+    source_path: &Path,
+    library_path: Option<&Path>,
+) -> Option<sustain_domain::TrackRelativePath> {
+    let library_path = library_path?;
+    source_path
+        .strip_prefix(library_path)
+        .ok()
+        .and_then(|relative_path| {
+            sustain_domain::TrackRelativePath::new(relative_path.to_path_buf())
+        })
+}
