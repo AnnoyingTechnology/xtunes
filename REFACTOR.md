@@ -66,25 +66,35 @@ bucket entirely.
 
 ## Tier 2 — production-code refactors
 
-### `crates/ui_gtk/src/main_window.rs` — 2 592 prod lines
+### `crates/ui_gtk/src/main_window.rs` — DONE (3 326 → ~1 020 prod lines)
 
-After Tier 1 this is the workspace's largest prod file. Shape: one 487-line
-constructor (`build_main_window`, L75–L562) plus ~50 free `*_callback` /
-`install_*` helpers below it. The constructor is sequential composition —
-leave it alone. The helpers cluster cleanly by topic and should move into
-sibling modules:
+> **Resolution (2026-05-29).** The file had grown to 3 326 lines by the time
+> this pass ran (Smart Shuffle, sidebar collapse, more consumers). Every
+> cohesive topic cluster was moved into a sibling module under `main_window/`,
+> leaving the ~550-line `build_main_window` constructor and the core
+> view-model glue (table-row builders, column-layout persistence, the shared
+> analysis/online menu query helpers, view activators) that the constructor
+> uses directly. Cross-sibling helpers are `pub(super)` and re-imported into
+> `main_window`, so each child's `use super::*` resolves them.
 
-| Topic | Helpers | Suggested module |
+Modules extracted:
+
+| Topic | Module | Notes |
 | --- | --- | --- |
-| Search wiring | `install_search_wiring`, `SearchWiringContext` | `main_window/search.rs` |
-| MPRIS bridge | `install_mpris_command_consumer`, `handle_mpris_command`, `now_playing_to_mpris_metadata` | `main_window/mpris_bridge.rs` |
-| Sidebar callbacks | `sidebar_*_callback`, `resolve_move_target` (~7 fns) | `main_window/sidebar_callbacks.rs` |
-| Track row / table | `track_row_changed_callback`, `rating_changed_callback`, `*_track_activated_callback`, reorder helpers | `main_window/track_callbacks.rs` |
-| Playlist wiring | `install_playlists_view_activator`, `playlist_table_rows_for`, `add_to_playlist_*`, `make_playlists_header_play_callback` | `main_window/playlists.rs` |
-| Result consumers | `install_metadata_write_result_consumer`, `install_analysis_progress_consumer`, `install_artwork_fetch_result_consumer` | `main_window/result_consumers.rs` |
-| Keyboard | `install_keyboard_shortcuts`, `KeyboardShortcutContext`, `jump_to_current_track` | fold into existing `shortcuts.rs` sibling |
+| Search wiring | `main_window/search.rs` | `install_search_wiring` + context |
+| MPRIS bridge | `main_window/mpris_bridge.rs` | metadata projection + command consumer |
+| Result consumers | `main_window/result_consumers.rs` | metadata-write / progress / artwork / etc. |
+| Sidebar callbacks | `main_window/sidebar_callbacks.rs` | actions, runs, move, selection, drop |
+| Playback wiring | `main_window/playback.rs` | queue construction, play actions, EOS hook |
+| Track-row interactions | `main_window/track_callbacks.rs` | inline edit, rating, context menus, reorder (+tests) |
+| Keyboard | `main_window/keyboard.rs` | window shortcuts (kept as a `main_window` child, not the crate-level `shortcuts.rs`, to retain `use super::*` access) |
+| Sidebar collapse | `main_window/sidebar_collapse.rs` | `SidebarCollapseController`, re-exported `pub(crate)` |
+| Playlists view | `main_window/playlists.rs` | activator, rebuild, header state, rows, add-to-playlist |
 
-Target: `main_window.rs` ≤ ~700 lines.
+The original ≤700-line target predated the file's growth; ~1 020 lines with
+every topic cluster extracted (the remainder being the intentionally-kept
+constructor plus shared core glue) is the realistic floor without
+fragmenting that glue into thin shared modules.
 
 ### `crates/app_runtime/src/managed_library.rs` — 1 453 prod lines
 
@@ -348,5 +358,7 @@ The detail page picks up consistent styling for free.
    scheduler shells — OBSOLETE" above); a unified execution-loop harness is no
    longer viable without a regression or a leaky abstraction. Skipped by
    maintainer decision.
-7. **`main_window.rs`** topic-grouped callback extraction.
+7. ~~**`main_window.rs`** topic-grouped callback extraction.~~ **Done** —
+   nine sibling modules extracted; 3 326 → ~1 020 lines (see the Tier 2
+   entry above).
 8. **Tier 3** — opportunistic, as those files get touched for feature work.
