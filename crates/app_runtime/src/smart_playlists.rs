@@ -98,12 +98,7 @@ impl ApplicationRuntime {
 }
 
 fn normalized_smart_playlist_name(name: String) -> ApplicationRuntimeResult<String> {
-    let name = name.trim().to_owned();
-    if name.is_empty() {
-        Err(ApplicationRuntimeError::InvalidSmartPlaylistName)
-    } else {
-        Ok(name)
-    }
+    crate::normalized_name(name, || ApplicationRuntimeError::InvalidSmartPlaylistName)
 }
 
 fn validate_rule_set(rules: &SmartPlaylistRuleSet) -> ApplicationRuntimeResult<()> {

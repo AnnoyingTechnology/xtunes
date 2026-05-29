@@ -128,6 +128,21 @@ pub enum ApplicationRuntimeError {
     UnsupportedCommand(ApplicationCommand),
 }
 
+/// Trims a user-supplied name and rejects it when blank once trimmed. The three
+/// playlist kinds (playlists, folders, smart playlists) share this rule but
+/// each reports its own "invalid name" error, supplied via `on_empty`.
+pub(crate) fn normalized_name(
+    name: String,
+    on_empty: fn() -> ApplicationRuntimeError,
+) -> ApplicationRuntimeResult<String> {
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        Err(on_empty())
+    } else {
+        Ok(name)
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LibraryScanSummary {
     pub scanned_tracks: usize,

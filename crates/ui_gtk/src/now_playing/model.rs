@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use sustain_app_runtime::{PlaybackState, Track, TrackMetadata};
 
+use crate::util::non_empty_text;
+
 pub(super) fn track_title(track: &Track) -> String {
     non_empty_text(&track.metadata.title)
         .or_else(|| {
@@ -76,14 +78,6 @@ pub(super) fn progress_fraction_from_x(x: f64, width: i32) -> Option<f64> {
     }
 
     Some((x / f64::from(width)).clamp(0.0, 1.0))
-}
-
-fn non_empty_text(value: &Option<String>) -> Option<String> {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 #[cfg(test)]

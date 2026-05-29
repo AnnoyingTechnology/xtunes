@@ -5,6 +5,8 @@ use std::{path::Path, time::SystemTime};
 
 use sustain_app_runtime::{Track, TrackId};
 
+use crate::util::non_empty_text;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AudioFileType {
     Flac,
@@ -113,14 +115,6 @@ impl TrackTableRow {
         self.playlist_position = playlist_position;
         self
     }
-}
-
-fn non_empty_text(value: &Option<String>) -> Option<String> {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 fn file_stem_text(path: &Path) -> Option<String> {

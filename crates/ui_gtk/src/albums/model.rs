@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 use sustain_app_runtime::{Track, TrackId, TrackMetadata};
 
+use crate::util::non_empty_text;
+
 /// Stable identity for an album, derived from the normalized grouping
 /// artist and title used to bucket tracks. For normal albums the grouping
 /// artist is the album artist or track artist; for compilations without an
@@ -285,14 +287,6 @@ fn track_title(track: &Track) -> String {
                 .map(ToOwned::to_owned)
         })
         .unwrap_or_default()
-}
-
-fn non_empty_text(value: &Option<String>) -> Option<String> {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 fn normalize_album_key(value: &str) -> String {

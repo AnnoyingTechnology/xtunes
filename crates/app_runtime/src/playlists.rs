@@ -228,12 +228,7 @@ impl ApplicationRuntime {
 }
 
 pub(crate) fn normalized_playlist_name(name: String) -> ApplicationRuntimeResult<String> {
-    let name = name.trim().to_owned();
-    if name.is_empty() {
-        Err(ApplicationRuntimeError::InvalidPlaylistName)
-    } else {
-        Ok(name)
-    }
+    crate::normalized_name(name, || ApplicationRuntimeError::InvalidPlaylistName)
 }
 
 fn next_playlist_id(playlists: &[Playlist]) -> ApplicationRuntimeResult<PlaylistId> {

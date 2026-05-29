@@ -44,6 +44,7 @@ mod track_context;
 mod track_context_ops;
 mod track_info;
 mod track_table;
+mod util;
 mod window_chrome;
 
 const TITLEBAR_HEIGHT: i32 = 72;

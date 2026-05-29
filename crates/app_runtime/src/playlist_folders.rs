@@ -74,12 +74,7 @@ impl ApplicationRuntime {
 }
 
 fn normalized_folder_name(name: String) -> ApplicationRuntimeResult<String> {
-    let name = name.trim().to_owned();
-    if name.is_empty() {
-        Err(ApplicationRuntimeError::InvalidPlaylistFolderName)
-    } else {
-        Ok(name)
-    }
+    crate::normalized_name(name, || ApplicationRuntimeError::InvalidPlaylistFolderName)
 }
 
 fn next_folder_id(folders: &[PlaylistFolder]) -> ApplicationRuntimeResult<PlaylistFolderId> {
