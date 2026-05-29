@@ -3087,8 +3087,16 @@ pub(crate) struct SidebarCollapseController {
 struct SidebarCollapseControllerInner {
     paned: gtk::Paned,
     toggle: gtk::Button,
-    collapsed: Cell<bool>,
+    /// Last width the sidebar held while expanded. Restored on the next
+    /// expand and persisted at shutdown. The `Paned`'s own `position`
+    /// (`0` == collapsed) is the single source of truth for *visibility*;
+    /// this only remembers where to reopen to.
     last_expanded_position: Cell<i32>,
+    /// Collapsed-ness currently reflected in the toggle's icon/tooltip.
+    /// A render cache derived from `position` on every change — never an
+    /// independent state — so per-pixel drag-resizes don't rebuild the
+    /// icon needlessly.
+    toggle_shows_collapsed: Cell<bool>,
 }
 
 impl SidebarCollapseController {
@@ -3110,8 +3118,8 @@ impl SidebarCollapseController {
         let inner = Rc::new(SidebarCollapseControllerInner {
             paned: paned.clone(),
             toggle: toggle.clone(),
-            collapsed: Cell::new(initial_collapsed),
             last_expanded_position: Cell::new(expanded_width),
+            toggle_shows_collapsed: Cell::new(initial_collapsed),
         });
 
         // Apply the persisted collapsed state.
@@ -3122,16 +3130,21 @@ impl SidebarCollapseController {
         }
         sync_collapse_toggle_icon(&toggle, initial_collapsed);
 
-        // Track user-driven drag-resizes so we restore the chosen
-        // width on the next expand.
+        // The `Paned` position is the single source of truth for sidebar
+        // visibility, so every change funnels through here — drag-to-zero,
+        // toggle click, keyboard shortcut, restore-from-settings. This is
+        // what keeps the toggle's icon honest after a drag-to-close
+        // gesture (issue #56), and tracks the chosen width for the next
+        // expand.
         let inner_for_position = inner.clone();
         inner.paned.connect_position_notify(move |content_area| {
-            if inner_for_position.collapsed.get() {
-                return;
-            }
             let position = content_area.position();
             if position > 0 {
                 inner_for_position.last_expanded_position.set(position);
+            }
+            let collapsed = position == 0;
+            if inner_for_position.toggle_shows_collapsed.replace(collapsed) != collapsed {
+                sync_collapse_toggle_icon(&inner_for_position.toggle, collapsed);
             }
         });
 
@@ -3151,7 +3164,7 @@ impl SidebarCollapseController {
     }
 
     fn is_collapsed(&self) -> bool {
-        self.inner.collapsed.get()
+        self.inner.paned.position() == 0
     }
 
     /// The last manually-set expanded width, in pixels. Used at
@@ -3167,20 +3180,22 @@ impl SidebarCollapseController {
     /// visible (e.g. Ctrl+N's armed inline rename of a new playlist
     /// row).
     pub(crate) fn expand_if_collapsed(&self) {
-        if self.inner.collapsed.get() {
+        if self.is_collapsed() {
             self.toggle();
         }
     }
 
     fn toggle(&self) {
-        let collapse = !self.inner.collapsed.get();
-        self.inner.collapsed.set(collapse);
-        sync_collapse_toggle_icon(&self.inner.toggle, collapse);
-
-        let target = if collapse {
-            0
+        // Move the splitter; the position-notify handler installed in
+        // `new` repaints the toggle icon and records the expanded width,
+        // so collapse-by-click and collapse-by-drag stay in lockstep.
+        let target = if self.is_collapsed() {
+            self.inner
+                .last_expanded_position
+                .get()
+                .max(SIDEBAR_MIN_WIDTH)
         } else {
-            self.inner.last_expanded_position.get().max(1)
+            0
         };
         self.inner.paned.set_position(target);
     }
