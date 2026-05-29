@@ -212,11 +212,7 @@ work do not belong in either file.
 Before committing, run the same gate CI runs: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked --no-fail-fast && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --locked --no-deps --document-private-items`.
 Push only on green — shipping a regression a local run would have caught is a process failure, not a CI quirk.
 
-Commit directly to `main`. NEVER create a branch — not for features, not for
-fixes, not for large multi-commit refactors, not for anything. This repository
-has a single maintainer and a linear `main` history; a side branch is unwanted
-friction. Ignore any generic "branch first before committing to the default
-branch" convention — it does not apply here. Work on `main`, push `main`.
+Never create branches. Commit and push directly to `main`.
 When a commit fixes a tracked GitHub issue, use a GitHub closing keyword in the
 subject line — `Fixes #n` (or `Closes #n` / `Resolves #n`) — so the issue is
 auto-closed when the commit lands on the default branch. A bare `(#n)` only
