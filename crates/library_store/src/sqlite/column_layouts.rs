@@ -11,14 +11,14 @@ pub(super) fn load_track_column_layout(
 ) -> StoreResult<Option<TrackColumnLayout>> {
     let entries = match scope {
         TrackColumnLayoutScope::Default => load_layout_rows(
-            &connection,
+            connection,
             "SELECT column_id, visible, width_px \
                  FROM track_column_layout_default \
                  ORDER BY position",
             params![],
         )?,
         TrackColumnLayoutScope::Playlist(playlist_id) => load_layout_rows(
-            &connection,
+            connection,
             "SELECT column_id, visible, width_px \
                  FROM track_column_layout_playlist_override \
                  WHERE playlist_id = ?1 \
@@ -26,7 +26,7 @@ pub(super) fn load_track_column_layout(
             params![playlist_id.get()],
         )?,
         TrackColumnLayoutScope::SmartPlaylist(smart_playlist_id) => load_layout_rows(
-            &connection,
+            connection,
             "SELECT column_id, visible, width_px \
                  FROM track_column_layout_smart_playlist_override \
                  WHERE smart_playlist_id = ?1 \

@@ -90,7 +90,7 @@ pub(super) fn record_analysis_attempt_failure(
     if capabilities.is_empty() {
         return Ok(());
     }
-    upsert_track_analysis(&connection, track_id, capabilities, context)
+    upsert_track_analysis(connection, track_id, capabilities, context)
 }
 
 pub(super) fn tracks_needing_analysis(

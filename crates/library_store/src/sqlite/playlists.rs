@@ -69,7 +69,7 @@ pub(super) fn playlist(
     let name = row.get(1).map_err(StoreError::from)?;
     let parent_folder_id = optional_playlist_folder_id_from_row(row, 2)?;
     let position = u32_from_row(row, 3)?;
-    let entries = playlist_entries(&connection, id)?;
+    let entries = playlist_entries(connection, id)?;
 
     Ok(Some(Playlist {
         id,
@@ -97,7 +97,7 @@ pub(super) fn playlists(connection: &Connection) -> StoreResult<Vec<Playlist>> {
             name,
             parent_folder_id,
             position,
-            entries: playlist_entries(&connection, id)?,
+            entries: playlist_entries(connection, id)?,
         });
     }
 

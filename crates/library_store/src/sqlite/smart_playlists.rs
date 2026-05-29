@@ -110,7 +110,7 @@ pub(super) fn smart_playlist(
     let limit_count = optional_i64(row, 5)?;
     let limit_selection_name = optional_string(row, 6)?;
     let limit = build_limit(limit_count, limit_selection_name.as_deref())?;
-    let rules = load_smart_playlist_rules(&connection, id)?;
+    let rules = load_smart_playlist_rules(connection, id)?;
 
     Ok(Some(SmartPlaylist {
         id,
@@ -147,7 +147,7 @@ pub(super) fn smart_playlists(connection: &Connection) -> StoreResult<Vec<SmartP
         let limit_count = optional_i64(row, 5)?;
         let limit_selection_name = optional_string(row, 6)?;
         let limit = build_limit(limit_count, limit_selection_name.as_deref())?;
-        let rules = load_smart_playlist_rules(&connection, id)?;
+        let rules = load_smart_playlist_rules(connection, id)?;
         smart_playlists.push(SmartPlaylist {
             id,
             name,
