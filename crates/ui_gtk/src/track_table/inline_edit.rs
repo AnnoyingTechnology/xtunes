@@ -393,25 +393,44 @@ impl InlineEditController {
         entry.add_controller(key);
 
         // Focus leaving for any other reason (a click elsewhere) commits,
-        // matching the dialog's "what you typed is kept" behaviour. A Tab
-        // hop also makes the old entry lose focus, but by then `active`
-        // points at the new entry, so the guard turns the stale leave into
-        // a no-op rather than a double commit.
+        // matching the dialog's "what you typed is kept" behaviour.
+        //
+        // The teardown is deferred to the next idle on purpose: removing the
+        // entry from the cell *synchronously inside its own ::leave* would
+        // unparent the widget GTK is mid-traversal over (the focus machinery
+        // walks `get_parent` up from the widget losing focus), which corrupts
+        // the walk and spams `gtk_widget_get_parent` criticals. By idle the
+        // focus change has completed and the tree is safe to mutate.
+        //
+        // The deferred finish is scoped to *this* entry's session: a Tab hop
+        // finishes synchronously and opens a new editor, and the old entry's
+        // ::leave still fires — without the per-entry guard the idle would
+        // then tear down the *new* session instead.
         let focus = gtk::EventControllerFocus::new();
         let controller_focus = self.clone();
         let entry_weak = entry.downgrade();
         focus.connect_leave(move |_| {
-            let is_current = controller_focus
-                .active
-                .borrow()
-                .as_ref()
-                .and_then(|active| entry_weak.upgrade().map(|entry| active.entry == entry))
-                .unwrap_or(false);
-            if is_current {
-                controller_focus.finish_active(FinishMode::Commit);
-            }
+            let controller = controller_focus.clone();
+            let entry_weak = entry_weak.clone();
+            glib::idle_add_local_once(move || {
+                controller.finish_active_if_entry(&entry_weak);
+            });
         });
         entry.add_controller(focus);
+    }
+
+    /// Commit and close the active edit only if it is still the session for
+    /// `entry`. Used by the deferred focus-leave teardown so a stale leave
+    /// (e.g. from a Tab hop that already moved on) cannot close the wrong
+    /// session.
+    fn finish_active_if_entry(&self, entry: &glib::WeakRef<gtk::Entry>) {
+        let is_current = match (self.active.borrow().as_ref(), entry.upgrade()) {
+            (Some(active), Some(entry)) => active.entry == entry,
+            _ => false,
+        };
+        if is_current {
+            self.finish_active(FinishMode::Commit);
+        }
     }
 
     /// End the active edit (if any), restoring the cell's label and — for
