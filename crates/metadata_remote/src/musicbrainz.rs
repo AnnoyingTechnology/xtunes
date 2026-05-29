@@ -29,6 +29,7 @@ use serde::Deserialize;
 
 use crate::client::HttpClient;
 use crate::error::RemoteResult;
+use crate::http::url_encode;
 use crate::mbid::is_well_formed;
 
 const SEARCH_BASE: &str = "https://musicbrainz.org/ws/2/recording/";
@@ -185,6 +186,9 @@ impl MusicBrainzClient {
         terms: &RecordingSearchTerms,
     ) -> RemoteResult<Vec<RecordingMatch>> {
         let query = build_search_query(terms);
+        // The Lucene grammar is delivered through the percent-encoded query:
+        // MusicBrainz decodes the value before parsing, so quoted strings,
+        // colons, and bracketed ranges all reach the parser intact.
         let url = format!(
             "{SEARCH_BASE}?query={query}&fmt=json&limit={SEARCH_LIMIT}",
             query = url_encode(&query),
@@ -412,29 +416,6 @@ fn build_search_query(terms: &RecordingSearchTerms) -> String {
         clauses.push(format!("dur:[{lower} TO {upper}]"));
     }
     clauses.join(" AND ")
-}
-
-fn url_encode(value: &str) -> String {
-    // Conservative percent-encoding: only the unreserved set per
-    // RFC 3986 stays literal. The Lucene grammar itself is delivered
-    // through the percent-encoded query — MusicBrainz decodes the
-    // value before parsing, so quoted strings, colons, and bracketed
-    // ranges all reach the parser intact. Encoding strictly here
-    // avoids URL-parse rejections by HTTP clients that refuse raw
-    // reserved characters (notably brackets) in the query.
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        let safe = matches!(
-            byte,
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~'
-        );
-        if safe {
-            encoded.push(byte as char);
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
 }
 
 fn lucene_escape(value: &str) -> String {
@@ -720,17 +701,6 @@ mod tests {
     #[test]
     fn lucene_escape_drops_inner_quotes() {
         assert_eq!(lucene_escape("She said \"hello\""), "She said hello");
-    }
-
-    #[test]
-    fn url_encode_passes_safe_characters_through() {
-        assert_eq!(url_encode("abc-123.xyz"), "abc-123.xyz");
-    }
-
-    #[test]
-    fn url_encode_escapes_unsafe_characters() {
-        assert_eq!(url_encode("a b"), "a%20b");
-        assert_eq!(url_encode("foo&bar"), "foo%26bar");
     }
 
     #[test]

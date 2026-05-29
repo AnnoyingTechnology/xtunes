@@ -31,6 +31,7 @@ use serde::Deserialize;
 
 use crate::client::HttpClient;
 use crate::error::{RemoteError, RemoteResult};
+use crate::http::url_encode;
 use crate::service::{FetchedLyrics, TrackQuery};
 
 const GET_BASE: &str = "https://lrclib.net/api/get";
@@ -117,26 +118,6 @@ fn normalise(value: Option<String>) -> Option<String> {
 
 fn is_non_blank(value: &&str) -> bool {
     !value.trim().is_empty()
-}
-
-fn url_encode(value: &str) -> String {
-    // Same conservative encoding the MusicBrainz client uses — only the
-    // RFC 3986 unreserved set stays literal; everything else is
-    // percent-encoded. LRClib accepts UTF-8 in query parameters and
-    // decodes the value server-side before matching.
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        let safe = matches!(
-            byte,
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~'
-        );
-        if safe {
-            encoded.push(byte as char);
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
 }
 
 #[derive(Debug, Deserialize)]

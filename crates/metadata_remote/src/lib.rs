@@ -43,6 +43,7 @@ pub mod acoustid;
 pub mod client;
 pub mod cover_art_archive;
 pub mod error;
+mod http;
 pub mod lrclib;
 mod mbid;
 pub mod musicbrainz;

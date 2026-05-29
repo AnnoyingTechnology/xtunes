@@ -35,6 +35,7 @@ use serde::Deserialize;
 
 use crate::client::HttpClient;
 use crate::error::{RemoteError, RemoteResult};
+use crate::http::url_encode;
 
 const LOOKUP_BASE: &str = "https://api.acoustid.org/v2/lookup";
 
@@ -91,9 +92,9 @@ impl AcoustIdClient {
 
         let url = format!(
             "{LOOKUP_BASE}?client={client}&meta=recordingids&format=json&duration={duration}&fingerprint={fingerprint}",
-            client = url_encode_query_component(&self.api_key),
+            client = url_encode(&self.api_key),
             duration = fingerprint.duration_seconds,
-            fingerprint = url_encode_query_component(&fingerprint.chromaprint),
+            fingerprint = url_encode(&fingerprint.chromaprint),
         );
 
         let payload: LookupPayload = self.http.get_json(&url)?;
@@ -123,22 +124,6 @@ fn into_match(raw: RawResult) -> Option<AcoustIdMatch> {
         score: raw.score.unwrap_or(0.0).clamp(0.0, 1.0),
         recording_mbids,
     })
-}
-
-fn url_encode_query_component(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        let safe = matches!(
-            byte,
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~'
-        );
-        if safe {
-            encoded.push(byte as char);
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
 }
 
 #[derive(Deserialize)]
@@ -196,12 +181,5 @@ mod tests {
             })
             .expect("blank fingerprint returns empty");
         assert!(result.is_empty());
-    }
-
-    #[test]
-    fn url_encoding_escapes_special_characters() {
-        assert_eq!(url_encode_query_component("a b"), "a%20b");
-        assert_eq!(url_encode_query_component("a&b=c"), "a%26b%3Dc");
-        assert_eq!(url_encode_query_component("abc-_.~"), "abc-_.~");
     }
 }
