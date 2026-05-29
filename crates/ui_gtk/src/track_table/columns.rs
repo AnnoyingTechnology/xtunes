@@ -4,6 +4,8 @@
 use std::cmp::Ordering as CmpOrdering;
 use std::time::SystemTime;
 
+use sustain_app_runtime::compare_optional_text;
+
 use super::inline_edit::EditableField;
 use super::row::TrackTableRow;
 use crate::date_format::format_system_time_short;
@@ -205,10 +207,12 @@ impl TrackTableColumn {
 
     pub(super) fn compare(self, left: &TrackTableRow, right: &TrackTableRow) -> CmpOrdering {
         match self {
-            Self::TrackName => compare_text(&left.track_name, &right.track_name),
-            Self::Artist => compare_text(&left.artist, &right.artist),
-            Self::Album => compare_text(&left.album, &right.album),
-            Self::Genre => compare_text(&left.genre, &right.genre),
+            Self::TrackName => {
+                compare_optional_text(Some(&left.track_name), Some(&right.track_name))
+            }
+            Self::Artist => compare_optional_text(Some(&left.artist), Some(&right.artist)),
+            Self::Album => compare_optional_text(Some(&left.album), Some(&right.album)),
+            Self::Genre => compare_optional_text(Some(&left.genre), Some(&right.genre)),
             Self::Year => left.year.cmp(&right.year),
             Self::Bpm => left.bpm.cmp(&right.bpm),
             Self::MusicKey => {
@@ -225,19 +229,6 @@ impl TrackTableColumn {
             Self::DateAdded => left.date_added.cmp(&right.date_added),
             Self::TrackNumber => left.track_number.cmp(&right.track_number),
         }
-    }
-}
-
-fn compare_text(left: &str, right: &str) -> CmpOrdering {
-    left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase())
-}
-
-fn compare_optional_text(left: Option<&str>, right: Option<&str>) -> CmpOrdering {
-    match (left, right) {
-        (Some(left), Some(right)) => compare_text(left, right),
-        (Some(_), None) => CmpOrdering::Greater,
-        (None, Some(_)) => CmpOrdering::Less,
-        (None, None) => CmpOrdering::Equal,
     }
 }
 

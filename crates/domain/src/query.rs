@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
+use std::cmp::Ordering;
+
 use crate::PlaylistId;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -75,9 +77,26 @@ pub enum SortDirection {
     Descending,
 }
 
+/// Compares two optional text fields for library sort order.
+///
+/// Each side is reduced to its trimmed, Unicode-lowercased form, and a missing
+/// value (`None`) collates as the empty string. This is the single
+/// normalization used everywhere the library sorts by a text column — the
+/// library store, the search/filter pipeline, and the track-table column
+/// headers — so the three always agree, including on non-ASCII text.
+pub fn compare_optional_text(left: Option<&str>, right: Option<&str>) -> Ordering {
+    fn normalized(value: Option<&str>) -> String {
+        value.unwrap_or_default().trim().to_lowercase()
+    }
+
+    normalized(left).cmp(&normalized(right))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LibraryQuery, SortDirection, TrackSort, TrackSortColumn};
+    use std::cmp::Ordering;
+
+    use super::{LibraryQuery, SortDirection, TrackSort, TrackSortColumn, compare_optional_text};
 
     #[test]
     fn blank_search_text_is_treated_as_no_search() {
@@ -116,5 +135,24 @@ mod tests {
                 direction: SortDirection::Ascending
             }
         );
+    }
+
+    #[test]
+    fn optional_text_collation_trims_and_folds_unicode_case() {
+        assert_eq!(
+            compare_optional_text(Some("  Édith  "), Some("édith")),
+            Ordering::Equal
+        );
+        assert_eq!(
+            compare_optional_text(Some("ABBA"), Some("abba")),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn optional_text_collation_treats_none_as_empty() {
+        assert_eq!(compare_optional_text(None, Some("")), Ordering::Equal);
+        assert_eq!(compare_optional_text(None, Some("a")), Ordering::Less);
+        assert_eq!(compare_optional_text(Some("a"), None), Ordering::Greater);
     }
 }

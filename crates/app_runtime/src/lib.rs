@@ -26,7 +26,7 @@ pub use sustain_domain::{
     SmartShuffleEntropy, SystemClock, Track, TrackAvailability, TrackColumnEntry,
     TrackColumnLayout, TrackColumnLayoutScope, TrackContentHash, TrackId, TrackLocation,
     TrackMetadata, TrackPlaybackSource, TrackRelativePath, UiSettings, UiSidebarSelection,
-    UserSettings, VolumePercent, matching_tracks, track_matches_rule_set,
+    UserSettings, VolumePercent, compare_optional_text, matching_tracks, track_matches_rule_set,
 };
 use sustain_library_store::{AnalysisCapabilities, LibraryStore, OnlineCapabilities};
 pub use sustain_metadata::MetadataService;

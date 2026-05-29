@@ -3,7 +3,7 @@
 
 use std::cmp::Ordering;
 
-use sustain_domain::{SortDirection, Track, TrackSortColumn};
+use sustain_domain::{SortDirection, Track, TrackSortColumn, compare_optional_text};
 
 pub(crate) fn track_matches_search(track: &Track, search_text: &str) -> bool {
     let needle = search_text.to_ascii_lowercase();
@@ -39,18 +39,22 @@ pub(crate) fn sort_tracks(tracks: &mut [Track], sort: sustain_domain::TrackSort)
 fn compare_tracks(left: &Track, right: &Track, column: TrackSortColumn) -> Ordering {
     match column {
         TrackSortColumn::PlaylistPosition => Ordering::Equal,
-        TrackSortColumn::Title => {
-            compare_optional_text(&left.metadata.title, &right.metadata.title)
-        }
-        TrackSortColumn::Artist => {
-            compare_optional_text(&left.metadata.artist, &right.metadata.artist)
-        }
-        TrackSortColumn::Album => {
-            compare_optional_text(&left.metadata.album, &right.metadata.album)
-        }
-        TrackSortColumn::Genre => {
-            compare_optional_text(&left.metadata.genre, &right.metadata.genre)
-        }
+        TrackSortColumn::Title => compare_optional_text(
+            left.metadata.title.as_deref(),
+            right.metadata.title.as_deref(),
+        ),
+        TrackSortColumn::Artist => compare_optional_text(
+            left.metadata.artist.as_deref(),
+            right.metadata.artist.as_deref(),
+        ),
+        TrackSortColumn::Album => compare_optional_text(
+            left.metadata.album.as_deref(),
+            right.metadata.album.as_deref(),
+        ),
+        TrackSortColumn::Genre => compare_optional_text(
+            left.metadata.genre.as_deref(),
+            right.metadata.genre.as_deref(),
+        ),
         TrackSortColumn::Rating => left.rating.stars().cmp(&right.rating.stars()),
         TrackSortColumn::PlayCount => left.statistics.play_count.cmp(&right.statistics.play_count),
         TrackSortColumn::LastPlayed => left
@@ -63,18 +67,4 @@ fn compare_tracks(left: &Track, right: &Track, column: TrackSortColumn) -> Order
             .date_added_at
             .cmp(&right.statistics.date_added_at),
     }
-}
-
-fn compare_optional_text(left: &Option<String>, right: &Option<String>) -> Ordering {
-    let left = left
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let right = right
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    left.cmp(&right)
 }

@@ -5,7 +5,9 @@
 
 use std::cmp::Ordering;
 
-pub use sustain_domain::{LibraryQuery, SortDirection, Track, TrackSort, TrackSortColumn};
+pub use sustain_domain::{
+    LibraryQuery, SortDirection, Track, TrackSort, TrackSortColumn, compare_optional_text,
+};
 
 pub fn filter_tracks_by_search_text(tracks: &[Track], search_text: &str) -> Vec<Track> {
     let normalized_search = normalize(search_text);
@@ -66,18 +68,22 @@ pub fn sort_tracks(mut tracks: Vec<Track>, sort: TrackSort) -> Vec<Track> {
 fn compare_tracks(left: &Track, right: &Track, sort: TrackSort) -> Ordering {
     let ordering = match sort.column {
         TrackSortColumn::PlaylistPosition => Ordering::Equal,
-        TrackSortColumn::Title => {
-            compare_optional_text(&left.metadata.title, &right.metadata.title)
-        }
-        TrackSortColumn::Artist => {
-            compare_optional_text(&left.metadata.artist, &right.metadata.artist)
-        }
-        TrackSortColumn::Album => {
-            compare_optional_text(&left.metadata.album, &right.metadata.album)
-        }
-        TrackSortColumn::Genre => {
-            compare_optional_text(&left.metadata.genre, &right.metadata.genre)
-        }
+        TrackSortColumn::Title => compare_optional_text(
+            left.metadata.title.as_deref(),
+            right.metadata.title.as_deref(),
+        ),
+        TrackSortColumn::Artist => compare_optional_text(
+            left.metadata.artist.as_deref(),
+            right.metadata.artist.as_deref(),
+        ),
+        TrackSortColumn::Album => compare_optional_text(
+            left.metadata.album.as_deref(),
+            right.metadata.album.as_deref(),
+        ),
+        TrackSortColumn::Genre => compare_optional_text(
+            left.metadata.genre.as_deref(),
+            right.metadata.genre.as_deref(),
+        ),
         TrackSortColumn::Rating => left.rating.cmp(&right.rating),
         TrackSortColumn::PlayCount => left.statistics.play_count.cmp(&right.statistics.play_count),
         TrackSortColumn::LastPlayed => left
@@ -97,11 +103,6 @@ fn compare_tracks(left: &Track, right: &Track, sort: TrackSort) -> Ordering {
     };
 
     ordering.then_with(|| left.id.cmp(&right.id))
-}
-
-fn compare_optional_text(left: &Option<String>, right: &Option<String>) -> Ordering {
-    normalize(left.as_deref().unwrap_or_default())
-        .cmp(&normalize(right.as_deref().unwrap_or_default()))
 }
 
 fn searchable_fields(track: &Track) -> Vec<String> {
