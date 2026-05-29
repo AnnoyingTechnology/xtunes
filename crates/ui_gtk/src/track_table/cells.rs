@@ -16,6 +16,7 @@ use super::{
 };
 use crate::sidebar::{parse_tracks_payload, tracks_drag_payload};
 use crate::track_context::TrackRowContextMenu;
+use crate::util::sync_rating_button;
 
 const ROW_DROP_ABOVE_CSS_CLASS: &str = "track-row-drop-above";
 const ROW_DROP_BELOW_CSS_CLASS: &str = "track-row-drop-below";
@@ -124,8 +125,6 @@ impl RowDropCellRegistry {
     }
 }
 
-const EMPTY_STAR: &str = "☆";
-const FILLED_STAR: &str = "★";
 const MAX_RATING: u8 = 5;
 const STATUS_COLUMN_WIDTH: i32 = 26;
 const STATUS_ICON_SIZE: i32 = 14;
@@ -1156,25 +1155,6 @@ fn sync_rating_buttons(rating_box: &gtk::Box, rating: u8) {
             star += 1;
         }
         child = next_child;
-    }
-}
-
-fn sync_rating_button(button: &gtk::Button, star: u8, rating: u8) {
-    button.remove_css_class("rating-star-filled");
-    button.remove_css_class("rating-star-empty");
-    button.set_label(rating_star_label(star, rating));
-    if star <= rating {
-        button.add_css_class("rating-star-filled");
-    } else {
-        button.add_css_class("rating-star-empty");
-    }
-}
-
-fn rating_star_label(star: u8, rating: u8) -> &'static str {
-    if star <= rating {
-        FILLED_STAR
-    } else {
-        EMPTY_STAR
     }
 }
 

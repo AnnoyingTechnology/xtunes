@@ -10,6 +10,7 @@ use sustain_app_runtime::{FieldChange, MetadataChange, PlayStatistics, Rating, T
 use crate::date_format::format_system_time_short;
 
 use crate::metadata_diff::{bool_diff, number_diff, signed_number_diff, text_diff};
+use crate::util::sync_rating_button;
 
 use super::{
     NUMBER_ENTRY_WIDTH_CHARS, PAIR_ENTRY_WIDTH_CHARS,
@@ -268,14 +269,6 @@ fn rating_star_button(star: u8) -> gtk::Button {
         if star == 1 { "" } else { "s" }
     )));
     button
-}
-
-fn sync_rating_button(button: &gtk::Button, star: u8, rating: u8) {
-    button.set_label(if star <= rating {
-        "\u{2605}"
-    } else {
-        "\u{2606}"
-    });
 }
 
 fn refresh_rating_buttons(parent: &gtk::Box, rating: u8) {
