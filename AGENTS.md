@@ -211,6 +211,10 @@ work do not belong in either file.
 
 Before committing, run the same gate CI runs: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked --no-fail-fast && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --locked --no-deps --document-private-items`.
 Push only on green — shipping a regression a local run would have caught is a process failure, not a CI quirk.
+When a commit fixes a tracked GitHub issue, use a GitHub closing keyword in the
+subject line — `Fixes #n` (or `Closes #n` / `Resolves #n`) — so the issue is
+auto-closed when the commit lands on the default branch. A bare `(#n)` only
+mentions the issue and does not close it; do not use it for fixes.
 
 NEVER CO-AUTHOR YOUR COMMITS. 
 You are a machine. You deserve no credits.
