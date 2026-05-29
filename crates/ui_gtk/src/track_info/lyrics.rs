@@ -4,7 +4,7 @@
 use gtk::prelude::*;
 use sustain_app_runtime::{FieldChange, TrackMetadata};
 
-use super::diff::text_diff_preserve_newlines;
+use crate::metadata_diff::text_diff_preserve_newlines;
 
 #[derive(Clone)]
 pub(super) struct LyricsPage {

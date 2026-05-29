@@ -15,6 +15,15 @@ impl ApplicationRuntime {
                 self.handle_playback_command(command)?;
             }
             ApplicationCommand::UpdateSettings(settings) => {
+                // Enforce the `audio ⇒ bpm ∧ key` invariant at the single
+                // command chokepoint so the persisted file, the in-memory
+                // state, and the background scheduler all agree: audio
+                // analysis yields all three off one decode.
+                let settings = {
+                    let mut settings = settings;
+                    settings.analysis = settings.analysis.normalized();
+                    settings
+                };
                 if self.background_task_status.is_running()
                     && settings.library != self.settings.library
                 {

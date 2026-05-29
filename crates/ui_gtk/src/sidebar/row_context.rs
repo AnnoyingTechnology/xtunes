@@ -9,7 +9,7 @@ use sustain_app_runtime::{
 
 use super::{
     AnalysisEnabledQueryHolder, AnalysisRunCallbackHolder, DeleteCallbackHolder,
-    EditSmartPlaylistCallbackHolder, OnlineEnabledQueryHolder, OnlineRunCallbackHolder,
+    EditSmartPlaylistCallbackHolder, OnlineBusyQueryHolder, OnlineRunCallbackHolder,
     RenameCallbackHolder,
 };
 
@@ -25,7 +25,7 @@ pub(super) struct SidebarRowContext {
     pub(super) on_analysis_run: AnalysisRunCallbackHolder,
     pub(super) on_online_run: OnlineRunCallbackHolder,
     pub(super) analysis_enabled_query: AnalysisEnabledQueryHolder,
-    pub(super) online_enabled_query: OnlineEnabledQueryHolder,
+    pub(super) online_busy_query: OnlineBusyQueryHolder,
 }
 
 pub(super) fn attach_row_context_menu(row: &gtk::Widget, context: SidebarRowContext) {
@@ -219,7 +219,10 @@ fn build_analyze_submenu_page(popover: &gtk::Popover, context: &SidebarRowContex
 }
 
 /// Build the "Retrieve" submenu page: Lyrics / Tags / Artwork / All.
-/// Same insensitivity policy as the Analyze page.
+/// Unlike Analyze, entries are insensitive only while a retrieval run
+/// is in flight — when the process is idle they are clickable
+/// regardless of the background toggle, so a manual retrieval can
+/// re-contact tracks that previously found nothing (issue #61).
 fn build_retrieve_submenu_page(popover: &gtk::Popover, context: &SidebarRowContext) -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     page.add_css_class("sidebar-context-menu");
@@ -228,14 +231,12 @@ fn build_retrieve_submenu_page(popover: &gtk::Popover, context: &SidebarRowConte
     let back = row_submenu_back_button("Retrieve");
     page.append(&back);
 
-    let online_globally_on = |capability: OnlineCapability| -> bool {
-        context
-            .online_enabled_query
-            .borrow()
-            .as_ref()
-            .map(|query| query(capability))
-            .unwrap_or(false)
-    };
+    let online_busy = context
+        .online_busy_query
+        .borrow()
+        .as_ref()
+        .map(|query| query())
+        .unwrap_or(false);
 
     for (label_text, capability) in [
         ("Lyrics", OnlineCapability::Lyrics),
@@ -243,7 +244,7 @@ fn build_retrieve_submenu_page(popover: &gtk::Popover, context: &SidebarRowConte
         ("Artwork", OnlineCapability::Artwork),
     ] {
         let button = row_action_button(label_text);
-        button.set_sensitive(!online_globally_on(capability));
+        button.set_sensitive(!online_busy);
         let popover_for_run = popover.clone();
         let item_for_run = context.item;
         let on_online_run = context.on_online_run.clone();
@@ -259,6 +260,7 @@ fn build_retrieve_submenu_page(popover: &gtk::Popover, context: &SidebarRowConte
     page.append(&row_separator());
 
     let all_button = row_action_button("All");
+    all_button.set_sensitive(!online_busy);
     let popover_for_all = popover.clone();
     let item_for_all = context.item;
     let on_online_run = context.on_online_run.clone();

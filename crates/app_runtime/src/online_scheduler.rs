@@ -603,13 +603,19 @@ fn attempt_artwork(
     tag_writer: &MetadataWriteHandle,
     cached_match: Option<&TrackMatch>,
 ) -> AttemptOutcome {
-    // The "track already has embedded artwork" filter is enforced by
-    // the SQL query (`tracks_needing_online` excludes rows with
-    // `has_embedded_artwork = 1`); we trust that filter here and do
-    // not re-probe the file at attempt time. If the bit is somehow
-    // stale, the worst case is one unsolicited overwrite — but per
-    // the policy the scanner is authoritative for this flag.
-    let _ = track;
+    // Missing-only guard, enforced per-track so it holds for *both*
+    // work sources. The background sweep's `tracks_needing_online`
+    // query already excludes embedded-artwork rows, but the manual
+    // (force) retrieval path deliberately bypasses that query — so the
+    // guard must live here too, or a manual "Retrieve → Artwork" on a
+    // track that already carries a cover would overwrite it. We trust
+    // the scanner-maintained `has_embedded_artwork` flag rather than
+    // re-probing the file at attempt time; `None` (never scanned) is
+    // treated as "no embedded art" so the track stays eligible,
+    // matching the SQL's `COALESCE(has_embedded_artwork, 0) = 0`.
+    if track.has_embedded_artwork == Some(true) {
+        return AttemptOutcome::NoMatch;
+    }
 
     let fetched: Option<FetchedArtwork> = match cached_match {
         Some(track_match) => match remote_service.fetch_artwork_for_match(track_match) {
@@ -1455,6 +1461,69 @@ mod tests {
             remote.artwork_calls.load(Ordering::SeqCst),
             0,
             "track already has embedded artwork; no remote call needed"
+        );
+        assert!(metadata.artwork_writes.lock().expect("lock").is_empty());
+
+        scheduler.shutdown();
+    }
+
+    #[test]
+    fn explicit_artwork_run_skips_track_with_embedded_artwork() {
+        // The manual (force) path bypasses the `tracks_needing_online`
+        // SQL filter, so the per-track embedded-artwork guard inside
+        // `attempt_artwork` is the *only* thing standing between a
+        // "Retrieve → Artwork" click and an unsolicited overwrite of an
+        // existing embedded cover. With background artwork off, the
+        // track only reaches the worker via the explicit queue — and it
+        // must still be skipped (issue #61).
+        let temp = TempDir::new().expect("temp");
+        let store: Arc<dyn LibraryStore> = Arc::new(InMemoryLibraryStore::new());
+        let mut track = track_with_metadata(temp.path(), "alpha.flac");
+        track.has_embedded_artwork = Some(true);
+        store.save_track(track.clone()).expect("save");
+
+        let remote = Arc::new(StubRemote::default().with_artwork(Ok(Some(FetchedArtwork {
+            bytes: vec![9, 9, 9, 9],
+            release_mbid: "release".to_owned(),
+        }))));
+        let metadata = Arc::new(StubMetadata::default());
+        let (sink, rx) = capturing_sink();
+
+        let (_writer, tag_writer) = spawn_tag_writer(metadata.clone());
+
+        let scheduler = OnlineScheduler::start(OnlineSchedulerConfig {
+            remote_service: remote.clone(),
+            tag_writer,
+            library_store: store.clone(),
+            progress: sink,
+            track_updated: None,
+            clock: fixed_clock(1),
+            initial_settings: OnlineSettings {
+                artwork: false,
+                tags: false,
+                lyrics: false,
+            },
+            library_path: Some(temp.path().to_path_buf()),
+            provider_version: 1,
+        });
+
+        scheduler.request_explicit_run(
+            vec![track.id],
+            OnlineCapabilities {
+                artwork: true,
+                tags: false,
+                lyrics: false,
+            },
+        );
+
+        let _idle = wait_for(&rx, Duration::from_secs(2), |progress| {
+            matches!(progress, SchedulerProgress::Idle { .. })
+        });
+
+        assert_eq!(
+            remote.artwork_calls.load(Ordering::SeqCst),
+            0,
+            "embedded-artwork track must be skipped even on a forced run"
         );
         assert!(metadata.artwork_writes.lock().expect("lock").is_empty());
 

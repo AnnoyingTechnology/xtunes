@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gtk::glib::Propagation;
 use gtk::prelude::*;
+use sustain_app_runtime::AnalysisSettings;
 use sustain_app_runtime::priority::resolve_worker_count;
 
 use super::super::{
@@ -26,38 +30,59 @@ pub(super) fn build(command_controller: SharedCommandController) -> gtk::Widget 
          Never modifies tracks that already have one.",
         initial.bpm,
     );
-    wire_analysis_switch(
-        &bpm_row.switch,
-        command_controller.clone(),
-        AnalysisFlag::Bpm,
-    );
-    content.append(&bpm_row.container);
-
     let key_row = build_switch_row(
         "Key detection",
         "Runs in the background on tracks missing a musical key. \
          Never modifies tracks that already have one.",
         initial.key,
     );
-    wire_analysis_switch(
-        &key_row.switch,
-        command_controller.clone(),
-        AnalysisFlag::Key,
-    );
-    content.append(&key_row.container);
-
     let audio_row = build_switch_row(
         "Audio analysis",
         "Decodes each track once to produce the color waveforms and the perceptual \
-         features Smart Shuffle uses to match transitions. The heaviest pass; runs \
-         in the background on tracks that are missing it.",
+         features Smart Shuffle uses to match transitions, and reads BPM and key off \
+         the same decode — so turning this on enables and locks both. The heaviest \
+         pass; runs in the background on tracks that are missing it.",
         initial.audio,
     );
-    wire_analysis_switch(
-        &audio_row.switch,
+
+    // Audio analysis produces BPM, key, waveforms, and the perceptual
+    // features from one decode, so while it is on the BPM and Key
+    // switches are forced on and locked: the user must not be able to
+    // switch off a value the audio pass is already computing. A shared
+    // `syncing` flag lets the audio handler drive the BPM/Key switches
+    // programmatically without re-entering their own change handlers.
+    let syncing = Rc::new(Cell::new(false));
+    wire_capability_switch(
+        &bpm_row.switch,
         command_controller.clone(),
-        AnalysisFlag::Audio,
+        CapabilityFlag::Bpm,
+        syncing.clone(),
     );
+    wire_capability_switch(
+        &key_row.switch,
+        command_controller.clone(),
+        CapabilityFlag::Key,
+        syncing.clone(),
+    );
+    wire_audio_switch(
+        &audio_row.switch,
+        &bpm_row.switch,
+        &key_row.switch,
+        command_controller.clone(),
+        syncing,
+    );
+
+    // Reflect the locked state for the initial settings (already
+    // normalized on load, so BPM/Key read as on whenever audio is).
+    bpm_row
+        .switch
+        .set_sensitive(!bpm_switch_state(initial).locked);
+    key_row
+        .switch
+        .set_sensitive(!key_switch_state(initial).locked);
+
+    content.append(&bpm_row.container);
+    content.append(&key_row.container);
     content.append(&audio_row.container);
 
     // Separator + resource-usage slider. The separator keeps the
@@ -73,28 +98,99 @@ pub(super) fn build(command_controller: SharedCommandController) -> gtk::Widget 
 }
 
 #[derive(Clone, Copy)]
-enum AnalysisFlag {
+enum CapabilityFlag {
     Bpm,
     Key,
-    Audio,
 }
 
-fn wire_analysis_switch(
+/// Visual state of a BPM/Key switch derived from the analysis settings:
+/// shown `active` per the (already-normalized) flag, and `locked`
+/// (insensitive) whenever audio analysis is on — because the audio pass
+/// yields BPM and key too, so the user must not be able to switch them
+/// off underneath it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SwitchState {
+    active: bool,
+    locked: bool,
+}
+
+fn bpm_switch_state(analysis: AnalysisSettings) -> SwitchState {
+    SwitchState {
+        active: analysis.bpm,
+        locked: analysis.audio,
+    }
+}
+
+fn key_switch_state(analysis: AnalysisSettings) -> SwitchState {
+    SwitchState {
+        active: analysis.key,
+        locked: analysis.audio,
+    }
+}
+
+/// Wire a BPM or Key switch. User toggles dispatch the matching flag;
+/// programmatic changes made by the audio handler (while `syncing` is
+/// set) are ignored, since they are not user gestures.
+fn wire_capability_switch(
     switch: &gtk::Switch,
     command_controller: SharedCommandController,
-    flag: AnalysisFlag,
+    flag: CapabilityFlag,
+    syncing: Rc<Cell<bool>>,
 ) {
     switch.connect_state_set(move |_switch, requested_state| {
+        if syncing.get() {
+            return Propagation::Proceed;
+        }
         let mut settings = command_controller.runtime().borrow().settings().clone();
         match flag {
-            AnalysisFlag::Bpm => settings.analysis.bpm = requested_state,
-            AnalysisFlag::Key => settings.analysis.key = requested_state,
-            AnalysisFlag::Audio => settings.analysis.audio = requested_state,
+            CapabilityFlag::Bpm => settings.analysis.bpm = requested_state,
+            CapabilityFlag::Key => settings.analysis.key = requested_state,
         }
         if command_controller
             .dispatch(ApplicationCommand::UpdateSettings(settings))
             .is_ok()
         {
+            Propagation::Proceed
+        } else {
+            Propagation::Stop
+        }
+    });
+}
+
+/// Wire the Audio analysis switch. Toggling it dispatches the new
+/// `audio` flag (normalized in the runtime, so `audio` on forces BPM +
+/// key on), then drives the BPM/Key switches to match and locks them
+/// while audio is on. The `syncing` guard keeps the programmatic
+/// `set_active` calls from re-entering the BPM/Key handlers.
+fn wire_audio_switch(
+    audio_switch: &gtk::Switch,
+    bpm_switch: &gtk::Switch,
+    key_switch: &gtk::Switch,
+    command_controller: SharedCommandController,
+    syncing: Rc<Cell<bool>>,
+) {
+    let bpm_switch = bpm_switch.clone();
+    let key_switch = key_switch.clone();
+    audio_switch.connect_state_set(move |_switch, audio_on| {
+        let mut settings = command_controller.runtime().borrow().settings().clone();
+        settings.analysis.audio = audio_on;
+        // `audio` on implies BPM + key on; turning it off leaves them
+        // wherever they were (the user can then opt out individually).
+        settings.analysis = settings.analysis.normalized();
+        let bpm_state = bpm_switch_state(settings.analysis);
+        let key_state = key_switch_state(settings.analysis);
+        let dispatched = command_controller
+            .dispatch(ApplicationCommand::UpdateSettings(settings))
+            .is_ok();
+        // Mirror the (possibly forced) BPM/Key state onto their switches
+        // without re-entering their handlers, then lock/unlock them.
+        syncing.set(true);
+        bpm_switch.set_active(bpm_state.active);
+        key_switch.set_active(key_state.active);
+        syncing.set(false);
+        bpm_switch.set_sensitive(!bpm_state.locked);
+        key_switch.set_sensitive(!key_state.locked);
+        if dispatched {
             Propagation::Proceed
         } else {
             Propagation::Stop
@@ -236,7 +332,57 @@ fn caption_text(usage: BackgroundResourceUsage) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackgroundResourceUsage, usage_to_value, value_to_usage};
+    use super::{
+        AnalysisSettings, BackgroundResourceUsage, SwitchState, bpm_switch_state, key_switch_state,
+        usage_to_value, value_to_usage,
+    };
+
+    #[test]
+    fn audio_locks_the_bpm_and_key_switches() {
+        // Audio off: each switch reflects its own flag and stays editable.
+        let off = AnalysisSettings {
+            bpm: true,
+            key: false,
+            audio: false,
+        };
+        assert_eq!(
+            bpm_switch_state(off),
+            SwitchState {
+                active: true,
+                locked: false
+            }
+        );
+        assert_eq!(
+            key_switch_state(off),
+            SwitchState {
+                active: false,
+                locked: false
+            }
+        );
+
+        // Audio on (settings are normalized to all-true): both switches
+        // are forced active and locked — the user cannot opt out of a
+        // value the audio pass computes.
+        let on = AnalysisSettings {
+            bpm: true,
+            key: true,
+            audio: true,
+        };
+        assert_eq!(
+            bpm_switch_state(on),
+            SwitchState {
+                active: true,
+                locked: true
+            }
+        );
+        assert_eq!(
+            key_switch_state(on),
+            SwitchState {
+                active: true,
+                locked: true
+            }
+        );
+    }
 
     #[test]
     fn slider_values_round_trip_through_usage() {

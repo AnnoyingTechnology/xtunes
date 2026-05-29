@@ -29,6 +29,7 @@ mod library_consolidation;
 mod library_import;
 mod library_scan;
 mod main_window;
+mod metadata_diff;
 mod now_playing;
 mod playlists_header;
 mod preferences;

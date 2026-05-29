@@ -10,8 +10,8 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 
 use sustain_app_runtime::{
-    AnalysisCapability, AnalysisRunRequest, OnlineCapability, OnlineRunRequest, PlaylistItem,
-    SmartPlaylistId, TrackId,
+    AnalysisCapability, AnalysisRunRequest, OnlineRunRequest, PlaylistItem, SmartPlaylistId,
+    TrackId,
 };
 
 use super::{
@@ -48,8 +48,12 @@ pub(crate) type SidebarOnlineRunCallback = Rc<dyn Fn(PlaylistItem, OnlineRunRequ
 /// (i.e. covered by the background sweep). The sidebar renders the
 /// matching submenu item insensitive whenever this returns `true`.
 pub(crate) type SidebarAnalysisEnabledQuery = Rc<dyn Fn(AnalysisCapability) -> bool>;
-/// Queries whether a given online capability is enabled globally.
-pub(crate) type SidebarOnlineEnabledQuery = Rc<dyn Fn(OnlineCapability) -> bool>;
+/// Queries whether the online retrieval process is running right now.
+/// The sidebar renders the Retrieve submenu entries insensitive while
+/// it returns `true`; when idle they are clickable regardless of the
+/// background toggle so a manual retrieval can re-contact tracks that
+/// previously found nothing (issue #61).
+pub(crate) type SidebarOnlineBusyQuery = Rc<dyn Fn() -> bool>;
 
 /// The sidebar's three selection targets.
 ///
@@ -73,7 +77,7 @@ type EditSmartPlaylistCallbackHolder = Rc<RefCell<Option<SidebarEditSmartPlaylis
 type AnalysisRunCallbackHolder = Rc<RefCell<Option<SidebarAnalysisRunCallback>>>;
 type OnlineRunCallbackHolder = Rc<RefCell<Option<SidebarOnlineRunCallback>>>;
 type AnalysisEnabledQueryHolder = Rc<RefCell<Option<SidebarAnalysisEnabledQuery>>>;
-type OnlineEnabledQueryHolder = Rc<RefCell<Option<SidebarOnlineEnabledQuery>>>;
+type OnlineBusyQueryHolder = Rc<RefCell<Option<SidebarOnlineBusyQuery>>>;
 
 /// Which row under the LIBRARY section is currently active. Mutually
 /// exclusive with a playlist selection in the list view.
@@ -105,25 +109,36 @@ pub(crate) struct PlaylistSidebar {
     on_analysis_run: AnalysisRunCallbackHolder,
     on_online_run: OnlineRunCallbackHolder,
     analysis_enabled_query: AnalysisEnabledQueryHolder,
-    online_enabled_query: OnlineEnabledQueryHolder,
+    online_busy_query: OnlineBusyQueryHolder,
     pending_rename: Rc<RefCell<Option<PlaylistItem>>>,
+    /// Fold state of the LIBRARY disclosure section. Read back at
+    /// shutdown so the choice persists across launches.
+    library_section_collapsed: Rc<Cell<bool>>,
+    /// Fold state of the PLAYLISTS disclosure section.
+    playlists_section_collapsed: Rc<Cell<bool>>,
 }
 
 impl PlaylistSidebar {
-    pub(crate) fn new(runtime: SharedRuntime) -> Self {
+    pub(crate) fn new(
+        runtime: SharedRuntime,
+        library_collapsed: bool,
+        playlists_collapsed: bool,
+    ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("playlist-sidebar");
         root.set_vexpand(true);
         root.set_size_request(SIDEBAR_MIN_WIDTH, -1);
 
-        root.append(&build_section_header("LIBRARY"));
+        let (library_header, library_caret) = build_section_header("LIBRARY");
+        root.append(&library_header);
 
         let music_row = build_library_row("Music", "audio-x-generic-symbolic");
         let albums_row = build_library_row("Albums", "media-optical-symbolic");
         root.append(&music_row);
         root.append(&albums_row);
 
-        root.append(&build_section_header("PLAYLISTS"));
+        let (playlists_header, playlists_caret) = build_section_header("PLAYLISTS");
+        root.append(&playlists_header);
 
         let tree_model = build_tree_model(&runtime.borrow());
         let selection = gtk::SingleSelection::new(Some(tree_model));
@@ -138,7 +153,7 @@ impl PlaylistSidebar {
         let on_analysis_run: AnalysisRunCallbackHolder = Rc::new(RefCell::new(None));
         let on_online_run: OnlineRunCallbackHolder = Rc::new(RefCell::new(None));
         let analysis_enabled_query: AnalysisEnabledQueryHolder = Rc::new(RefCell::new(None));
-        let online_enabled_query: OnlineEnabledQueryHolder = Rc::new(RefCell::new(None));
+        let online_busy_query: OnlineBusyQueryHolder = Rc::new(RefCell::new(None));
         let pending_rename: Rc<RefCell<Option<PlaylistItem>>> = Rc::new(RefCell::new(None));
         let list_view = gtk::ListView::new(
             Some(selection.clone()),
@@ -151,7 +166,7 @@ impl PlaylistSidebar {
                 on_analysis_run.clone(),
                 on_online_run.clone(),
                 analysis_enabled_query.clone(),
-                online_enabled_query.clone(),
+                online_busy_query.clone(),
                 pending_rename.clone(),
             )),
         );
@@ -165,6 +180,34 @@ impl PlaylistSidebar {
         scroller.set_hexpand(true);
         scroller.set_child(Some(&list_view));
         root.append(&scroller);
+
+        // Wire the two disclosure sections. Folding hides the section's
+        // rows and flips the caret; the state lives in a cell read back
+        // at shutdown so the choice persists across launches. The
+        // sections are independent.
+        //
+        // LIBRARY folds away its two fixed-height rows, so collapsing it
+        // lets PLAYLISTS rise to fill the freed space. PLAYLISTS folds the
+        // list view itself rather than the enclosing scroller: the scroller
+        // keeps `vexpand`, so the now-empty area still pins the footer to
+        // the bottom edge instead of letting it float up under the header.
+        let library_section_collapsed = Rc::new(Cell::new(library_collapsed));
+        let playlists_section_collapsed = Rc::new(Cell::new(playlists_collapsed));
+        connect_section_toggle(
+            &library_header,
+            &library_caret,
+            library_section_collapsed.clone(),
+            vec![
+                music_row.clone().upcast::<gtk::Widget>(),
+                albums_row.clone().upcast::<gtk::Widget>(),
+            ],
+        );
+        connect_section_toggle(
+            &playlists_header,
+            &playlists_caret,
+            playlists_section_collapsed.clone(),
+            vec![list_view.clone().upcast::<gtk::Widget>()],
+        );
 
         // Sidebar footer. Built empty here; the main window appends the
         // [cog] Settings button after construction. The footer is a
@@ -232,9 +275,22 @@ impl PlaylistSidebar {
             on_analysis_run,
             on_online_run,
             analysis_enabled_query,
-            online_enabled_query,
+            online_busy_query,
             pending_rename,
+            library_section_collapsed,
+            playlists_section_collapsed,
         }
+    }
+
+    /// Whether the LIBRARY disclosure section is currently folded shut.
+    /// Read at shutdown to persist the fold state.
+    pub(crate) fn library_section_collapsed(&self) -> bool {
+        self.library_section_collapsed.get()
+    }
+
+    /// Whether the PLAYLISTS disclosure section is currently folded shut.
+    pub(crate) fn playlists_section_collapsed(&self) -> bool {
+        self.playlists_section_collapsed.get()
     }
 
     pub(crate) fn widget(&self) -> gtk::Box {
@@ -288,8 +344,8 @@ impl PlaylistSidebar {
         self.analysis_enabled_query.replace(Some(query));
     }
 
-    pub(crate) fn set_online_enabled_query(&self, query: SidebarOnlineEnabledQuery) {
-        self.online_enabled_query.replace(Some(query));
+    pub(crate) fn set_online_busy_query(&self, query: SidebarOnlineBusyQuery) {
+        self.online_busy_query.replace(Some(query));
     }
 
     /// Arm an inline rename for `item` on the next bind that matches it.
@@ -441,14 +497,112 @@ fn library_row_stub_tree_list_row() -> Option<gtk::TreeListRow> {
     stub_model.row(0)
 }
 
-/// Builds a non-interactive section header — the small uppercase labels
-/// that introduce the LIBRARY and PLAYLISTS groups. Headers are pure
-/// typography: no background, no hover, no click target, no focus.
-fn build_section_header(text: &str) -> gtk::Label {
+/// Builds a clickable disclosure header for a sidebar section — the
+/// small uppercase labels that introduce the LIBRARY and PLAYLISTS
+/// groups, each prefixed by a caret that reflects (and toggles) whether
+/// the section is folded. Returns the header row and its caret image;
+/// the caller wires the fold behaviour via [`connect_section_toggle`].
+///
+/// The whole row is the click/focus target. It is focusable so the
+/// Left/Right arrow keys can drive the fold once the header is focused.
+fn build_section_header(text: &str) -> (gtk::Box, gtk::Image) {
+    let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    header.add_css_class("playlist-sidebar-section-header-row");
+    header.set_focusable(true);
+
+    let caret = gtk::Image::from_icon_name(SECTION_EXPANDED_ICON);
+    caret.add_css_class("playlist-sidebar-section-caret");
+
     let label = gtk::Label::new(Some(text));
     label.add_css_class("playlist-sidebar-section-header");
     label.set_xalign(0.0);
-    label
+    label.set_hexpand(true);
+
+    header.append(&caret);
+    header.append(&label);
+    (header, caret)
+}
+
+/// Caret icon for an expanded (open) disclosure section — points down.
+const SECTION_EXPANDED_ICON: &str = "pan-down-symbolic";
+/// Caret icon for a collapsed (folded) disclosure section — points to
+/// the inline-end edge (right in LTR).
+const SECTION_COLLAPSED_ICON: &str = "pan-end-symbolic";
+
+/// Paints a section's current fold state: swaps the caret glyph and
+/// shows or hides every body widget belonging to the section.
+fn apply_section_visual(caret: &gtk::Image, bodies: &[gtk::Widget], collapsed: bool) {
+    caret.set_icon_name(Some(if collapsed {
+        SECTION_COLLAPSED_ICON
+    } else {
+        SECTION_EXPANDED_ICON
+    }));
+    for body in bodies {
+        body.set_visible(!collapsed);
+    }
+}
+
+/// Wires a disclosure header so that clicking it (or pressing
+/// Enter/Space while it is focused) toggles the section, while Left
+/// folds and Right unfolds it. `collapsed` is the persisted fold cell;
+/// `bodies` are the widgets shown only while the section is open. The
+/// initial visual state is applied immediately from `collapsed`.
+fn connect_section_toggle(
+    header: &gtk::Box,
+    caret: &gtk::Image,
+    collapsed: Rc<Cell<bool>>,
+    bodies: Vec<gtk::Widget>,
+) {
+    apply_section_visual(caret, &bodies, collapsed.get());
+
+    let set_collapsed: Rc<dyn Fn(bool)> = {
+        let caret = caret.clone();
+        let collapsed = collapsed.clone();
+        Rc::new(move |want: bool| {
+            if collapsed.get() == want {
+                return;
+            }
+            collapsed.set(want);
+            apply_section_visual(&caret, &bodies, want);
+        })
+    };
+
+    let gesture = gtk::GestureClick::new();
+    gesture.set_button(gdk::BUTTON_PRIMARY);
+    {
+        let header = header.clone();
+        let set_collapsed = set_collapsed.clone();
+        let collapsed = collapsed.clone();
+        gesture.connect_pressed(move |gesture, _n_press, _x, _y| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            // Take focus so the arrow-key controller below acts on this
+            // header immediately after a click.
+            header.grab_focus();
+            set_collapsed(!collapsed.get());
+        });
+    }
+    header.add_controller(gesture);
+
+    let keys = gtk::EventControllerKey::new();
+    {
+        let set_collapsed = set_collapsed.clone();
+        keys.connect_key_pressed(move |_controller, key, _code, _modifiers| match key {
+            gdk::Key::Left => {
+                set_collapsed(true);
+                glib::Propagation::Stop
+            }
+            gdk::Key::Right => {
+                set_collapsed(false);
+                glib::Propagation::Stop
+            }
+            gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::space => {
+                set_collapsed(!collapsed.get());
+                glib::Propagation::Stop
+            }
+            _ => glib::Propagation::Proceed,
+        });
+    }
+    header.add_controller(keys);
 }
 
 fn connect_library_row(
@@ -542,7 +696,7 @@ fn build_row_factory(
     on_analysis_run: AnalysisRunCallbackHolder,
     on_online_run: OnlineRunCallbackHolder,
     analysis_enabled_query: AnalysisEnabledQueryHolder,
-    online_enabled_query: OnlineEnabledQueryHolder,
+    online_busy_query: OnlineBusyQueryHolder,
     pending_rename: Rc<RefCell<Option<PlaylistItem>>>,
 ) -> gtk::SignalListItemFactory {
     let current_indicator: SharedDropIndicator = Rc::new(RefCell::new(None));
@@ -679,7 +833,7 @@ fn build_row_factory(
                 on_analysis_run: on_analysis_run.clone(),
                 on_online_run: on_online_run.clone(),
                 analysis_enabled_query: analysis_enabled_query.clone(),
-                online_enabled_query: online_enabled_query.clone(),
+                online_busy_query: online_busy_query.clone(),
             },
         );
         attach_rename_entry_signals(

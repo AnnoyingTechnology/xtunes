@@ -12,7 +12,6 @@ use super::{
 
 mod artwork;
 mod details;
-mod diff;
 mod file_page;
 mod form;
 mod format;

@@ -71,6 +71,8 @@ pub fn track_matches_rule(track: &Track, rule: &SmartPlaylistRule, now: SystemTi
             operator,
             value,
         } => evaluate_number(number_field_value(track, *field), *operator, *value),
+        SmartPlaylistRule::NumberIsEmpty { field } => number_field_value(track, *field).is_none(),
+        SmartPlaylistRule::NumberIsPresent { field } => number_field_value(track, *field).is_some(),
         SmartPlaylistRule::Rating { operator, value } => evaluate_number(
             Some(i64::from(track.rating.stars())),
             *operator,
@@ -380,6 +382,30 @@ mod tests {
         };
 
         assert!(!track_matches_rule(&track, &rule, unix(2_000)));
+    }
+
+    #[test]
+    fn number_is_empty_matches_only_missing_numeric_field() {
+        let with_year = track(1, Some("Jazz"), 0, Some(1999));
+        let without_year = track(2, Some("Jazz"), 0, None);
+        let rule = SmartPlaylistRule::NumberIsEmpty {
+            field: SmartPlaylistNumberField::Year,
+        };
+
+        assert!(!track_matches_rule(&with_year, &rule, unix(2_000)));
+        assert!(track_matches_rule(&without_year, &rule, unix(2_000)));
+    }
+
+    #[test]
+    fn number_is_present_matches_only_populated_numeric_field() {
+        let with_year = track(1, Some("Jazz"), 0, Some(1999));
+        let without_year = track(2, Some("Jazz"), 0, None);
+        let rule = SmartPlaylistRule::NumberIsPresent {
+            field: SmartPlaylistNumberField::Year,
+        };
+
+        assert!(track_matches_rule(&with_year, &rule, unix(2_000)));
+        assert!(!track_matches_rule(&without_year, &rule, unix(2_000)));
     }
 
     #[test]

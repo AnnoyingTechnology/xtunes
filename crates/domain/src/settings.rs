@@ -40,11 +40,6 @@ pub struct PlaybackSettings {
     /// applied to candidate scores; has no effect when Pure shuffle
     /// is active.
     pub smart_shuffle_entropy: SmartShuffleEntropy,
-    /// Cadence at which the background worker rebuilds the Smart
-    /// Shuffle index (genre IDF and, later, normalization
-    /// statistics). `Off` disables automatic rebuilds; the user can
-    /// still trigger one with "Rebuild index" in the preferences tab.
-    pub smart_shuffle_rebuild_interval: SmartShuffleRebuildInterval,
 }
 
 impl Default for PlaybackSettings {
@@ -53,7 +48,6 @@ impl Default for PlaybackSettings {
             volume: VolumePercent::from_clamped(DEFAULT_PLAYBACK_VOLUME_PERCENT),
             shuffle_mode: ShuffleMode::Off,
             smart_shuffle_entropy: SmartShuffleEntropy::default(),
-            smart_shuffle_rebuild_interval: SmartShuffleRebuildInterval::default(),
         }
     }
 }
@@ -85,33 +79,6 @@ impl SmartShuffleEntropy {
     }
 }
 
-/// How often the background worker rebuilds the Smart Shuffle index
-/// (genre IDF and, later, normalization statistics). `Off` is
-/// intentionally available — the user can rebuild once via the
-/// "Rebuild index" button and then leave it frozen while iterating on
-/// their library.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum SmartShuffleRebuildInterval {
-    Off,
-    Hourly,
-    #[default]
-    Daily,
-    Weekly,
-}
-
-impl SmartShuffleRebuildInterval {
-    /// Number of seconds between automatic index rebuilds, or `None`
-    /// when automatic rebuilding is disabled.
-    pub const fn interval_secs(self) -> Option<u64> {
-        match self {
-            Self::Off => None,
-            Self::Hourly => Some(60 * 60),
-            Self::Daily => Some(24 * 60 * 60),
-            Self::Weekly => Some(7 * 24 * 60 * 60),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UiSettings {
     pub search_text: String,
@@ -130,6 +97,14 @@ pub struct UiSettings {
     /// the sidebar does not zero this out, so re-expanding restores
     /// the same width.
     pub sidebar_width: Option<u32>,
+    /// Whether the LIBRARY disclosure section (Music / Albums rows) is
+    /// folded shut. Independent of [`Self::playlists_section_collapsed`];
+    /// folding only hides the section's rows, it does not change which
+    /// view is selected.
+    pub library_section_collapsed: bool,
+    /// Whether the PLAYLISTS disclosure section (the playlist tree) is
+    /// folded shut. Independent of [`Self::library_section_collapsed`].
+    pub playlists_section_collapsed: bool,
 }
 
 /// The persisted sidebar entry the user had selected when the session
@@ -152,15 +127,40 @@ pub enum UiSidebarSelection {
 /// are missing it. Flags never gate manual right-click runs — those are
 /// always available and intentionally overwrite existing values.
 ///
-/// The `audio` flag covers the single heavy full-decode pass: the
-/// preview and detail waveforms with color, plus the perceptual acoustic
-/// features (loudness, onset density, timbre) Smart Shuffle consumes.
-/// They are all byproducts of the one decode, so they share one toggle.
+/// The `audio` flag covers the single heavy decode pass: the perceptual
+/// acoustic features (loudness, onset density, timbre) Smart Shuffle
+/// consumes, the color waveforms (skipped on very long tracks), **and**
+/// BPM + key — the analyzer derives all three from the one in-memory
+/// decode, so enabling `audio` implies enabling `bpm` and `key`. See
+/// [`AnalysisSettings::normalized`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AnalysisSettings {
     pub bpm: bool,
     pub key: bool,
     pub audio: bool,
+}
+
+impl AnalysisSettings {
+    /// Enforce the invariant that the heavy `audio` pass also yields BPM
+    /// and key. The analyzer decodes one centered window per track and
+    /// reads BPM, key, and the acoustic features off it, so asking for
+    /// `audio` without `bpm`/`key` is a contradiction — there is no
+    /// cheaper path that produces acoustics but skips the tempo/key it
+    /// already has the samples for. Normalising at every ingestion point
+    /// (settings load, the `UpdateSettings` command) means a hand-edited
+    /// config or a stale UI state can never reach the scheduler with
+    /// `audio: true, bpm: false`.
+    pub fn normalized(self) -> Self {
+        if self.audio {
+            Self {
+                bpm: true,
+                key: true,
+                audio: true,
+            }
+        } else {
+            self
+        }
+    }
 }
 
 /// Background-capability toggles for network-bound retrieval. Same
@@ -301,6 +301,36 @@ mod tests {
         assert!(!settings.online.artwork);
         assert!(!settings.online.tags);
         assert!(!settings.online.lyrics);
+    }
+
+    #[test]
+    fn audio_normalization_forces_bpm_and_key_on() {
+        // `audio` on implies `bpm` and `key` on — they come off the same
+        // decode, so the scheduler must never see audio-without-the-rest.
+        assert_eq!(
+            AnalysisSettings {
+                bpm: false,
+                key: false,
+                audio: true,
+            }
+            .normalized(),
+            AnalysisSettings {
+                bpm: true,
+                key: true,
+                audio: true,
+            }
+        );
+        // With `audio` off the other flags are left exactly as they are.
+        let bpm_only = AnalysisSettings {
+            bpm: true,
+            key: false,
+            audio: false,
+        };
+        assert_eq!(bpm_only.normalized(), bpm_only);
+        assert_eq!(
+            AnalysisSettings::default().normalized(),
+            AnalysisSettings::default()
+        );
     }
 
     #[test]

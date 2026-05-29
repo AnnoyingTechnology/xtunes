@@ -4,6 +4,7 @@
 use std::cmp::Ordering as CmpOrdering;
 use std::time::SystemTime;
 
+use super::inline_edit::EditableField;
 use super::row::TrackTableRow;
 use crate::date_format::format_system_time_short;
 
@@ -127,6 +128,32 @@ impl TrackTableColumn {
         // a niche analysis output most listeners don't think in terms
         // of, so it ships off by default too.
         !matches!(self, Self::Skips | Self::LastSkipped | Self::MusicKey)
+    }
+
+    /// The metadata field this column edits inline, or `None` for columns
+    /// that are derived, statistical, or otherwise read-only (Bitrate,
+    /// Type, Duration, Rating — which has its own star widget — Plays,
+    /// Skips, Last Played, Last Skipped, Date Added).
+    pub(super) fn editable_field(self) -> Option<EditableField> {
+        match self {
+            Self::TrackName => Some(EditableField::Title),
+            Self::Artist => Some(EditableField::Artist),
+            Self::Album => Some(EditableField::Album),
+            Self::Genre => Some(EditableField::Genre),
+            Self::Year => Some(EditableField::Year),
+            Self::Bpm => Some(EditableField::Bpm),
+            Self::MusicKey => Some(EditableField::Key),
+            Self::TrackNumber => Some(EditableField::TrackNumber),
+            Self::Bitrate
+            | Self::FileType
+            | Self::Duration
+            | Self::Rating
+            | Self::Plays
+            | Self::Skips
+            | Self::LastPlayed
+            | Self::LastSkipped
+            | Self::DateAdded => None,
+        }
     }
 
     pub(super) fn xalign(self) -> f32 {

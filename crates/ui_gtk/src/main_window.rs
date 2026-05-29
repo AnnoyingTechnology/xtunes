@@ -10,9 +10,10 @@ use std::{
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use sustain_app_runtime::{
-    PlaybackCommand, PlaybackQueueRequest, PlaybackQueueSource, Playlist, PlaylistEntry,
-    PlaylistFolder, PlaylistFolderId, PlaylistItem, Rating, ShuffleMode, Track, TrackColumnLayout,
-    TrackColumnLayoutScope, TrackId, UiSettings, UiSidebarSelection, track_matches_search_text,
+    MetadataChange, PlaybackCommand, PlaybackQueueRequest, PlaybackQueueSource, PlaybackState,
+    Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistItem, Rating, ShuffleMode,
+    Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId, UiSettings, UiSidebarSelection,
+    track_matches_search_text,
 };
 
 use super::{
@@ -51,13 +52,13 @@ use super::{
     smart_playlist_editor::{SmartPlaylistEditorMode, open_smart_playlist_editor},
     status_bar::StatusBar,
     titlebar::{
-        Titlebar, build_titlebar, connect_titlebar_playback_controls, connect_titlebar_search,
-        sync_play_pause_icon,
+        Titlebar, build_titlebar, connect_titlebar_play_button, connect_titlebar_playback_controls,
+        connect_titlebar_search, sync_play_pause_icon,
     },
     track_context::{
         AddToPlaylistCallback, AddToPlaylistEntry, AddToPlaylistProvider, TrackActionCallback,
         TrackActionVisibility, TrackAnalyzeEnabledQuery, TrackAnalyzeRunCallback,
-        TrackContextAction, TrackContextActionSet, TrackRetrieveEnabledQuery,
+        TrackContextAction, TrackContextActionSet, TrackRetrieveBusyQuery,
         TrackRetrieveRunCallback, TrackRowContextMenu,
     },
     track_context_ops::{
@@ -66,8 +67,8 @@ use super::{
         track_has_album_visibility,
     },
     track_table::{
-        RatingChangedCallback, RowDropPosition, RowReorderCallback, RowReorderDrop,
-        TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table,
+        EditableField, InlineEditHooks, RatingChangedCallback, RowDropPosition, RowReorderCallback,
+        RowReorderDrop, TrackActivatedCallback, TrackTable, TrackTableRow, build_track_table,
     },
     window_chrome::{install_resize_handles, install_window_state_chrome},
 };
@@ -221,7 +222,11 @@ pub(crate) fn build_main_window(
     root.set_vexpand(true);
     root.set_overflow(gtk::Overflow::Hidden);
 
-    let sidebar = PlaylistSidebar::new(runtime.clone());
+    let sidebar = PlaylistSidebar::new(
+        runtime.clone(),
+        initial_ui_settings.library_section_collapsed,
+        initial_ui_settings.playlists_section_collapsed,
+    );
     let sidebar_widget = sidebar.widget();
 
     let library_track_activated = library_track_activated_callback(
@@ -257,7 +262,7 @@ pub(crate) fn build_main_window(
         )
         .with_retrieve_menu(
             track_retrieve_run_callback(&runtime),
-            online_enabled_query(&runtime),
+            online_busy_query(&runtime),
         );
     let playlist_context_actions = playlist_track_context_actions(
         &runtime,
@@ -277,16 +282,22 @@ pub(crate) fn build_main_window(
         )
         .with_retrieve_menu(
             track_retrieve_run_callback(&runtime),
-            online_enabled_query(&runtime),
+            online_busy_query(&runtime),
         );
     let rating_changed =
         rating_changed_callback(&command_controller, track_row_changed_holder.clone());
+    let songs_inline_edit = inline_edit_hooks(
+        &runtime,
+        &command_controller,
+        track_row_changed_holder.clone(),
+    );
     let songs_table = build_track_table(
         library_tracks.clone(),
         Some(library_track_activated.clone()),
         Some(context_menu.clone()),
         Some(rating_changed.clone()),
         None,
+        Some(songs_inline_edit),
     );
     tlog!("songs table populated");
     songs_table_holder.replace(Some(songs_table.clone()));
@@ -318,6 +329,7 @@ pub(crate) fn build_main_window(
         Some(playlist_context_menu),
         Some(rating_changed),
         Some(playlist_row_reorder),
+        None,
     );
     playlists_table_holder.replace(Some(playlists_table.clone()));
     install_track_column_layout_persistence(&runtime, &songs_table, &playlists_table, &sidebar);
@@ -368,6 +380,19 @@ pub(crate) fn build_main_window(
         &playlists_dirty,
     );
     tlog!("content stack + activators installed");
+    // The Play button's behaviour depends on the visible view, which now
+    // exists. One shared closure drives both the button and the Space
+    // shortcut so the two surfaces never diverge.
+    let toggle_or_start_playback = make_toggle_or_start_playback(
+        &command_controller,
+        &runtime,
+        &content_stack,
+        &albums_view,
+        &sidebar,
+        &current_search_text,
+        &playback_changed,
+    );
+    connect_titlebar_play_button(&titlebar, toggle_or_start_playback.clone());
     let visible_summary_refresh = visible_summary_refresh_callback(
         &runtime,
         &content_stack,
@@ -380,6 +405,7 @@ pub(crate) fn build_main_window(
         &songs_table,
         &albums_view,
         &sidebar,
+        &titlebar,
         visible_summary_refresh.clone(),
         &current_search_text,
     );
@@ -416,7 +442,7 @@ pub(crate) fn build_main_window(
     install_track_data_observer(&runtime, track_row_changed_holder.clone());
     install_track_updated_consumer(track_updated_rx, runtime.clone());
     install_smart_shuffle_rebuild_result_consumer(smart_shuffle_rebuild_result_rx, runtime.clone());
-    install_smart_shuffle_periodic_rebuild(&runtime);
+    install_smart_shuffle_launch_rebuild(&runtime);
     // The sidebar is now the sole navigation surface: its selection
     // chooses which content-stack page is visible (Music → SONGS_VIEW,
     // Albums → ALBUMS_VIEW, an Item → PLAYLISTS_VIEW). The non-default
@@ -479,7 +505,7 @@ pub(crate) fn build_main_window(
     sidebar.set_analysis_run_callback(sidebar_analysis_run_callback(&runtime));
     sidebar.set_online_run_callback(sidebar_online_run_callback(&runtime));
     sidebar.set_analysis_enabled_query(sidebar_analysis_enabled_query(&runtime));
-    sidebar.set_online_enabled_query(sidebar_online_enabled_query(&runtime));
+    sidebar.set_online_busy_query(sidebar_online_busy_query(&runtime));
     library_changed_holder.replace(Some(library_changed.clone()));
     let scan_requested = library_scan_requested_callback(&runtime, library_changed.clone());
     let consolidation_requested = library_consolidation_requested_callback(&runtime);
@@ -496,7 +522,6 @@ pub(crate) fn build_main_window(
     let main_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     main_content.set_hexpand(true);
     main_content.set_vexpand(true);
-    let command_controller_for_shortcuts = command_controller.clone();
     let command_controller_for_global_shortcuts = command_controller.clone();
 
     // Sidebar footer: the [cog] Settings button is the visual
@@ -537,8 +562,7 @@ pub(crate) fn build_main_window(
     install_keyboard_shortcuts(
         &window,
         KeyboardShortcutContext {
-            command_controller: command_controller_for_shortcuts,
-            playback_changed: playback_changed.clone(),
+            toggle_or_start_playback: toggle_or_start_playback.clone(),
             runtime: runtime.clone(),
             songs_table: songs_table.clone(),
             playlists_table: playlists_table.clone(),
@@ -735,6 +759,8 @@ fn ui_settings_from_widgets(
         },
         sidebar_collapsed,
         sidebar_width: Some(sidebar_width),
+        library_section_collapsed: sidebar.library_section_collapsed(),
+        playlists_section_collapsed: sidebar.playlists_section_collapsed(),
     }
 }
 
@@ -826,6 +852,7 @@ fn library_changed_callback(
     songs_table: &TrackTable,
     albums_view: &AlbumsView,
     sidebar: &PlaylistSidebar,
+    titlebar: &Titlebar,
     visible_summary_refresh: VisibleSummaryRefreshCallback,
     current_search_text: &Rc<RefCell<String>>,
 ) -> LibraryChangedCallback {
@@ -833,6 +860,7 @@ fn library_changed_callback(
     let songs_table = songs_table.clone();
     let albums_view = albums_view.clone();
     let sidebar = sidebar.clone();
+    let titlebar = titlebar.clone();
     let current_search_text = current_search_text.clone();
 
     Rc::new(move || {
@@ -849,6 +877,10 @@ fn library_changed_callback(
         // so library_changed never needs to touch the playlists table
         // directly.
         sidebar.refresh();
+        // A scan/import/removal can flip the library between empty and
+        // non-empty, which decides whether the Play button can cold-start
+        // anything.
+        update_play_pause_sensitivity(&titlebar, &runtime.borrow());
         visible_summary_refresh();
     })
 }
@@ -1100,11 +1132,9 @@ fn sidebar_analysis_enabled_query(
     Rc::new(move |capability| analysis_capability_enabled(&runtime, capability))
 }
 
-fn sidebar_online_enabled_query(
-    runtime: &SharedRuntime,
-) -> super::sidebar::SidebarOnlineEnabledQuery {
+fn sidebar_online_busy_query(runtime: &SharedRuntime) -> super::sidebar::SidebarOnlineBusyQuery {
     let runtime = runtime.clone();
-    Rc::new(move |capability| online_capability_enabled(&runtime, capability))
+    Rc::new(move || runtime.borrow().is_online_retrieval_running())
 }
 
 fn track_analyze_run_callback(runtime: &SharedRuntime) -> TrackAnalyzeRunCallback {
@@ -1130,9 +1160,14 @@ fn analysis_enabled_query(runtime: &SharedRuntime) -> TrackAnalyzeEnabledQuery {
     Rc::new(move |capability| analysis_capability_enabled(&runtime, capability))
 }
 
-fn online_enabled_query(runtime: &SharedRuntime) -> TrackRetrieveEnabledQuery {
+/// Whether the online retrieval process is running right now. Shared by
+/// the sidebar's per-playlist Retrieve submenu and the track-table's
+/// per-track Retrieve submenu so both grey out their entries together
+/// while a run is in flight, and offer them otherwise — independent of
+/// the background toggle (issue #61).
+fn online_busy_query(runtime: &SharedRuntime) -> TrackRetrieveBusyQuery {
     let runtime = runtime.clone();
-    Rc::new(move |capability| online_capability_enabled(&runtime, capability))
+    Rc::new(move || runtime.borrow().is_online_retrieval_running())
 }
 
 /// Read the global analysis-capability toggle from the live settings.
@@ -1149,19 +1184,6 @@ fn analysis_capability_enabled(
         sustain_app_runtime::AnalysisCapability::Bpm => analysis.bpm,
         sustain_app_runtime::AnalysisCapability::Key => analysis.key,
         sustain_app_runtime::AnalysisCapability::Audio => analysis.audio,
-    }
-}
-
-fn online_capability_enabled(
-    runtime: &SharedRuntime,
-    capability: sustain_app_runtime::OnlineCapability,
-) -> bool {
-    let runtime = runtime.borrow();
-    let online = runtime.settings().online;
-    match capability {
-        sustain_app_runtime::OnlineCapability::Lyrics => online.lyrics,
-        sustain_app_runtime::OnlineCapability::Artwork => online.artwork,
-        sustain_app_runtime::OnlineCapability::Tags => online.tags,
     }
 }
 
@@ -1678,11 +1700,14 @@ fn playback_changed_callback(
 ) -> PlaybackChangedCallback {
     let runtime = runtime.clone();
     let now_playing = now_playing.clone();
-    let play_pause_icon = titlebar.play_pause_icon.clone();
+    let titlebar = titlebar.clone();
 
     Rc::new(move || {
         let now_playing_state = runtime.borrow().now_playing();
-        sync_play_pause_icon(&play_pause_icon, &now_playing_state.state);
+        sync_play_pause_icon(&titlebar.play_pause_icon, &now_playing_state.state);
+        // A track loading/clearing changes whether Play resumes a current
+        // track or must cold-start the visible view.
+        update_play_pause_sensitivity(&titlebar, &runtime.borrow());
         let playing_track_id = now_playing_state.track.as_ref().map(|track| track.id);
         if let Some(songs_table) = songs_table_holder.borrow().as_ref() {
             songs_table.set_playing_track_id(playing_track_id);
@@ -1904,52 +1929,29 @@ fn install_smart_shuffle_rebuild_result_consumer(
     });
 }
 
-/// Tick interval, in seconds, for the periodic Smart Shuffle rebuild
-/// check. 60 s is the documented cadence in
-/// `smart_shuffle_scheduler.rs`: fine-grained enough that the
-/// "Hourly" preset triggers within a minute of becoming due, coarse
-/// enough to be free at the system level (a glib timer at this
-/// cadence is in the noise next to background analysis work).
-const SMART_SHUFFLE_PERIODIC_TICK_SECS: u32 = 60;
+/// Delay before the one-shot launch rebuild fires. A second is plenty
+/// to clear the cold-start window (the 400 ms first-idle budget plus
+/// margin) so the rebuild's main-thread prep — cloning the track list
+/// and loading cached acoustics before the build hands off to a
+/// background worker — never counts against startup. The user never
+/// perceives the delay: the index is only consulted once Smart Shuffle
+/// actually picks a track.
+const SMART_SHUFFLE_LAUNCH_REBUILD_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Install the timer that drives Smart Shuffle's
-/// `SmartShuffleRebuildInterval` setting. Each tick compares
-/// `now() - smart_shuffle_metadata().built_at` against the configured
-/// interval and requests an index rebuild when due. Runs for the
-/// lifetime of the application — there is no "stop" path because the
-/// timer is cheap, and the runtime guards re-entrant requests
-/// internally.
-///
-/// Intentionally a no-op when:
-///   * the interval setting is `Off`,
-///   * a rebuild is already in flight (the scheduler would reject the
-///     request anyway, but checking here avoids the redundant borrow),
-///   * the index has never been built — the very first build is
-///     triggered by an explicit "Rebuild index" click or by the
-///     enable path inside `on_shuffle_mode_changed`, not by this
-///     timer. Auto-rebuild is for refreshing an index that has gone
-///     stale as the library grows, not for nudging a user who has not
-///     yet engaged with Smart Shuffle.
-fn install_smart_shuffle_periodic_rebuild(runtime: &SharedRuntime) {
+/// Request a single Smart Shuffle index rebuild shortly after launch.
+/// Launch is one of the events that legitimately changes the index
+/// since it was last persisted — the library may have been edited while
+/// the app was closed, or analysis may have completed in a prior
+/// session — so the index is refreshed once on start. The rebuild runs
+/// on the background worker and the scheduler coalesces re-entrant
+/// requests, so an unchanged library simply rebuilds an identical index
+/// in milliseconds. Deferred past [`SMART_SHUFFLE_LAUNCH_REBUILD_DELAY`]
+/// so it cannot regress the cold-start budget.
+fn install_smart_shuffle_launch_rebuild(runtime: &SharedRuntime) {
     let runtime = runtime.clone();
-    glib::timeout_add_seconds_local(SMART_SHUFFLE_PERIODIC_TICK_SECS, move || {
-        maybe_request_smart_shuffle_rebuild(&runtime);
-        glib::ControlFlow::Continue
+    glib::timeout_add_local_once(SMART_SHUFFLE_LAUNCH_REBUILD_DELAY, move || {
+        runtime.borrow_mut().request_smart_shuffle_rebuild();
     });
-}
-
-fn maybe_request_smart_shuffle_rebuild(runtime: &SharedRuntime) {
-    // Read-only borrow asks the runtime if its policy gates are open
-    // right now. The policy itself (interval, last-built, worker-busy)
-    // lives next to the data in `ApplicationRuntime` so it can be
-    // unit-tested through the injected clock without a GTK main loop.
-    // We only re-borrow mutably to issue the request — which has its
-    // own re-entrancy guard in the scheduler — so a worker that flips
-    // `is_rebuilding` between the two borrows still ends up consistent.
-    if !runtime.borrow().should_run_periodic_smart_shuffle_rebuild() {
-        return;
-    }
-    runtime.borrow_mut().request_smart_shuffle_rebuild();
 }
 
 /// Drains [`ArtworkFetchResult`](sustain_app_runtime::ArtworkFetchResult)s
@@ -2369,6 +2371,101 @@ fn first_playable_track_for_queue(
     }
 }
 
+/// Build the closure that backs both the top-bar Play button and the
+/// Space shortcut. When a track is loaded it toggles play/pause; on a
+/// cold start (controller stopped, nothing loaded) it begins playback
+/// from the currently visible view — Songs from the current
+/// sort/filter, Albums from the first album, Playlists from the selected
+/// playlist (falling back to the library). See issue #60.
+fn make_toggle_or_start_playback(
+    command_controller: &SharedCommandController,
+    runtime: &SharedRuntime,
+    content_stack: &gtk::Stack,
+    albums_view: &AlbumsView,
+    sidebar: &PlaylistSidebar,
+    current_search_text: &Rc<RefCell<String>>,
+    playback_changed: &PlaybackChangedCallback,
+) -> Rc<dyn Fn()> {
+    let command_controller = command_controller.clone();
+    let runtime = runtime.clone();
+    let content_stack = content_stack.clone();
+    let albums_view = albums_view.clone();
+    let sidebar = sidebar.clone();
+    let current_search_text = current_search_text.clone();
+    let playback_changed = playback_changed.clone();
+
+    Rc::new(move || {
+        // `Stopped` is the authoritative "no track is loaded in the
+        // controller" signal: a paused/playing track resumes as usual,
+        // and only a genuine cold start cold-starts the visible view.
+        let is_stopped = matches!(runtime.borrow().playback_state(), PlaybackState::Stopped);
+        let dispatched = if is_stopped {
+            let request = {
+                let runtime_borrow = runtime.borrow();
+                let search_text = current_search_text.borrow().clone();
+                play_request_for_visible_view(
+                    &runtime_borrow,
+                    &content_stack,
+                    &albums_view,
+                    sidebar.current_selection(),
+                    &search_text,
+                )
+            };
+            match request {
+                Some((track_id, queue)) => command_controller.dispatch_succeeded(
+                    ApplicationCommand::Playback(PlaybackCommand::PlayTrack { track_id, queue }),
+                ),
+                None => false,
+            }
+        } else {
+            command_controller.dispatch_succeeded(ApplicationCommand::Playback(
+                PlaybackCommand::TogglePlayPause,
+            ))
+        };
+        if dispatched {
+            playback_changed();
+        }
+    })
+}
+
+/// Resolve "what would Play start right now?" from the view the user is
+/// currently looking at. Derived at click time — switching modes before
+/// pressing Play changes which track starts. Returns `None` when the
+/// visible view has no playable track to anchor on. See issue #60.
+fn play_request_for_visible_view(
+    runtime: &ApplicationRuntime,
+    content_stack: &gtk::Stack,
+    albums_view: &AlbumsView,
+    sidebar_selection: Option<SidebarSelection>,
+    search_text: &str,
+) -> Option<(TrackId, PlaybackQueueRequest)> {
+    match content_stack.visible_child_name().as_deref() {
+        Some(ALBUMS_VIEW) => albums_view.first_album_play_request(),
+        Some(PLAYLISTS_VIEW) => {
+            let queue =
+                queue_request_for_playlist_selection(runtime, sidebar_selection, search_text);
+            first_playable_track_for_queue(runtime, &queue).map(|track_id| (track_id, queue))
+        }
+        // Songs view (and any unexpected state) plays the full
+        // search-filtered library, matching double-click activation.
+        _ => {
+            let queue = queue_request_for_library(runtime, search_text);
+            first_playable_track_for_queue(runtime, &queue).map(|track_id| (track_id, queue))
+        }
+    }
+}
+
+/// Enable the top-bar Play button when there is something it can act on
+/// — a track already loaded in the controller (so it pauses/resumes) or
+/// at least one track in the library (so it cold-starts the visible
+/// view). Disabled only when the library is empty and nothing is loaded,
+/// so a press is never a silent no-op. See issue #60.
+fn update_play_pause_sensitivity(titlebar: &Titlebar, runtime: &ApplicationRuntime) {
+    let has_current_track = !matches!(runtime.playback_state(), PlaybackState::Stopped);
+    let library_has_tracks = !runtime.library_tracks().is_empty();
+    titlebar.set_play_pause_sensitive(has_current_track || library_has_tracks);
+}
+
 fn install_track_ended_callback(
     runtime: &SharedRuntime,
     command_controller: &SharedCommandController,
@@ -2386,6 +2483,69 @@ fn install_track_ended_callback(
             playback_changed();
         }
     }));
+}
+
+/// Builds the seed/commit pair the Songs table uses for inline cell
+/// editing. The seed reads the field's authoritative value straight from
+/// the runtime (so Title is seeded with the real tag, not the file-stem
+/// fallback the row displays). The commit funnels through the exact same
+/// `UpdateMetadata` write path the File Info dialog uses — SQLite stays
+/// authoritative and the file tags are mirrored — then refreshes just the
+/// affected row, like the rating click does.
+fn inline_edit_hooks(
+    runtime: &SharedRuntime,
+    command_controller: &SharedCommandController,
+    track_row_changed_holder: TrackRowChangedHolder,
+) -> InlineEditHooks {
+    let seed = {
+        let runtime = runtime.clone();
+        Rc::new(move |track_id: TrackId, field: EditableField| {
+            runtime
+                .borrow()
+                .library_tracks()
+                .iter()
+                .find(|track| track.id == track_id)
+                .map(|track| field.seed_value(&track.metadata))
+        })
+    };
+
+    let commit = {
+        let runtime = runtime.clone();
+        let command_controller = command_controller.clone();
+        Rc::new(
+            move |track_id: TrackId, field: EditableField, new_text: String| {
+                let initial = {
+                    let runtime = runtime.borrow();
+                    runtime
+                        .library_tracks()
+                        .iter()
+                        .find(|track| track.id == track_id)
+                        .map(|track| track.metadata.clone())
+                };
+                let Some(initial) = initial else {
+                    return false;
+                };
+                let change = field.metadata_change(&initial, &new_text);
+                if change == MetadataChange::default() {
+                    // Re-typed the same value, or an unparsable number: no
+                    // write needed. Report success so the editor just closes.
+                    return true;
+                }
+                if !command_controller.dispatch_succeeded(ApplicationCommand::UpdateMetadata {
+                    track_id,
+                    change: Box::new(change),
+                }) {
+                    return false;
+                }
+                if let Some(callback) = track_row_changed_holder.borrow().as_ref() {
+                    callback(track_id);
+                }
+                true
+            },
+        )
+    };
+
+    InlineEditHooks { seed, commit }
 }
 
 fn rating_changed_callback(
@@ -2795,8 +2955,7 @@ fn track_mutation_callback(
 }
 
 struct KeyboardShortcutContext {
-    command_controller: SharedCommandController,
-    playback_changed: PlaybackChangedCallback,
+    toggle_or_start_playback: Rc<dyn Fn()>,
     runtime: SharedRuntime,
     songs_table: TrackTable,
     playlists_table: TrackTable,
@@ -2807,8 +2966,7 @@ struct KeyboardShortcutContext {
 
 fn install_keyboard_shortcuts(window: &gtk::ApplicationWindow, context: KeyboardShortcutContext) {
     let KeyboardShortcutContext {
-        command_controller,
-        playback_changed,
+        toggle_or_start_playback,
         runtime,
         songs_table,
         playlists_table,
@@ -2825,11 +2983,9 @@ fn install_keyboard_shortcuts(window: &gtk::ApplicationWindow, context: Keyboard
         let typing = focus_accepts_text(&window_for_focus);
 
         if key == gdk::Key::space && !typing {
-            if command_controller.dispatch_succeeded(ApplicationCommand::Playback(
-                PlaybackCommand::TogglePlayPause,
-            )) {
-                playback_changed();
-            }
+            // Same surface as the top-bar Play button: toggle when a track
+            // is loaded, cold-start the visible view otherwise (issue #60).
+            toggle_or_start_playback();
             return glib::Propagation::Stop;
         }
 

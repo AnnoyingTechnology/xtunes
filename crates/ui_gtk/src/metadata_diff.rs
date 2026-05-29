@@ -1,9 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
+//! Field-level diff helpers shared by every metadata-editing surface.
+//!
+//! Both the File Info dialog ([`crate::track_info`]) and the inline cell
+//! editor ([`crate::track_table`]) turn a freshly-typed string into a
+//! [`FieldChange`] by comparing it against the track's current value, so
+//! the two surfaces agree exactly on what counts as "unchanged", what
+//! clears a tag, and what sets a new value. Keeping the rules in one
+//! place is what guarantees an inline edit writes the same thing the
+//! dialog would for the same input.
+
 use sustain_app_runtime::FieldChange;
 
-pub(super) fn text_diff(initial: Option<&str>, current: &str) -> FieldChange<String> {
+pub(crate) fn text_diff(initial: Option<&str>, current: &str) -> FieldChange<String> {
     let trimmed_current = current.trim();
     match (initial, trimmed_current) {
         (Some(value), candidate) if value == candidate => FieldChange::Unchanged,
@@ -16,7 +26,7 @@ pub(super) fn text_diff(initial: Option<&str>, current: &str) -> FieldChange<Str
 /// Like `text_diff` but preserves internal whitespace (newlines, indentation).
 /// Used for free-form prose fields like lyrics where formatting matters.
 /// Empty/whitespace-only buffers still clear the tag.
-pub(super) fn text_diff_preserve_newlines(
+pub(crate) fn text_diff_preserve_newlines(
     initial: Option<&str>,
     current: &str,
 ) -> FieldChange<String> {
@@ -29,7 +39,7 @@ pub(super) fn text_diff_preserve_newlines(
     }
 }
 
-pub(super) fn number_diff(initial: Option<u32>, current: &str) -> FieldChange<u32> {
+pub(crate) fn number_diff(initial: Option<u32>, current: &str) -> FieldChange<u32> {
     let trimmed = current.trim();
     if trimmed.is_empty() {
         return if initial.is_some() {
@@ -48,7 +58,7 @@ pub(super) fn number_diff(initial: Option<u32>, current: &str) -> FieldChange<u3
     }
 }
 
-pub(super) fn signed_number_diff(initial: Option<i32>, current: &str) -> FieldChange<i32> {
+pub(crate) fn signed_number_diff(initial: Option<i32>, current: &str) -> FieldChange<i32> {
     let trimmed = current.trim();
     if trimmed.is_empty() {
         return if initial.is_some() {
@@ -67,7 +77,7 @@ pub(super) fn signed_number_diff(initial: Option<i32>, current: &str) -> FieldCh
     }
 }
 
-pub(super) fn bool_diff(initial: Option<bool>, current: bool) -> FieldChange<bool> {
+pub(crate) fn bool_diff(initial: Option<bool>, current: bool) -> FieldChange<bool> {
     if initial.unwrap_or(false) == current {
         FieldChange::Unchanged
     } else {

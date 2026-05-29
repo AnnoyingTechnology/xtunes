@@ -2101,6 +2101,12 @@ mod tests {
                         operator: SmartPlaylistNumberOperator::GreaterThan,
                         value: 5,
                     },
+                    SmartPlaylistRule::NumberIsEmpty {
+                        field: SmartPlaylistNumberField::Year,
+                    },
+                    SmartPlaylistRule::NumberIsPresent {
+                        field: SmartPlaylistNumberField::Bpm,
+                    },
                     SmartPlaylistRule::Rating {
                         operator: SmartPlaylistNumberOperator::GreaterThanOrEqual,
                         value: Rating::new(4).expect("valid rating"),

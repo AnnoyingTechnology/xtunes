@@ -84,6 +84,17 @@ pub enum SmartPlaylistRule {
         operator: SmartPlaylistNumberOperator,
         value: i64,
     },
+    /// Matches when a numeric field has no value at all (e.g. a track
+    /// with no year tag). Distinct from `Number { .. Equal, 0 }`, which
+    /// only matches a field explicitly set to zero.
+    NumberIsEmpty {
+        field: SmartPlaylistNumberField,
+    },
+    /// Matches when a numeric field has any value, the inverse of
+    /// [`SmartPlaylistRule::NumberIsEmpty`].
+    NumberIsPresent {
+        field: SmartPlaylistNumberField,
+    },
     Rating {
         operator: SmartPlaylistNumberOperator,
         value: Rating,

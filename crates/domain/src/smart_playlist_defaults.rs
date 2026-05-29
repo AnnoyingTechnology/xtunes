@@ -6,19 +6,21 @@ use std::num::NonZeroU32;
 use crate::{
     Rating, SmartPlaylist, SmartPlaylistDateField, SmartPlaylistId, SmartPlaylistLimit,
     SmartPlaylistLimitSelection, SmartPlaylistMatchKind, SmartPlaylistNumberField,
-    SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet,
+    SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField,
 };
 
 // Mirrors iTunes 11's starter set as far as Sustain's domain vocabulary
 // allows. Entries outside Sustain's pure-local-music scope (Music Videos,
-// Purchased, podcast/audiobook buckets) are deliberately omitted.
+// Purchased, podcast/audiobook buckets) are deliberately omitted. "Missing
+// Tags" is a Sustain-native addition for library consolidation.
 pub fn default_smart_playlists(starting_id: i64) -> Vec<SmartPlaylist> {
-    let templates: [(&str, SmartPlaylistRuleSet); 5] = [
+    let templates: [(&str, SmartPlaylistRuleSet); 6] = [
         ("Recently Added", recently_added_rules()),
         ("Recently Played", recently_played_rules()),
         ("Top 25 Most Played", top_25_most_played_rules()),
         ("4+ Stars", four_plus_stars_rules()),
         ("Unplayed", unplayed_rules()),
+        ("Missing Tags", missing_tags_rules()),
     ];
 
     templates
@@ -100,6 +102,37 @@ fn unplayed_rules() -> SmartPlaylistRuleSet {
     }
 }
 
+/// Tracks that are missing at least one of the core descriptive tags —
+/// album, artist, genre, year — or that have never been rated. A
+/// match-any rule set so a track surfaces the moment any one field is
+/// blank, making this the working list for library backfill and
+/// consolidation. Year uses `NumberIsEmpty` (no year tag at all) rather
+/// than `Number == 0`, and an unrated track is one at zero stars.
+fn missing_tags_rules() -> SmartPlaylistRuleSet {
+    SmartPlaylistRuleSet {
+        match_kind: SmartPlaylistMatchKind::Any,
+        rules: vec![
+            SmartPlaylistRule::TextIsEmpty {
+                field: SmartPlaylistTextField::Album,
+            },
+            SmartPlaylistRule::TextIsEmpty {
+                field: SmartPlaylistTextField::Artist,
+            },
+            SmartPlaylistRule::TextIsEmpty {
+                field: SmartPlaylistTextField::Genre,
+            },
+            SmartPlaylistRule::NumberIsEmpty {
+                field: SmartPlaylistNumberField::Year,
+            },
+            SmartPlaylistRule::Rating {
+                operator: SmartPlaylistNumberOperator::Equal,
+                value: Rating::unrated(),
+            },
+        ],
+        limit: None,
+    }
+}
+
 fn days(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).expect("default smart-playlist day window must be positive")
 }
@@ -109,7 +142,7 @@ mod tests {
     use super::default_smart_playlists;
 
     #[test]
-    fn seeds_five_named_defaults_with_sequential_ids() {
+    fn seeds_named_defaults_with_sequential_ids() {
         let playlists = default_smart_playlists(1);
 
         let names: Vec<&str> = playlists.iter().map(|smart| smart.name.as_str()).collect();
@@ -121,11 +154,12 @@ mod tests {
                 "Top 25 Most Played",
                 "4+ Stars",
                 "Unplayed",
+                "Missing Tags",
             ]
         );
 
         let ids: Vec<i64> = playlists.iter().map(|smart| smart.id.get()).collect();
-        assert_eq!(ids, vec![1, 2, 3, 4, 5]);
+        assert_eq!(ids, vec![1, 2, 3, 4, 5, 6]);
     }
 
     #[test]
@@ -133,7 +167,24 @@ mod tests {
         let playlists = default_smart_playlists(42);
 
         assert_eq!(playlists.first().expect("non-empty").id.get(), 42);
-        assert_eq!(playlists.last().expect("non-empty").id.get(), 46);
+        assert_eq!(playlists.last().expect("non-empty").id.get(), 47);
+    }
+
+    #[test]
+    fn missing_tags_matches_any_of_the_descriptive_tags() {
+        let missing_tags = default_smart_playlists(1)
+            .into_iter()
+            .find(|smart| smart.name == "Missing Tags")
+            .expect("Missing Tags default present");
+
+        // Match-any: a track surfaces the instant any one descriptive tag
+        // is blank, not only when every one of them is.
+        assert_eq!(
+            missing_tags.rules.match_kind,
+            crate::SmartPlaylistMatchKind::Any
+        );
+        assert_eq!(missing_tags.rules.rules.len(), 5);
+        assert_eq!(missing_tags.rules.limit, None);
     }
 
     #[test]

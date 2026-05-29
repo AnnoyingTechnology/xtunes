@@ -26,5 +26,10 @@ thiserror = "2.0"
 # Domain-layer types (MusicalKey).
 sustain-domain = { path = "../domain" }
 
+[dev-dependencies]
+# Scratch files for the decode/seek tests, which generate small WAVs on
+# disk and need them cleaned up regardless of test outcome.
+tempfile = "3"
+
 [lints]
 workspace = true

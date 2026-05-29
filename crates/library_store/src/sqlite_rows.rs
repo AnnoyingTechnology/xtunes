@@ -450,6 +450,16 @@ pub(crate) fn rule_to_columns(rule: &SmartPlaylistRule) -> RuleColumns {
             number_value: Some(*value),
             ..RuleColumns::default()
         },
+        SmartPlaylistRule::NumberIsEmpty { field } => RuleColumns {
+            kind: "NumberIsEmpty",
+            field: Some(number_field_name(*field)),
+            ..RuleColumns::default()
+        },
+        SmartPlaylistRule::NumberIsPresent { field } => RuleColumns {
+            kind: "NumberIsPresent",
+            field: Some(number_field_name(*field)),
+            ..RuleColumns::default()
+        },
         SmartPlaylistRule::Rating { operator, value } => RuleColumns {
             kind: "Rating",
             number_operator: Some(number_operator_name(*operator)),
@@ -605,6 +615,12 @@ fn rule_from_row(row: &Row<'_>) -> StoreResult<SmartPlaylistRule> {
             field: number_field_from_name(rule_field_name()?)?,
             operator: require_number_operator()?,
             value: require_number_value()?,
+        }),
+        "NumberIsEmpty" => Ok(SmartPlaylistRule::NumberIsEmpty {
+            field: number_field_from_name(rule_field_name()?)?,
+        }),
+        "NumberIsPresent" => Ok(SmartPlaylistRule::NumberIsPresent {
+            field: number_field_from_name(rule_field_name()?)?,
         }),
         "Rating" => Ok(SmartPlaylistRule::Rating {
             operator: require_number_operator()?,

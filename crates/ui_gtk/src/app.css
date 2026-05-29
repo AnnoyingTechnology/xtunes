@@ -597,17 +597,42 @@ popover.compact-context-menu > contents {
     color: #e66100;
 }
 
-/* LIBRARY / PLAYLISTS section headers. Pure typographic markers: small,
-   muted, lightly letter-spaced, no background, no hover, not selectable.
-   Text is set uppercase at the source (GTK4 CSS has no text-transform).
-   Top margin gives breathing room from the row above (or window chrome
-   for the first header); bottom margin separates the header from the
-   first selectable row underneath. */
+/* LIBRARY / PLAYLISTS section header labels. Small, muted, lightly
+   letter-spaced typographic markers. Text is set uppercase at the
+   source (GTK4 CSS has no text-transform). The spacing that used to
+   live here now sits on the clickable header row below. */
 .playlist-sidebar-section-header {
     color: alpha(@theme_fg_color, 0.55);
     font-size: 0.85em;
     letter-spacing: 0.06em;
+}
+
+/* Clickable disclosure row wrapping a section's caret and label. The
+   whole row is the fold toggle (click, or Enter/Space when focused);
+   Left folds and Right unfolds. Margins reproduce the old header
+   spacing — breathing room from the row above and separation from the
+   first row underneath — while the inner padding keeps the click/hover
+   target a comfortable height. */
+.playlist-sidebar-section-header-row {
     margin: 10px 8px 4px 8px;
+    padding: 2px 4px;
+    border-radius: 4px;
+}
+
+.playlist-sidebar-section-header-row:hover {
+    background-color: alpha(@theme_fg_color, 0.06);
+}
+
+.playlist-sidebar-section-header-row:focus-visible {
+    outline: 1px solid alpha(@theme_fg_color, 0.3);
+    outline-offset: -1px;
+}
+
+/* The disclosure caret. Sized down to sit unobtrusively beside the
+   muted section label and tinted to match it. */
+.playlist-sidebar-section-caret {
+    -gtk-icon-size: 12px;
+    color: alpha(@theme_fg_color, 0.55);
 }
 
 /* Shared chrome for every selectable sidebar row — the Music entry under
@@ -751,6 +776,22 @@ button.sidebar-context-menu-item {
     min-height: 28px;
     padding: 0;
     border-bottom: 1px solid alpha(@theme_fg_color, 0.05);
+}
+
+/* Inline cell editor. A single click on an editable cell of the
+   already-selected Songs row swaps the cell's label for this entry.
+   Trimmed to the row height so opening it doesn't jolt the row; it keeps
+   the standard entry background and accent focus ring so the active
+   field reads clearly even over a selected row's accent fill. */
+.track-table-inline-edit,
+.track-table-inline-edit > text {
+    min-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+.track-table-inline-edit {
+    margin: 1px 6px;
 }
 
 .track-table-row-even {

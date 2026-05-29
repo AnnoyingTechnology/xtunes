@@ -140,9 +140,18 @@ sidebar can be brought back. The collapsed state is persisted across
 launches. While the sidebar is collapsed there is no in-app switcher
 for the LIBRARY entries — bring the sidebar back to change view.
 
+### Collapsible sections — *iTunes-adjacent*
+The LIBRARY and PLAYLISTS headers are disclosure rows: each carries a
+caret (▾ open, ▸ folded) and the whole row is the toggle. Clicking a
+header folds that section, hiding its rows; folding LIBRARY lets the
+PLAYLISTS list rise to fill the freed space. The two sections fold
+independently. With a header focused, **Left** folds it and **Right**
+unfolds it. Each section's fold state is persisted across launches.
+
 ### Selection persistence — *Sustain-native*
-The sidebar's active row (Music, Albums, or a specific playlist) and
-its collapsed state are restored on next launch.
+The sidebar's active row (Music, Albums, or a specific playlist), its
+collapsed state, and the fold state of the LIBRARY and PLAYLISTS
+sections are restored on next launch.
 
 ---
 
@@ -161,18 +170,23 @@ moves entries between folders.
 ### Smart playlists — *iso-iTunes*
 Rule-based saved queries with iTunes-style operators: `is`,
 `contains`, `starts with`, `is in the last N days`, numeric comparisons,
-rating comparisons. Fields cover the usual tag/metadata set plus BPM
+rating comparisons, and `is empty` / `is present` for text and numeric
+tag fields. Fields cover the usual tag/metadata set plus BPM
 and Music Key for tempo- and harmony-aware rules. Match mode is
 `Match all` / `Match any`. An optional limit picks the top N by
 `Most Often Played`, `Random`, etc. Smart playlists are re-evaluated
 live on every query.
 
-### Default smart playlists — *iso-iTunes*
+### Default smart playlists — *iso-iTunes* / *Sustain-native*
 A freshly created library is seeded with five iTunes-style starter
-smart playlists: **Recently Added**, **Recently Played**,
-**Top 25 Most Played**, **4+ Stars**, **Unplayed**. They are seeded
-once at library creation and not re-seeded afterwards, so the user is
-free to delete or edit them.
+smart playlists — **Recently Added**, **Recently Played**,
+**Top 25 Most Played**, **4+ Stars**, **Unplayed** — plus one
+Sustain-native addition, **Missing Tags**. Missing Tags is a match-any
+list of tracks lacking any of album, artist, genre, or year, or that
+are still unrated, so it doubles as the working queue for library
+backfill and consolidation. All six are seeded once at library
+creation and not re-seeded afterwards, so the user is free to delete or
+edit them.
 
 ### Smart playlist editor — *iso-iTunes*
 A dedicated editor dialog mirrors the iTunes 11 layout: match mode at
@@ -197,28 +211,38 @@ reach them. Useful for dedicated mix-set playlists destined for
 Pioneer PDB export (the audio pass costs a lot of decode time on long
 mixes, so most users keep the global audio-analysis toggle off and
 trigger it per playlist) or for one-shot "fetch lyrics on this 'Sing me'
-playlist" runs. Each per-capability entry is rendered insensitive
-when its matching global toggle is on — the background sweep is
-already covering those tracks, so the right-click trigger would be
-redundant. The **All** entry always submits the full mask: when the
-user explicitly bundles all three, the inflight dedup and
-"needs-analysis" filter inside each scheduler keep that from doing
-duplicate work. Folders don't expose the submenus: they don't carry
-tracks of their own.
+playlist" runs.
+
+The two submenus gate their entries differently. **Analyze** entries
+go insensitive when the matching global toggle is on — the background
+sweep already covers those tracks and re-running a finished,
+deterministic analysis is pointless. **Retrieve** is instead a *force*
+path: its entries stay available regardless of the toggle and grey out
+only while a retrieval run is actually in flight, so a manual retrieval
+can re-contact tracks a previous pass left empty (a provider that had
+nothing months ago may have it now). The scheduler's missing-only guard
+still skips tracks that already carry the data, so a forced run only
+touches the gaps and never overwrites. The **All** entry submits the
+full mask; per-scheduler inflight dedup keeps a bundled request from
+doing duplicate work. Folders don't expose the submenus: they don't
+carry tracks of their own.
 
 ### Per-track analysis & online retrieval — *Sustain-native*
 The same **Analyze** and **Retrieve** submenus appear on the track
-context menu (Music view and the playlist track table), so the user can target
-the currently-selected tracks instead of a whole playlist. Naming,
-menu shape, and insensitive-when-globally-covered semantics match
-the per-playlist version exactly.
+context menu (Music view and the playlist track table), so the user can
+target the currently-selected tracks instead of a whole playlist.
+Naming, menu shape, and gating semantics match the per-playlist version
+exactly — Analyze greys out when globally covered, Retrieve greys out
+only while a run is in flight.
 
-Both surfaces filter the input through the library store before
-dispatching, so a re-run on a target whose tracks already have the
-requested data is a no-op. The user sees a distinct
-"All N tracks already have X — nothing to queue." notification
-instead of the regular "Queued N tracks" message, so a no-op click
-is never silent.
+**Analyze** filters the input through the library store before
+dispatching, so a re-run on tracks that already have the requested
+analysis is a no-op; the user sees a distinct "All N tracks already
+have X — nothing to queue." notification instead of "Queued N tracks",
+so a no-op click is never silent. **Retrieve** skips that pre-filter on
+purpose — it forces a fresh attempt and leans on the scheduler's
+missing-only guard to skip tracks that already have the data — so it
+always reports the queued run.
 
 ---
 
@@ -297,14 +321,16 @@ fact.
 The genre IDF weights, the cached per-track acoustic features, and the
 library-derived robust normalization ranges the acoustic terms need are
 prepared in a small **index** recomputed on a background worker thread —
-milliseconds of work, but genuinely library-dependent. The Shuffle
-preferences tab exposes an **Automatic rebuild** cadence (Never /
-Hourly / Daily / Weekly) plus an explicit **Rebuild index** button, and
-reports the analysis coverage the acoustic terms have to work with; the
-index is persisted alongside the library database so it survives
-restarts. There is no cold-start gate: Smart Shuffle works from the
-first track, degrading gracefully on tracks with sparse metadata or no
-audio analysis.
+milliseconds of work, but genuinely library-dependent. The rebuild is
+event-driven: it runs on the events that actually change the index — a
+library scan completing, audio-analysis coverage growing, and app launch
+— and the worker coalesces overlapping requests, so there is no cadence
+to schedule and nothing to press. The Shuffle preferences tab reports
+the index state and the analysis coverage the acoustic terms have to
+work with; the index is persisted alongside the library database so it
+survives restarts. There is no cold-start gate: Smart Shuffle works from
+the first track, degrading gracefully on tracks with sparse metadata or
+no audio analysis.
 
 Smart Shuffle only applies to library-wide queues. Single-album or
 single-playlist playback uses Pure shuffle even when Smart is the
@@ -344,41 +370,53 @@ prompt.
 
 ### BPM detection — *Sustain-native*
 A tempogram estimator over the track's beat envelope, octave-normalized
-into the configured `[min_bpm, max_bpm]` band (default 70–170 BPM). The
-estimate fills `tracks.bpm` only when SQLite has no value for that
-field — analysis supplies missing data, it never overrides a value
-imported from a file tag or set by the user. The BPM column ships
-visible by default and feeds the `BPM` smart-playlist field for
-tempo-aware rules.
+into the configured `[min_bpm, max_bpm]` band (default 70–170 BPM). It
+reads a **centered** window of the track — the middle two minutes —
+rather than the opening seconds, where intros (especially in electronic
+music) are too sparse and tame to read a steady tempo from. The estimate
+fills `tracks.bpm` only when SQLite has no value for that field —
+analysis supplies missing data, it never overrides a value imported from
+a file tag or set by the user. The BPM column ships visible by default
+and feeds the `BPM` smart-playlist field for tempo-aware rules.
 
 ### Musical key detection — *Sustain-native*
-Estimates the song's tonal centre via chroma analysis and stores one
-of the 24 major/minor labels in `tracks.musical_key`, again only when
-SQLite has no value for that field. The Music Key column ships hidden
-by default; surface it through the column selector. The same field is
-exposed to smart-playlist rules for harmony-aware sets.
+Estimates the song's tonal centre via chroma analysis over the same
+centered window as BPM, and stores one of the 24 major/minor labels in
+`tracks.musical_key`, again only when SQLite has no value for that
+field. The Music Key column ships hidden by default; surface it through
+the column selector. The same field is exposed to smart-playlist rules
+for harmony-aware sets.
 
 ### Audio analysis — *Sustain-native*
-A single heavy full-decode pass produces, as byproducts of the one
-decode, both a coarse preview waveform and a detailed colour waveform
-with beatgrid, plus the perceptual acoustic features (integrated and
-short-term loudness, loudness range, onset density, low/mid/high
-band-energy ratios, low-band variation, and tonalness) that Smart
-Shuffle's continuity terms and loudness guard consume. The preview
-backs the playback seek bar; the detail waveform is held in SQLite for
-future DJ-export targets; the acoustic features are stored per track
-and cached into the Smart Shuffle index. Because they all come from one
-decode, a single toggle governs the whole pass.
+A single heavy decode pass produces, as byproducts of the one decode,
+both a coarse preview waveform and a detailed colour waveform, plus the
+perceptual acoustic features (integrated and short-term loudness,
+loudness range, onset density, low/mid/high band-energy ratios, low-band
+variation, and tonalness) that Smart Shuffle's continuity terms and
+loudness guard consume — and, off the same decode, the track's BPM and
+key. The pass scales to track length: a normal-length track is measured
+whole, while a **long** track (over 15 minutes — classical movements, DJ
+mixes, podcasts) has its acoustics measured over a centered 8-minute
+sample and skips the waveform entirely, keeping the working set bounded
+instead of decoding a multi-hour file into memory. The preview backs the
+playback seek bar; the detail waveform is held in SQLite for future
+DJ-export targets; the acoustic features are stored per track and cached
+into the Smart Shuffle index. Because they all come from one decode, a
+single toggle governs the whole pass.
 
 ### Background analysis scheduler — *Sustain-native*
-The Analysis tab in Preferences exposes three independent toggles —
-BPM / Key / Audio — that gate which capabilities the background
-sweep requests. With any toggle on, a paced multi-worker pool walks
-`tracks_needing_analysis` and runs only the missing capabilities per
-track; tracks whose value is already populated (whether from prior
-analysis or from a file tag at import) are skipped. Worker count and
-CPU/IO priority follow the Background resource usage slider in the
-same tab.
+The Analysis tab in Preferences exposes three toggles — BPM / Key /
+Audio — that gate which capabilities the background sweep requests.
+Because the Audio pass yields BPM and key off the same decode, turning
+it on forces the BPM and Key toggles on and locks them. With any toggle
+on, a paced multi-worker pool walks `tracks_needing_analysis` and runs
+only the missing capabilities per track; tracks whose value is already
+populated (whether from prior analysis or from a file tag at import) are
+skipped. Worker count and CPU/IO priority follow the Background resource
+usage slider in the same tab; on Intel hybrid CPUs the polite presets
+(Innocuous, Balanced) additionally pin their workers to the efficiency
+cores, keeping background analysis off the performance cores playback
+and the UI want — a no-op on non-hybrid machines.
 
 The same pool also drains an explicit queue populated by the
 per-playlist and per-track **Analyze** submenus, so a one-off
@@ -404,6 +442,20 @@ Opening Get Info on a track is `Ctrl+I` or the row context menu.
 ### Inline rating — *iso-iTunes*
 The Rating column in the table accepts clicks directly: click a star to
 set 1–5, click the current rating to clear.
+
+### Inline cell editing — *iso-iTunes*
+In the Songs table, a single click on an editable cell of the
+**already-selected** row opens an inline editor seeded with that field's
+current value. A click on an unselected row just selects it (a second,
+deliberate click then edits), and a double-click still plays — the edit
+never starts on the first press of a double-click. Editable columns are
+Track Name, Artist, Album, Genre, Year, BPM, Key, and Track #; other
+columns (Bitrate, Type, Duration, Plays, dates, …) ignore the click, and
+Rating keeps its own star widget. **Enter** commits, **Escape** cancels,
+and **Tab** / **Shift+Tab** commit and move to the next / previous
+editable cell in the row; clicking away commits. Edits travel the same
+`UpdateMetadata` write path as the Get Info dialog, so SQLite stays
+authoritative and the file tag is mirrored.
 
 ### Tag mirroring — *iso-iTunes*
 When the user edits metadata in Sustain, the change is written to the
@@ -441,9 +493,11 @@ limits hold network use polite even on a fresh library.
 Each capability also has a manual entry point. The Get Info Artwork
 tab can trigger an immediate lookup, and the per-playlist and
 per-track **Retrieve** submenus run the chosen capability against a
-target set independent of the global toggles. Manual triggers also
-respect the "missing-only" rule and never overwrite an existing
-value.
+target set independent of the global toggles. Unlike the background
+sweep, a manual retrieval ignores the per-track attempt stamp, so it
+re-contacts tracks a previous pass left empty — but it still respects
+the "missing-only" rule (a track that already has the data is skipped)
+and never overwrites an existing value.
 
 ### Artwork cache — *Sustain-native*
 Embedded artwork is decoded once and cached in SQLite. Now Playing,

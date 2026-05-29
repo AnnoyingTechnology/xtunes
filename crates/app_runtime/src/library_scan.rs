@@ -99,6 +99,12 @@ impl ApplicationRuntime {
         if let Some(scheduler) = self.online_scheduler() {
             scheduler.wake();
         }
+        // A scan is one of the events that genuinely changes the Smart
+        // Shuffle index (new tracks, new genres). Rebuild on the
+        // background worker — it is milliseconds of work and the
+        // scheduler coalesces re-entrant requests, so this is cheap even
+        // when the scan added nothing.
+        self.request_smart_shuffle_rebuild();
     }
 
     pub fn fail_library_scan(&mut self, error: ApplicationRuntimeError) {

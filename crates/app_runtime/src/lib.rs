@@ -14,16 +14,16 @@ use std::{
 };
 
 pub use sustain_domain::{
-    ApplicationCommand, ApplicationQuery, BackgroundJobsSettings, BackgroundResourceUsage, Clock,
-    DEFAULT_PLAYBACK_VOLUME_PERCENT, FieldChange, LazyPickContext, LibraryManagementMode,
-    LibrarySettings, MetadataChange, PlayStatistics, PlaybackCommand, PlaybackOptions,
-    PlaybackQueue, PlaybackQueueRequest, PlaybackQueueSource, PlaybackSession, PlaybackSettings,
-    PlaybackState, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId,
-    PlaylistItem, Rating, RepeatMode, ShuffleMode, SmartPlaylist, SmartPlaylistDateField,
-    SmartPlaylistId, SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind,
-    SmartPlaylistNumberField, SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet,
-    SmartPlaylistTextField, SmartPlaylistTextOperator, SmartShuffleEntropy,
-    SmartShuffleRebuildInterval, SystemClock, Track, TrackAvailability, TrackColumnEntry,
+    AnalysisSettings, ApplicationCommand, ApplicationQuery, BackgroundJobsSettings,
+    BackgroundResourceUsage, Clock, DEFAULT_PLAYBACK_VOLUME_PERCENT, FieldChange, LazyPickContext,
+    LibraryManagementMode, LibrarySettings, MetadataChange, PlayStatistics, PlaybackCommand,
+    PlaybackOptions, PlaybackQueue, PlaybackQueueRequest, PlaybackQueueSource, PlaybackSession,
+    PlaybackSettings, PlaybackState, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId,
+    PlaylistId, PlaylistItem, Rating, RepeatMode, ShuffleMode, SmartPlaylist,
+    SmartPlaylistDateField, SmartPlaylistId, SmartPlaylistLimit, SmartPlaylistLimitSelection,
+    SmartPlaylistMatchKind, SmartPlaylistNumberField, SmartPlaylistNumberOperator,
+    SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField, SmartPlaylistTextOperator,
+    SmartShuffleEntropy, SystemClock, Track, TrackAvailability, TrackColumnEntry,
     TrackColumnLayout, TrackColumnLayoutScope, TrackContentHash, TrackId, TrackLocation,
     TrackMetadata, TrackPlaybackSource, TrackRelativePath, UiSettings, UiSidebarSelection,
     UserSettings, VolumePercent, matching_tracks, track_matches_rule_set,
@@ -626,60 +626,80 @@ impl ApplicationRuntime {
         // audio: false` never pays for chroma extraction or the
         // full-track decode. Tests substitute a stub via
         // `analysis_scheduler::AnalysisScheduler::start` directly.
-        let analyzer: analysis_scheduler::AnalyzerFn = Arc::new(|path, capabilities, options| {
-            // Surface a hard error before constructing the lazy
-            // analyzer so the supervisor can route the track to
-            // `record_analysis_attempt_failure` instead of
-            // silently stamping all-None.
-            let _ = std::fs::File::open(path).map_err(|source| {
-                sustain_analysis::AnalysisError::OpenFailed {
-                    path: path.display().to_string(),
-                    source,
-                }
-            })?;
+        let analyzer: analysis_scheduler::AnalyzerFn =
+            Arc::new(|path, capabilities, options, duration| {
+                // Surface a hard error before constructing the lazy
+                // analyzer so the supervisor can route the track to
+                // `record_analysis_attempt_failure` instead of
+                // silently stamping all-None.
+                let _ = std::fs::File::open(path).map_err(|source| {
+                    sustain_analysis::AnalysisError::OpenFailed {
+                        path: path.display().to_string(),
+                        source,
+                    }
+                })?;
 
-            let analyzer = sustain_analysis::Analyzer::new(path.to_path_buf(), options);
-            let bpm = if capabilities.bpm {
-                analyzer.bpm()
-            } else {
-                None
-            };
-            let key = if capabilities.key {
-                analyzer.key()
-            } else {
-                None
-            };
-            // The waveform overview and the perceptual acoustic features
-            // are both byproducts of one full-track decode (the analyzer
-            // caches the decoded samples, so the second call reuses the
-            // first's work). A single `audio` capability gates both.
-            let (waveform, acoustics) = if capabilities.audio {
-                (analyzer.waveform(), analyzer.acoustics())
-            } else {
-                (None, None)
-            };
-            let (waveform_preview, waveform_detail) = match waveform {
-                Some(tiers) => (tiers.preview, tiers.detail),
-                None => (
-                    sustain_analysis::WaveformSegments {
-                        segment_duration_ms: 0.0,
-                        segments: Vec::new(),
-                    },
-                    sustain_analysis::WaveformSegments {
-                        segment_duration_ms: 0.0,
-                        segments: Vec::new(),
-                    },
-                ),
-            };
-            Ok(sustain_analysis::TrackAnalysis {
-                bpm,
-                key,
-                beatgrid: None,
-                waveform_preview,
-                waveform_detail,
-                acoustics,
-            })
-        });
+                let analyzer =
+                    sustain_analysis::Analyzer::new(path.to_path_buf(), options, duration);
+
+                // The waveform and the perceptual acoustic features come
+                // off one decode (the analyzer caches the samples), gated
+                // by the single `audio` capability. Decode that larger
+                // region FIRST so the BPM/key window below is sliced from
+                // its centre rather than decoded again. Long tracks skip
+                // the waveform entirely — a whole-track decode of a
+                // multi-hour file is gigabytes of working set for what, at
+                // that length, is a coarse smear; their acoustics come
+                // from a centered sample instead, and the device-specific
+                // Pioneer waveforms are generated on demand by that export.
+                let (waveform, acoustics) = if capabilities.audio {
+                    let waveform = if analyzer.is_long_track() {
+                        None
+                    } else {
+                        analyzer.waveform()
+                    };
+                    let acoustics = analyzer.acoustics();
+                    (waveform, acoustics)
+                } else {
+                    (None, None)
+                };
+                // BPM and key are read off the same centered window — for
+                // free when the audio pass primed a region above, on their
+                // own decode otherwise. With the `audio ⇒ bpm ∧ key`
+                // settings invariant, an `audio` run always arrives here
+                // with both requested too.
+                let bpm = if capabilities.bpm {
+                    analyzer.bpm()
+                } else {
+                    None
+                };
+                let key = if capabilities.key {
+                    analyzer.key()
+                } else {
+                    None
+                };
+                let (waveform_preview, waveform_detail) = match waveform {
+                    Some(tiers) => (tiers.preview, tiers.detail),
+                    None => (
+                        sustain_analysis::WaveformSegments {
+                            segment_duration_ms: 0.0,
+                            segments: Vec::new(),
+                        },
+                        sustain_analysis::WaveformSegments {
+                            segment_duration_ms: 0.0,
+                            segments: Vec::new(),
+                        },
+                    ),
+                };
+                Ok(sustain_analysis::TrackAnalysis {
+                    bpm,
+                    key,
+                    beatgrid: None,
+                    waveform_preview,
+                    waveform_detail,
+                    acoustics,
+                })
+            });
         let clock: analysis_scheduler::UnixClockFn = Arc::new(|| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -789,6 +809,15 @@ impl ApplicationRuntime {
                         NotificationSeverity::Info,
                         notifications::analysis_background_outcome_text(completed, failed),
                     );
+                }
+                // Acoustics are the only analysis output the Smart
+                // Shuffle index caches, so a finished batch that produced
+                // any results while audio analysis was on is an
+                // index-changing event — rebuild on the background worker
+                // (coalesced, milliseconds). BPM/key-only batches do not
+                // touch the index, so they do not trigger one.
+                if completed > 0 && self.settings.analysis.audio {
+                    self.request_smart_shuffle_rebuild();
                 }
             }
         }
@@ -923,6 +952,19 @@ impl ApplicationRuntime {
                 }
             }
         }
+    }
+
+    /// Whether the online retrieval scheduler is actively processing
+    /// right now (a batch is in flight). Tracks the same signal the
+    /// persistent "Retrieving…" notification uses: it is set while
+    /// progress ticks arrive and cleared on Idle. The Retrieve
+    /// context-menu entries key their sensitivity off this — a manual
+    /// retrieval is offered whenever the process is idle, regardless of
+    /// the background toggle (a sweep months ago does not block a fresh
+    /// manual run), and suppressed only while a run is in flight
+    /// (issue #61).
+    pub fn is_online_retrieval_running(&self) -> bool {
+        self.online_notification_id.is_some()
     }
 
     pub(crate) fn online_scheduler(&self) -> Option<&online_scheduler::OnlineScheduler> {
@@ -1357,22 +1399,6 @@ impl ApplicationRuntime {
         scheduled
     }
 
-    /// Policy gate for the UI shell's periodic auto-rebuild timer.
-    /// Centralised here so the rule lives next to the data it queries
-    /// (settings, scheduler flag, the index's build time) and is
-    /// exercised through the runtime's injected clock — no
-    /// `SystemTime::now` reads in the UI shell. Thin wrapper over the
-    /// private `should_run_periodic_smart_shuffle_rebuild_for` so the
-    /// policy itself stays a pure, unit-testable function.
-    pub fn should_run_periodic_smart_shuffle_rebuild(&self) -> bool {
-        should_run_periodic_smart_shuffle_rebuild_for(
-            self.smart_shuffle_scheduler.is_rebuilding(),
-            self.settings.playback.smart_shuffle_rebuild_interval,
-            self.smart_shuffle_metadata.map(|meta| meta.built_at),
-            self.clock.now(),
-        )
-    }
-
     /// Apply a completed index rebuild: persist the new index's blob
     /// and adopt it in memory. The Smart Shuffle state observer is
     /// fired exactly once on the way out — the scheduler's
@@ -1698,62 +1724,30 @@ impl ApplicationRuntime {
     }
 
     /// Request an online retrieval run for an explicit set of track
-    /// ids. Symmetric to [`Self::request_tracks_analysis_run`] but
-    /// targets the online scheduler. The filter also handles the
-    /// "track already has embedded artwork" guard via
-    /// [`LibraryStore::filter_tracks_needing_online`].
+    /// ids. Unlike [`Self::request_tracks_analysis_run`], this is a
+    /// *force* path: it ignores the `*_attempted_at_unix` stamps so a
+    /// manual click re-contacts tracks that previously came back empty,
+    /// and it fires even when the matching background toggle is on
+    /// (the user asked for it now). It is safe to skip the pre-filter
+    /// because the online scheduler's per-track guard is missing-only —
+    /// tracks with stored lyrics / embedded artwork / an existing tag
+    /// are skipped there, and tag fills never overwrite — so only the
+    /// previously-empty tracks are actually contacted (see issue #61
+    /// and the `online_scheduler` module header).
     pub fn request_tracks_online_run(
         &mut self,
         track_ids: Vec<TrackId>,
         request: OnlineRunRequest,
     ) -> RunDecision {
-        if let OnlineRunRequest::Single(capability) = request {
-            let global_on = match capability {
-                OnlineCapability::Lyrics => self.settings.online.lyrics,
-                OnlineCapability::Artwork => self.settings.online.artwork,
-                OnlineCapability::Tags => self.settings.online.tags,
-            };
-            if global_on {
-                self.push_ephemeral_notification(
-                    NotificationCategory::OnlineBackground,
-                    NotificationSeverity::Info,
-                    format!(
-                        "Background {} is enabled. These tracks are already queued by the global sweep.",
-                        capability.label()
-                    ),
-                );
-                return RunDecision::DeniedBackgroundEnabled;
-            }
-        }
         if track_ids.is_empty() {
             return RunDecision::TargetEmpty;
         }
         let capabilities = request.capabilities();
-        let Some(library_store) = self.library_store.clone() else {
-            return RunDecision::SchedulerUnavailable;
-        };
-        let original_count = track_ids.len();
-        let filtered = match library_store.filter_tracks_needing_online(
-            &track_ids,
-            capabilities,
-            ONLINE_PROVIDER_VERSION,
-        ) {
-            Ok(filtered) => filtered,
-            Err(_) => return RunDecision::SchedulerUnavailable,
-        };
-        if filtered.is_empty() {
-            self.push_ephemeral_notification(
-                NotificationCategory::OnlineBackground,
-                NotificationSeverity::Info,
-                already_complete_text(original_count, request.label()),
-            );
-            return RunDecision::AlreadyComplete;
-        }
         let Some(scheduler) = self.online_scheduler.as_ref() else {
             return RunDecision::SchedulerUnavailable;
         };
-        let count = filtered.len();
-        scheduler.request_explicit_run(filtered, capabilities);
+        let count = track_ids.len();
+        scheduler.request_explicit_run(track_ids, capabilities);
         self.push_ephemeral_notification(
             NotificationCategory::OnlineBackground,
             NotificationSeverity::Info,
@@ -1787,46 +1781,6 @@ fn index_metadata(index: &SmartShuffleIndex) -> SmartShuffleIndexMetadata {
         built_at: std::time::UNIX_EPOCH
             + std::time::Duration::from_secs(index.built_at_unix().max(0) as u64),
     }
-}
-
-/// Pure policy for whether the periodic Smart Shuffle auto-rebuild
-/// timer should fire a new request right now. Extracted from
-/// [`ApplicationRuntime::should_run_periodic_smart_shuffle_rebuild`]
-/// so the rule itself is unit-testable without standing up a
-/// runtime, a scheduler, or a library store.
-///
-/// Returns `true` only when every gate aligns:
-///   * the user has not picked
-///     [`SmartShuffleRebuildInterval::Off`],
-///   * a previous rebuild is not still in flight,
-///   * the index has been built at least once — the first build is
-///     intentionally driven by an explicit gesture (the handler that
-///     runs when the transport switches to Smart, or the Rebuild-index
-///     button), not by this timer, so users who have never tried Smart
-///     Shuffle do no background work, and
-///   * the elapsed wall-clock time since `built_at` meets or exceeds
-///     the configured interval. `Err(_)` from `duration_since` (i.e.
-///     `now < built_at`, the wall clock went backwards) collapses to
-///     `false` rather than panicking or rolling over.
-pub(crate) fn should_run_periodic_smart_shuffle_rebuild_for(
-    is_rebuilding: bool,
-    interval: SmartShuffleRebuildInterval,
-    built_at: Option<std::time::SystemTime>,
-    now: std::time::SystemTime,
-) -> bool {
-    if is_rebuilding {
-        return false;
-    }
-    let Some(interval_secs) = interval.interval_secs() else {
-        return false;
-    };
-    let Some(built_at) = built_at else {
-        return false;
-    };
-    let Ok(elapsed) = now.duration_since(built_at) else {
-        return false;
-    };
-    elapsed.as_secs() >= interval_secs
 }
 
 /// Outcome of [`ApplicationRuntime::smart_playlist_track_status`].
@@ -3147,6 +3101,8 @@ mod tests {
             sidebar_selection: UiSidebarSelection::Albums,
             sidebar_collapsed: true,
             sidebar_width: Some(212),
+            library_section_collapsed: true,
+            playlists_section_collapsed: false,
         };
 
         assert_eq!(runtime.save_ui_settings(ui.clone()), Ok(()));
@@ -4415,6 +4371,7 @@ mod tests {
                 "Top 25 Most Played",
                 "4+ Stars",
                 "Unplayed",
+                "Missing Tags",
             ]
         );
     }
@@ -5527,7 +5484,9 @@ mod tests {
             RunDecision::TargetEmpty
         );
 
-        // Same shape for the online runner.
+        // The online runner is a force path: it never denies based on
+        // the global toggle. With no scheduler started, a non-empty
+        // target surfaces SchedulerUnavailable...
         assert_eq!(
             runtime.request_playlist_online_run(
                 PlaylistItem::Playlist(playlist.id),
@@ -5535,6 +5494,9 @@ mod tests {
             ),
             RunDecision::SchedulerUnavailable
         );
+        // ...and turning the matching background sweep on does NOT
+        // change that — a manual retrieval still fires (issue #61),
+        // unlike the analysis path which would deny here.
         let mut settings = runtime.settings().clone();
         settings.online.lyrics = true;
         runtime
@@ -5545,7 +5507,7 @@ mod tests {
                 PlaylistItem::Playlist(playlist.id),
                 OnlineRunRequest::Single(OnlineCapability::Lyrics),
             ),
-            RunDecision::DeniedBackgroundEnabled
+            RunDecision::SchedulerUnavailable
         );
 
         // Folders are never a valid target for the per-track-set
@@ -5585,16 +5547,14 @@ mod tests {
     #[test]
     fn request_run_skips_tracks_whose_capability_is_already_cached() {
         // A re-run of BPM analysis on a track that already has BPM
-        // recorded must NOT queue the track. The same rule applies
-        // to every analysis/online capability; we sample BPM and
-        // lyrics here as representatives. The scheduler is never
+        // recorded must NOT queue the track. The scheduler is never
         // started in this test — if the filter were skipped, the
         // dispatch would surface SchedulerUnavailable. AlreadyComplete
         // proves the filter caught the work before the scheduler
-        // would have run.
-        use sustain_library_store::{
-            AnalysisCapabilities, AnalysisContext, OnlineCapabilities, OnlineContext,
-        };
+        // would have run. (Online retrieval is deliberately a force
+        // path with no such runtime-level pre-filter — see
+        // `online_run_is_a_force_path_that_does_not_pre_filter`.)
+        use sustain_library_store::{AnalysisCapabilities, AnalysisContext};
 
         let store = Arc::new(InMemoryLibraryStore::new());
         let track = Track {
@@ -5640,20 +5600,6 @@ mod tests {
                 },
             )
             .expect("record bpm");
-        store
-            .record_online_attempt(
-                track.id,
-                OnlineCapabilities {
-                    artwork: false,
-                    tags: false,
-                    lyrics: true,
-                },
-                OnlineContext {
-                    now_unix: 100,
-                    provider_version: super::ONLINE_PROVIDER_VERSION,
-                },
-            )
-            .expect("record lyrics attempt");
 
         let mut runtime = ApplicationRuntime::new()
             .with_library_services(store, Arc::new(TestMetadataService))
@@ -5682,150 +5628,64 @@ mod tests {
             runtime.request_tracks_analysis_run(vec![track.id], AnalysisRunRequest::All),
             RunDecision::SchedulerUnavailable
         );
-        // Lyrics is cached -> AlreadyComplete on the online side too.
+    }
+
+    #[test]
+    fn online_run_is_a_force_path_that_does_not_pre_filter() {
+        // Manual retrieval ignores the attempt stamp: a track whose
+        // lyrics were already attempted (with the background toggle on)
+        // must NOT short-circuit to AlreadyComplete the way analysis
+        // does. With no scheduler started the runtime reaches the
+        // dispatch and surfaces SchedulerUnavailable, proving both the
+        // runtime-level pre-filter and the background-enabled deny are
+        // gone (issue #61). Skipping already-satisfied tracks is the
+        // scheduler's missing-only job, covered by the online_scheduler
+        // tests.
+        use sustain_library_store::{OnlineCapabilities, OnlineContext};
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let track = Track {
+            id: track_id(1),
+            location: track_location("t.flac"),
+            content_hash: None,
+            metadata: TrackMetadata::default(),
+            rating: Rating::unrated(),
+            statistics: PlayStatistics::default(),
+            file_size_bytes: None,
+            has_embedded_artwork: None,
+        };
+        store.save_track(track.clone()).expect("save");
+        store
+            .record_online_attempt(
+                track.id,
+                OnlineCapabilities {
+                    artwork: false,
+                    tags: false,
+                    lyrics: true,
+                },
+                OnlineContext {
+                    now_unix: 100,
+                    provider_version: super::ONLINE_PROVIDER_VERSION,
+                },
+            )
+            .expect("record lyrics attempt");
+
+        let mut runtime = ApplicationRuntime::new()
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .expect("library services initialize");
+        // Turn the lyrics background sweep on; the force path ignores it.
+        let mut settings = runtime.settings().clone();
+        settings.online.lyrics = true;
+        runtime
+            .handle_command(ApplicationCommand::UpdateSettings(settings))
+            .expect("apply settings");
+
         assert_eq!(
             runtime.request_tracks_online_run(
                 vec![track.id],
                 OnlineRunRequest::Single(OnlineCapability::Lyrics),
             ),
-            RunDecision::AlreadyComplete
-        );
-        // Artwork / tags were never attempted -> filter passes.
-        assert_eq!(
-            runtime.request_tracks_online_run(
-                vec![track.id],
-                OnlineRunRequest::Single(OnlineCapability::Artwork),
-            ),
             RunDecision::SchedulerUnavailable
         );
-    }
-
-    mod periodic_smart_shuffle_rebuild_policy {
-        use std::time::{Duration, SystemTime};
-
-        use super::super::should_run_periodic_smart_shuffle_rebuild_for;
-        use sustain_domain::SmartShuffleRebuildInterval;
-
-        const ONE_SECOND: Duration = Duration::from_secs(1);
-
-        fn base_time() -> SystemTime {
-            // Fixed reference so a flaky CI clock can't shift relative
-            // results — every elapsed-time assertion is derived from
-            // this one anchor.
-            SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000)
-        }
-
-        #[test]
-        fn refuses_when_a_rebuild_is_already_in_flight() {
-            assert!(!should_run_periodic_smart_shuffle_rebuild_for(
-                true,
-                SmartShuffleRebuildInterval::Daily,
-                Some(base_time() - Duration::from_secs(7 * 24 * 60 * 60)),
-                base_time(),
-            ));
-        }
-
-        #[test]
-        fn refuses_when_interval_is_off() {
-            assert!(!should_run_periodic_smart_shuffle_rebuild_for(
-                false,
-                SmartShuffleRebuildInterval::Off,
-                Some(base_time() - Duration::from_secs(10 * 24 * 60 * 60)),
-                base_time(),
-            ));
-        }
-
-        #[test]
-        fn refuses_when_the_index_has_never_been_built() {
-            assert!(!should_run_periodic_smart_shuffle_rebuild_for(
-                false,
-                SmartShuffleRebuildInterval::Daily,
-                None,
-                base_time(),
-            ));
-        }
-
-        #[test]
-        fn refuses_while_elapsed_is_below_the_interval_threshold() {
-            let interval_secs = SmartShuffleRebuildInterval::Hourly
-                .interval_secs()
-                .expect("hourly is a non-Off interval");
-            let built_at = base_time() - Duration::from_secs(interval_secs - 1);
-            assert!(!should_run_periodic_smart_shuffle_rebuild_for(
-                false,
-                SmartShuffleRebuildInterval::Hourly,
-                Some(built_at),
-                base_time(),
-            ));
-        }
-
-        #[test]
-        fn fires_exactly_at_the_interval_threshold() {
-            // Boundary check: `>=`, not `>`, so a rebuild that
-            // landed exactly one Hourly ago must trigger now.
-            // Without this, an interval-aligned cadence would drift
-            // by one tick on every run.
-            let interval_secs = SmartShuffleRebuildInterval::Hourly
-                .interval_secs()
-                .expect("hourly is a non-Off interval");
-            let built_at = base_time() - Duration::from_secs(interval_secs);
-            assert!(should_run_periodic_smart_shuffle_rebuild_for(
-                false,
-                SmartShuffleRebuildInterval::Hourly,
-                Some(built_at),
-                base_time(),
-            ));
-        }
-
-        #[test]
-        fn fires_when_elapsed_well_exceeds_the_interval() {
-            let interval_secs = SmartShuffleRebuildInterval::Daily
-                .interval_secs()
-                .expect("daily is a non-Off interval");
-            let built_at =
-                base_time() - Duration::from_secs(interval_secs) - Duration::from_secs(3600);
-            assert!(should_run_periodic_smart_shuffle_rebuild_for(
-                false,
-                SmartShuffleRebuildInterval::Daily,
-                Some(built_at),
-                base_time(),
-            ));
-        }
-
-        #[test]
-        fn refuses_when_clock_went_backwards() {
-            // `now < built_at` is the "wall clock just jumped
-            // backwards" case (NTP step, manual time change). The
-            // policy must collapse to "do nothing this tick"
-            // rather than treating the giant negative duration as
-            // "due now" or panicking on underflow.
-            let built_at = base_time() + ONE_SECOND;
-            assert!(!should_run_periodic_smart_shuffle_rebuild_for(
-                false,
-                SmartShuffleRebuildInterval::Weekly,
-                Some(built_at),
-                base_time(),
-            ));
-        }
-
-        #[test]
-        fn weekly_interval_holds_until_seven_days_elapse() {
-            // Spot-check the longest cadence: at six days it must
-            // hold, at seven days it must fire.
-            let built_at_6_days = base_time() - Duration::from_secs(6 * 24 * 60 * 60);
-            assert!(!should_run_periodic_smart_shuffle_rebuild_for(
-                false,
-                SmartShuffleRebuildInterval::Weekly,
-                Some(built_at_6_days),
-                base_time(),
-            ));
-            let built_at_7_days = base_time() - Duration::from_secs(7 * 24 * 60 * 60);
-            assert!(should_run_periodic_smart_shuffle_rebuild_for(
-                false,
-                SmartShuffleRebuildInterval::Weekly,
-                Some(built_at_7_days),
-                base_time(),
-            ));
-        }
     }
 }

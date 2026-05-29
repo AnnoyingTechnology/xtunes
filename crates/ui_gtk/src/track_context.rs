@@ -25,8 +25,12 @@ pub(crate) type TrackRetrieveRunCallback = Rc<dyn Fn(Vec<TrackId>, OnlineRunRequ
 /// covered by the background sweep). Submenu entries whose
 /// capability returns `true` here are rendered insensitive.
 pub(crate) type TrackAnalyzeEnabledQuery = Rc<dyn Fn(AnalysisCapability) -> bool>;
-/// Queries whether an online capability is globally enabled.
-pub(crate) type TrackRetrieveEnabledQuery = Rc<dyn Fn(OnlineCapability) -> bool>;
+/// Queries whether the online retrieval process is running right now.
+/// When it returns `true` the Retrieve submenu entries are rendered
+/// insensitive — a manual retrieval is offered whenever the process is
+/// idle (regardless of the background toggle) and suppressed only while
+/// a run is in flight (issue #61).
+pub(crate) type TrackRetrieveBusyQuery = Rc<dyn Fn() -> bool>;
 type PendingConfirmCallback = Rc<RefCell<Option<Box<dyn FnOnce(Vec<TrackId>)>>>>;
 const ADD_TO_PLAYLIST_MAX_VISIBLE_HEIGHT: i32 = 360;
 const ADD_TO_PLAYLIST_MAX_LABEL_CHARS: i32 = 48;
@@ -52,7 +56,7 @@ struct AnalyzeMenu {
 #[derive(Clone)]
 struct RetrieveMenu {
     run: TrackRetrieveRunCallback,
-    enabled: TrackRetrieveEnabledQuery,
+    busy: TrackRetrieveBusyQuery,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -356,13 +360,17 @@ impl TrackRowContextMenu {
     }
 
     /// Install the "Retrieve\u{2026}" submenu. Counterpart of
-    /// [`Self::with_analyze_menu`] for the online scheduler.
+    /// [`Self::with_analyze_menu`] for the online scheduler. Unlike
+    /// Analyze, the entries are insensitive only while the retrieval
+    /// process is running (`busy`), not when the background toggle is
+    /// on — a manual retrieval re-contacts tracks that previously found
+    /// nothing (issue #61).
     pub(crate) fn with_retrieve_menu(
         mut self,
         run: TrackRetrieveRunCallback,
-        enabled: TrackRetrieveEnabledQuery,
+        busy: TrackRetrieveBusyQuery,
     ) -> Self {
-        self.retrieve = Some(RetrieveMenu { run, enabled });
+        self.retrieve = Some(RetrieveMenu { run, busy });
         self
     }
 
@@ -656,13 +664,19 @@ fn build_retrieve_submenu_page(
     let back_button = submenu_back_button("Retrieve");
     content.append(&back_button);
 
+    // Every entry is offered unless a retrieval run is in flight: a
+    // manual retrieval re-contacts tracks that previously found nothing,
+    // independent of the background toggle. While the process is running
+    // the whole submenu is suppressed to avoid stacking duplicate work.
+    let busy = (menu.busy)();
+
     for (label_text, capability) in [
         ("Lyrics", OnlineCapability::Lyrics),
         ("Tags", OnlineCapability::Tags),
         ("Artwork", OnlineCapability::Artwork),
     ] {
         let button = context_menu_button_with_label(label_text);
-        button.set_sensitive(!(menu.enabled)(capability));
+        button.set_sensitive(!busy);
         let popover = popover.clone();
         let run = menu.run.clone();
         let track_ids = track_ids.clone();
@@ -678,6 +692,7 @@ fn build_retrieve_submenu_page(
     content.append(&separator);
 
     let all_button = context_menu_button_with_label("All");
+    all_button.set_sensitive(!busy);
     let popover_for_all = popover.clone();
     let run_for_all = menu.run.clone();
     let track_ids_for_all = track_ids;

@@ -98,6 +98,8 @@ pub(super) enum EditorOperator {
     NumberGreaterThanOrEqual,
     NumberLessThan,
     NumberLessThanOrEqual,
+    NumberIsEmpty,
+    NumberIsPresent,
     DateBefore,
     DateAfter,
     DateInLast,
@@ -123,6 +125,8 @@ impl EditorOperator {
             Self::NumberGreaterThanOrEqual => "is greater than or equal to",
             Self::NumberLessThan => "is less than",
             Self::NumberLessThanOrEqual => "is less than or equal to",
+            Self::NumberIsEmpty => "is empty",
+            Self::NumberIsPresent => "is present",
             Self::DateBefore => "is before",
             Self::DateAfter => "is after",
             Self::DateInLast => "is in the last",
@@ -147,6 +151,7 @@ impl EditorOperator {
             | Self::NumberGreaterThanOrEqual
             | Self::NumberLessThan
             | Self::NumberLessThanOrEqual => ValueKind::Number,
+            Self::NumberIsEmpty | Self::NumberIsPresent => ValueKind::None,
             Self::DateBefore | Self::DateAfter => ValueKind::Date,
             Self::DateInLast | Self::DateNotInLast => ValueKind::Days,
             Self::DateIsEmpty | Self::DateIsPresent => ValueKind::None,
@@ -182,6 +187,20 @@ const NUMBER_OPERATORS: &[EditorOperator] = &[
     EditorOperator::NumberGreaterThanOrEqual,
     EditorOperator::NumberLessThan,
     EditorOperator::NumberLessThanOrEqual,
+    EditorOperator::NumberIsEmpty,
+    EditorOperator::NumberIsPresent,
+];
+
+// Rating is never absent — an unrated track is zero stars, not a missing
+// value — so the rating field offers only the comparison operators, not
+// the empty/present pair that numeric tag fields carry.
+const RATING_OPERATORS: &[EditorOperator] = &[
+    EditorOperator::NumberEqual,
+    EditorOperator::NumberNotEqual,
+    EditorOperator::NumberGreaterThan,
+    EditorOperator::NumberGreaterThanOrEqual,
+    EditorOperator::NumberLessThan,
+    EditorOperator::NumberLessThanOrEqual,
 ];
 
 const DATE_OPERATORS: &[EditorOperator] = &[
@@ -196,7 +215,8 @@ const DATE_OPERATORS: &[EditorOperator] = &[
 pub(super) fn operators_for_field(field: EditorField) -> &'static [EditorOperator] {
     match field {
         EditorField::Text(_) => TEXT_OPERATORS,
-        EditorField::Number(_) | EditorField::Rating => NUMBER_OPERATORS,
+        EditorField::Number(_) => NUMBER_OPERATORS,
+        EditorField::Rating => RATING_OPERATORS,
         EditorField::Date(_) => DATE_OPERATORS,
     }
 }
@@ -314,6 +334,16 @@ pub(super) fn extract_rule(
                 field: number_field,
                 operator: number_operator(op).ok_or(RuleError::FieldOperatorMismatch)?,
                 value: parsed,
+            })
+        }
+        (EditorField::Number(number_field), EditorOperator::NumberIsEmpty) => {
+            Ok(SmartPlaylistRule::NumberIsEmpty {
+                field: number_field,
+            })
+        }
+        (EditorField::Number(number_field), EditorOperator::NumberIsPresent) => {
+            Ok(SmartPlaylistRule::NumberIsPresent {
+                field: number_field,
             })
         }
         (EditorField::Rating, op) if matches!(op.value_kind(), ValueKind::Number) => {
@@ -478,6 +508,16 @@ pub(super) fn decompose_rule(
             EditorField::Number(*field),
             editor_operator_from_number(*operator),
             ValueInput::Number(*value),
+        ),
+        SmartPlaylistRule::NumberIsEmpty { field } => (
+            EditorField::Number(*field),
+            EditorOperator::NumberIsEmpty,
+            ValueInput::None,
+        ),
+        SmartPlaylistRule::NumberIsPresent { field } => (
+            EditorField::Number(*field),
+            EditorOperator::NumberIsPresent,
+            ValueInput::None,
         ),
         SmartPlaylistRule::Rating { operator, value } => (
             EditorField::Rating,
@@ -701,6 +741,32 @@ mod tests {
                 field: SmartPlaylistTextField::Genre,
             }
         );
+    }
+
+    #[test]
+    fn extract_rule_number_is_empty_creates_number_is_empty_variant() {
+        let rule = extract_rule(
+            EditorField::Number(SmartPlaylistNumberField::Year),
+            EditorOperator::NumberIsEmpty,
+            &ValueInput::None,
+        )
+        .expect("extracts");
+        assert_eq!(
+            rule,
+            SmartPlaylistRule::NumberIsEmpty {
+                field: SmartPlaylistNumberField::Year,
+            }
+        );
+    }
+
+    #[test]
+    fn rating_field_does_not_offer_empty_present_operators() {
+        let rating_operators = operators_for_field(EditorField::Rating);
+        assert!(!rating_operators.contains(&EditorOperator::NumberIsEmpty));
+        assert!(!rating_operators.contains(&EditorOperator::NumberIsPresent));
+        let number_operators =
+            operators_for_field(EditorField::Number(SmartPlaylistNumberField::Year));
+        assert!(number_operators.contains(&EditorOperator::NumberIsEmpty));
     }
 
     #[test]

@@ -13,9 +13,17 @@
 //!   place rather than pulling in a second crate to wrap one function.
 //! * The workspace bans `unsafe_code` everywhere else; the audited
 //!   `#![allow(unsafe_code)]` at the top of this file is the only
-//!   exception, and it covers exactly three `unsafe { libc::… }` calls.
-//!   The safe public API takes typed enums so callers cannot pass an
-//!   out-of-range nice value or an invalid I/O priority class.
+//!   exception, and it covers a small, audited set of
+//!   `unsafe { libc::… }` calls — the two priority syscalls plus the
+//!   best-effort E-core affinity helper. The safe public API takes typed
+//!   enums so callers cannot pass an out-of-range nice value or an
+//!   invalid I/O priority class.
+//! * On hybrid CPUs the scheduler also pins the *polite* presets
+//!   (Innocuous/Balanced) to the kernel-reported efficiency cores via
+//!   [`pin_current_thread_to_efficiency_cores_best_effort`], so
+//!   background analysis stays off the performance cores that playback
+//!   and the UI want. This is Intel-hybrid-only and a no-op everywhere
+//!   else (including AMD).
 //! * Niceness and ionice are per-thread on Linux: the scheduler spawns
 //!   N worker threads, each calls [`apply_to_current_thread`] once at
 //!   the top of its loop, and the kernel never sees a thread that
@@ -177,6 +185,124 @@ pub fn resolve_worker_count(usage: BackgroundResourceUsage) -> usize {
     usage.worker_count(cores)
 }
 
+/// Whether a preset's workers should prefer the machine's efficiency
+/// cores. The polite presets (Innocuous, Balanced) belong on E-cores —
+/// background analysis is exactly the latency-insensitive work the
+/// efficiency cores exist for, and keeping it off the performance cores
+/// means less heat and less contention with playback/UI. `Aggressive`
+/// is "drain the queue", so it stays unpinned and free to use every
+/// core.
+pub fn prefers_efficiency_cores(usage: BackgroundResourceUsage) -> bool {
+    match usage {
+        BackgroundResourceUsage::Innocuous | BackgroundResourceUsage::Balanced => true,
+        BackgroundResourceUsage::Aggressive => false,
+    }
+}
+
+/// Sysfs file Linux exposes on Intel hybrid topologies listing the
+/// logical CPUs backed by Atom (efficiency) cores, e.g. `16-23`.
+const EFFICIENCY_CORE_SYSFS_PATH: &str = "/sys/devices/cpu_atom/cpus";
+
+/// Best-effort pin of the calling thread to the machine's efficiency
+/// (E-) cores, when the kernel exposes them (Intel hybrid topologies via
+/// `EFFICIENCY_CORE_SYSFS_PATH`). Returns `Ok(true)` when the thread
+/// was pinned, `Ok(false)` when there is nothing to pin to (no hybrid
+/// topology, or none of the E-cores are in the thread's allowed set).
+///
+/// AMD parts (including the maintainer's Ryzen machines) and pre-hybrid
+/// Intel parts do not expose `cpu_atom`, so this is a no-op there — the
+/// thread keeps its default affinity and runs across all cores.
+///
+/// The E-core set is intersected with the thread's *current* affinity
+/// mask (`sched_getaffinity`) before being applied, so this cooperates
+/// with cgroups / cpusets / `taskset` rather than fighting them: a
+/// process already confined to a set with no E-cores is left untouched
+/// instead of being stranded on CPUs it may not use.
+///
+/// Like the nice/ionice calls, failure is non-fatal to the caller: the
+/// worker simply runs without the pin. Errors are surfaced as
+/// [`io::Error`] so the caller can decide whether to log them.
+pub fn pin_current_thread_to_efficiency_cores_best_effort() -> io::Result<bool> {
+    let listing = match std::fs::read_to_string(EFFICIENCY_CORE_SYSFS_PATH) {
+        Ok(text) => text,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+    let efficiency_cores = parse_cpu_list(&listing);
+    if efficiency_cores.is_empty() {
+        return Ok(false);
+    }
+
+    // SAFETY: `cpu_set_t` is a plain fixed-size bitmask with no
+    // invariants beyond being initialized; `zeroed` + `CPU_ZERO` is the
+    // documented way to clear it. `sched_getaffinity` is passed the
+    // type's own size and a pointer to that initialized set.
+    let mut allowed: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    unsafe { libc::CPU_ZERO(&mut allowed) };
+    let rc =
+        unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut allowed) };
+    if rc == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // Intersect the E-core set with what this thread is already allowed
+    // to run on, so we never widen or fight an externally-imposed mask.
+    let mut target: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    unsafe { libc::CPU_ZERO(&mut target) };
+    let mut selected = 0_usize;
+    for cpu in efficiency_cores {
+        // SAFETY: `CPU_ISSET`/`CPU_SET` read/modify the initialized sets;
+        // `cpu` is bounds-checked against `CPU_SETSIZE` first.
+        if cpu < libc::CPU_SETSIZE as usize && unsafe { libc::CPU_ISSET(cpu, &allowed) } {
+            unsafe { libc::CPU_SET(cpu, &mut target) };
+            selected += 1;
+        }
+    }
+    if selected == 0 {
+        // The thread is confined to a set with no E-cores — leave it be.
+        return Ok(false);
+    }
+
+    // SAFETY: `target` is an initialized `cpu_set_t` with at least one
+    // bit set, passed with its own size to the calling thread (`pid 0`).
+    let rc = unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &target) };
+    if rc == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(true)
+}
+
+/// Parse a Linux CPU-list string (`"16-23"`, `"0-3,8,10-12"`) into the
+/// logical CPU indices it names. Malformed fragments are skipped rather
+/// than failing the whole parse: this feeds a best-effort affinity hint,
+/// so an unexpected kernel string should degrade to "pin to whatever
+/// parsed" (or to a no-op), never to an error that bubbles up a worker.
+fn parse_cpu_list(listing: &str) -> Vec<usize> {
+    let mut cpus = Vec::new();
+    for fragment in listing
+        .trim()
+        .split(',')
+        .filter(|fragment| !fragment.is_empty())
+    {
+        match fragment.split_once('-') {
+            Some((start, end)) => {
+                if let (Ok(start), Ok(end)) =
+                    (start.trim().parse::<usize>(), end.trim().parse::<usize>())
+                    && start <= end
+                {
+                    cpus.extend(start..=end);
+                }
+            }
+            None => {
+                if let Ok(cpu) = fragment.trim().parse::<usize>() {
+                    cpus.push(cpu);
+                }
+            }
+        }
+    }
+    cpus
+}
+
 fn set_thread_nice(nice: NiceLevel) -> Result<(), PriorityError> {
     // PRIO_PROCESS with `who = 0` targets the calling thread on Linux
     // (each task has its own task_struct.nice), exactly what the
@@ -223,7 +349,8 @@ fn set_thread_io_priority(class: IoPriorityClass) -> Result<(), PriorityError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackgroundResourceUsage, IoPriorityClass, NiceLevel, priority_for, resolve_worker_count,
+        BackgroundResourceUsage, IoPriorityClass, NiceLevel, parse_cpu_list,
+        prefers_efficiency_cores, priority_for, resolve_worker_count,
     };
 
     #[test]
@@ -277,5 +404,44 @@ mod tests {
             aggressive >= balanced,
             "Aggressive ({aggressive}) must be >= Balanced ({balanced})",
         );
+    }
+
+    #[test]
+    fn only_the_polite_presets_prefer_efficiency_cores() {
+        assert!(prefers_efficiency_cores(BackgroundResourceUsage::Innocuous));
+        assert!(prefers_efficiency_cores(BackgroundResourceUsage::Balanced));
+        // Aggressive is "drain the queue" — it must stay free to use
+        // every core, performance cores included.
+        assert!(!prefers_efficiency_cores(
+            BackgroundResourceUsage::Aggressive
+        ));
+    }
+
+    #[test]
+    fn parse_cpu_list_handles_ranges_singletons_and_mixes() {
+        // The canonical hybrid form: a single contiguous range.
+        assert_eq!(
+            parse_cpu_list("16-23"),
+            vec![16, 17, 18, 19, 20, 21, 22, 23]
+        );
+        // Mixed singletons and ranges, with a trailing newline as sysfs
+        // emits.
+        assert_eq!(
+            parse_cpu_list("0-3,8,10-12\n"),
+            vec![0, 1, 2, 3, 8, 10, 11, 12]
+        );
+        // A bare singleton.
+        assert_eq!(parse_cpu_list("5"), vec![5]);
+    }
+
+    #[test]
+    fn parse_cpu_list_skips_malformed_fragments() {
+        // Empty input and pure noise parse to nothing rather than
+        // erroring — the affinity hint is best-effort.
+        assert!(parse_cpu_list("").is_empty());
+        assert!(parse_cpu_list("\n").is_empty());
+        assert!(parse_cpu_list("garbage").is_empty());
+        // An inverted range is dropped; the valid neighbour survives.
+        assert_eq!(parse_cpu_list("9-3,4"), vec![4]);
     }
 }

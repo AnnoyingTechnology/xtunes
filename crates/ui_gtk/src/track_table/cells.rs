@@ -12,7 +12,7 @@ use sustain_app_runtime::{Rating, TrackId};
 
 use super::{
     RatingChangedCallback, RowDropPosition, RowReorderCallback, RowReorderDrop,
-    columns::TrackTableColumn, row::TrackTableRow,
+    columns::TrackTableColumn, inline_edit::InlineEditController, row::TrackTableRow,
 };
 use crate::sidebar::{parse_tracks_payload, tracks_drag_payload};
 use crate::track_context::TrackRowContextMenu;
@@ -309,10 +309,13 @@ pub(super) fn build_text_cell_factory(
     bindings: TextBindings,
     context_menu: Option<TrackTableContextMenu>,
     row_reorder: Option<RowReorderHooks>,
+    inline_edit: Option<InlineEditController>,
 ) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
     let context_for_setup = context_menu;
     let reorder_for_setup = row_reorder;
+    let inline_edit_for_setup = inline_edit.clone();
+    let editable_field = column.editable_field();
     let bindings_for_setup = bindings.clone();
     factory.connect_setup(move |_factory, item| {
         let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
@@ -343,6 +346,12 @@ pub(super) fn build_text_cell_factory(
         cell.append(&label);
         list_item.set_child(Some(&cell));
 
+        // Editable columns on an inline-editing table arm a click gesture
+        // and join the row's editable-cell registry (used for Tab hops).
+        if let (Some(controller), Some(field)) = (inline_edit_for_setup.as_ref(), editable_field) {
+            controller.register_editable_cell(list_item, &cell, field);
+        }
+
         bindings_for_setup.0.borrow_mut().push(TextBinding {
             list_item: list_item.clone(),
             label,
@@ -359,6 +368,24 @@ pub(super) fn build_text_cell_factory(
             .0
             .borrow_mut()
             .retain(|binding| binding.list_item != *list_item);
+    });
+
+    // A cell about to be recycled to another row must not keep an open
+    // editor: commit and close it first so the entry is gone before the
+    // slot is reused.
+    let inline_edit_for_unbind = inline_edit;
+    factory.connect_unbind(move |_factory, item| {
+        let Some(controller) = inline_edit_for_unbind.as_ref() else {
+            return;
+        };
+        let Some(cell) = item
+            .downcast_ref::<gtk::ListItem>()
+            .and_then(|list_item| list_item.child())
+            .and_then(|child| child.downcast::<gtk::Box>().ok())
+        else {
+            return;
+        };
+        controller.finish_if_editing_cell(&cell);
     });
 
     factory.connect_bind(move |_factory, item| {

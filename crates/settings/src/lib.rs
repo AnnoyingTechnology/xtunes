@@ -16,8 +16,7 @@ pub use sustain_domain::{
     AnalysisSettings, BackgroundJobsSettings, BackgroundResourceUsage,
     DEFAULT_PLAYBACK_VOLUME_PERCENT, LibraryManagementMode, LibrarySettings, OnlineSettings,
     PlaybackSettings, PlaylistFolderId, PlaylistId, PlaylistItem, ShuffleMode, SmartPlaylistId,
-    SmartShuffleEntropy, SmartShuffleRebuildInterval, UiSettings, UiSidebarSelection, UserSettings,
-    VolumePercent,
+    SmartShuffleEntropy, UiSettings, UiSidebarSelection, UserSettings, VolumePercent,
 };
 
 pub type SettingsResult<T> = Result<T, SettingsError>;
@@ -151,8 +150,6 @@ struct PlaybackSettingsDocument {
     shuffle_mode: ShuffleModeDocument,
     #[serde(default)]
     smart_shuffle_entropy: SmartShuffleEntropyDocument,
-    #[serde(default)]
-    smart_shuffle_rebuild_interval: SmartShuffleRebuildIntervalDocument,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -209,36 +206,6 @@ impl SmartShuffleEntropyDocument {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum SmartShuffleRebuildIntervalDocument {
-    Off,
-    Hourly,
-    #[default]
-    Daily,
-    Weekly,
-}
-
-impl SmartShuffleRebuildIntervalDocument {
-    fn from_domain(value: SmartShuffleRebuildInterval) -> Self {
-        match value {
-            SmartShuffleRebuildInterval::Off => Self::Off,
-            SmartShuffleRebuildInterval::Hourly => Self::Hourly,
-            SmartShuffleRebuildInterval::Daily => Self::Daily,
-            SmartShuffleRebuildInterval::Weekly => Self::Weekly,
-        }
-    }
-
-    fn into_domain(self) -> SmartShuffleRebuildInterval {
-        match self {
-            Self::Off => SmartShuffleRebuildInterval::Off,
-            Self::Hourly => SmartShuffleRebuildInterval::Hourly,
-            Self::Daily => SmartShuffleRebuildInterval::Daily,
-            Self::Weekly => SmartShuffleRebuildInterval::Weekly,
-        }
-    }
-}
-
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct UiSettingsDocument {
     #[serde(default)]
@@ -249,6 +216,10 @@ struct UiSettingsDocument {
     sidebar_collapsed: bool,
     #[serde(default)]
     sidebar_width: Option<u32>,
+    #[serde(default)]
+    library_section_collapsed: bool,
+    #[serde(default)]
+    playlists_section_collapsed: bool,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -292,7 +263,6 @@ impl Default for PlaybackSettingsDocument {
             volume_percent: DEFAULT_PLAYBACK_VOLUME_PERCENT,
             shuffle_mode: ShuffleModeDocument::default(),
             smart_shuffle_entropy: SmartShuffleEntropyDocument::default(),
-            smart_shuffle_rebuild_interval: SmartShuffleRebuildIntervalDocument::default(),
         }
     }
 }
@@ -339,9 +309,6 @@ impl SettingsDocument {
                 smart_shuffle_entropy: SmartShuffleEntropyDocument::from_domain(
                     settings.playback.smart_shuffle_entropy,
                 ),
-                smart_shuffle_rebuild_interval: SmartShuffleRebuildIntervalDocument::from_domain(
-                    settings.playback.smart_shuffle_rebuild_interval,
-                ),
             },
             ui: UiSettingsDocument {
                 search_text: settings.ui.search_text,
@@ -350,6 +317,8 @@ impl SettingsDocument {
                 ),
                 sidebar_collapsed: settings.ui.sidebar_collapsed,
                 sidebar_width: settings.ui.sidebar_width,
+                library_section_collapsed: settings.ui.library_section_collapsed,
+                playlists_section_collapsed: settings.ui.playlists_section_collapsed,
             },
             analysis: AnalysisSettingsDocument {
                 bpm: settings.analysis.bpm,
@@ -379,22 +348,24 @@ impl SettingsDocument {
                 volume: VolumePercent::from_clamped(self.playback.volume_percent),
                 shuffle_mode: self.playback.shuffle_mode.into_domain(),
                 smart_shuffle_entropy: self.playback.smart_shuffle_entropy.into_domain(),
-                smart_shuffle_rebuild_interval: self
-                    .playback
-                    .smart_shuffle_rebuild_interval
-                    .into_domain(),
             },
             ui: UiSettings {
                 search_text: self.ui.search_text,
                 sidebar_selection: self.ui.sidebar_selection.into_domain(),
                 sidebar_collapsed: self.ui.sidebar_collapsed,
                 sidebar_width: self.ui.sidebar_width,
+                library_section_collapsed: self.ui.library_section_collapsed,
+                playlists_section_collapsed: self.ui.playlists_section_collapsed,
             },
+            // Normalize on load so a hand-edited config with
+            // `audio = true, bpm = false` reaches the runtime as the
+            // valid all-on state — `audio` always implies bpm + key.
             analysis: AnalysisSettings {
                 bpm: self.analysis.bpm,
                 key: self.analysis.key,
                 audio: self.analysis.audio,
-            },
+            }
+            .normalized(),
             online: OnlineSettings {
                 artwork: self.online.artwork,
                 tags: self.online.tags,
@@ -488,8 +459,7 @@ mod tests {
         AnalysisSettings, BackgroundJobsSettings, BackgroundResourceUsage,
         DEFAULT_PLAYBACK_VOLUME_PERCENT, InMemorySettingsStore, LibraryManagementMode,
         OnlineSettings, PlaylistId, PlaylistItem, SettingsStore, ShuffleMode, SmartShuffleEntropy,
-        SmartShuffleRebuildInterval, TomlSettingsStore, UiSettings, UiSidebarSelection,
-        UserSettings, VolumePercent,
+        TomlSettingsStore, UiSettings, UiSidebarSelection, UserSettings, VolumePercent,
     };
 
     #[test]
@@ -558,10 +528,32 @@ mod tests {
         let mut settings = UserSettings::default();
         settings.playback.shuffle_mode = ShuffleMode::Smart;
         settings.playback.smart_shuffle_entropy = SmartShuffleEntropy::Adventurous;
-        settings.playback.smart_shuffle_rebuild_interval = SmartShuffleRebuildInterval::Weekly;
 
         assert_eq!(store.save_settings(settings.clone()), Ok(()));
         assert_eq!(store.load_settings(), Ok(settings));
+
+        let root = path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .expect("test path has two parents");
+        fs::remove_dir_all(root).expect("remove test settings directory");
+    }
+
+    #[test]
+    fn loading_audio_without_bpm_key_normalizes_to_all_on() {
+        // A hand-edited config that turns audio analysis on but leaves
+        // bpm/key off (their default) is contradictory — audio yields
+        // all three off one decode — so the loader normalizes it.
+        let path = unique_settings_path();
+        fs::create_dir_all(path.parent().expect("settings path has parent"))
+            .expect("create settings dir");
+        fs::write(&path, "[analysis]\naudio = true\n").expect("write hand-edited config");
+
+        let store = TomlSettingsStore::new(&path);
+        let loaded = store.load_settings().expect("load settings");
+        assert!(loaded.analysis.audio);
+        assert!(loaded.analysis.bpm, "audio on must imply bpm on");
+        assert!(loaded.analysis.key, "audio on must imply key on");
 
         let root = path
             .parent()
@@ -582,6 +574,8 @@ mod tests {
                 )),
                 sidebar_collapsed: true,
                 sidebar_width: Some(248),
+                library_section_collapsed: false,
+                playlists_section_collapsed: true,
             },
             ..UserSettings::default()
         };
@@ -663,11 +657,15 @@ mod tests {
     fn toml_settings_store_round_trips_analysis_and_online_toggles() {
         let path = unique_settings_path();
         let store = TomlSettingsStore::new(&path);
+        // A valid combination that round-trips unchanged: audio off, so
+        // the load-time normalization (audio ⇒ bpm + key) leaves these
+        // exactly as written. The normalization itself is covered by
+        // `loading_audio_without_bpm_key_normalizes_to_all_on`.
         let settings = UserSettings {
             analysis: AnalysisSettings {
                 bpm: true,
                 key: false,
-                audio: true,
+                audio: false,
             },
             online: OnlineSettings {
                 artwork: true,

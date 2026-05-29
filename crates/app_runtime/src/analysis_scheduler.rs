@@ -95,11 +95,19 @@ const BATCH_SIZE: usize = 16;
 /// [`sustain_analysis::Analyzer`] and only calls the band methods for
 /// capabilities that are currently active, so a track scheduled with
 /// `bpm: true, key: false, audio: false` does **not** pay for the
-/// chroma extraction or full-track decode. Tests substitute
-/// a closure that returns canned `TrackAnalysis` values and may
-/// ignore the capability mask.
+/// chroma extraction or full-track decode. The `Option<Duration>` is the
+/// library's stored track length, passed so the analyzer can centre its
+/// analysis windows and classify the track as normal vs. long without a
+/// preliminary probe. Tests substitute a closure that returns canned
+/// `TrackAnalysis` values and may ignore the capability mask and
+/// duration.
 pub type AnalyzerFn = Arc<
-    dyn Fn(&Path, AnalysisCapabilities, AnalysisOptions) -> Result<TrackAnalysis, AnalysisError>
+    dyn Fn(
+            &Path,
+            AnalysisCapabilities,
+            AnalysisOptions,
+            Option<Duration>,
+        ) -> Result<TrackAnalysis, AnalysisError>
         + Send
         + Sync,
 >;
@@ -283,6 +291,9 @@ struct WorkItem {
     absolute_path: PathBuf,
     capabilities: AnalysisCapabilities,
     context: AnalysisContext,
+    /// The library's stored track length, forwarded to the analyzer so
+    /// it can centre its analysis windows without a preliminary probe.
+    duration: Option<Duration>,
 }
 
 /// Per-track entry queued for dispatch. Each entry carries its own
@@ -324,6 +335,10 @@ struct WorkerCtx {
     track_updated: Option<TrackUpdatedSink>,
     analysis_options: AnalysisOptions,
     priority_pair: (NiceLevel, IoPriorityClass),
+    /// Whether this worker should pin itself to the machine's efficiency
+    /// cores on entry (true for the polite presets on a hybrid CPU; a
+    /// no-op elsewhere).
+    prefer_efficiency_cores: bool,
 }
 
 /// Handles to the running pool, kept by the supervisor for clean
@@ -351,6 +366,7 @@ impl WorkerPool {
         let queue_capacity = worker_count.max(1).saturating_add(1);
         let (work_tx, work_rx) = async_channel::bounded::<WorkItem>(queue_capacity);
         let priority_pair = priority::priority_for(usage);
+        let prefer_efficiency_cores = priority::prefers_efficiency_cores(usage);
         let mut handles = Vec::with_capacity(worker_count);
         for index in 0..worker_count {
             let ctx = WorkerCtx {
@@ -361,6 +377,7 @@ impl WorkerPool {
                 track_updated: track_updated.clone(),
                 analysis_options,
                 priority_pair,
+                prefer_efficiency_cores,
             };
             let handle = thread::Builder::new()
                 .name(format!("sustain-analysis-worker-{index}"))
@@ -392,6 +409,16 @@ fn worker_loop(ctx: WorkerCtx) {
     // and a sandbox without the right caps would spam the journal.
     let _ = priority::apply_to_current_thread(ctx.priority_pair.0, ctx.priority_pair.1);
 
+    // On a hybrid CPU, the polite presets also pin to the efficiency
+    // cores so background analysis stays off the performance cores
+    // playback and the UI want. Best-effort and a no-op on non-hybrid
+    // (incl. AMD) machines; failure leaves the thread on default
+    // affinity, so it is ignored for the same reason as the priority
+    // calls above.
+    if ctx.prefer_efficiency_cores {
+        let _ = priority::pin_current_thread_to_efficiency_cores_best_effort();
+    }
+
     loop {
         let item = match ctx.work_rx.recv_blocking() {
             Ok(item) => item,
@@ -399,29 +426,33 @@ fn worker_loop(ctx: WorkerCtx) {
             Err(_) => return,
         };
 
-        let succeeded =
-            match (ctx.analyzer)(&item.absolute_path, item.capabilities, ctx.analysis_options) {
-                Ok(analysis) => {
-                    let _ = ctx.library_store.record_analysis(
-                        item.track_id,
-                        &analysis,
-                        item.capabilities,
-                        item.context,
-                    );
-                    if let Some(notify) = ctx.track_updated.as_deref() {
-                        notify(item.track_id);
-                    }
-                    true
+        let succeeded = match (ctx.analyzer)(
+            &item.absolute_path,
+            item.capabilities,
+            ctx.analysis_options,
+            item.duration,
+        ) {
+            Ok(analysis) => {
+                let _ = ctx.library_store.record_analysis(
+                    item.track_id,
+                    &analysis,
+                    item.capabilities,
+                    item.context,
+                );
+                if let Some(notify) = ctx.track_updated.as_deref() {
+                    notify(item.track_id);
                 }
-                Err(_) => {
-                    let _ = ctx.library_store.record_analysis_attempt_failure(
-                        item.track_id,
-                        item.capabilities,
-                        item.context,
-                    );
-                    false
-                }
-            };
+                true
+            }
+            Err(_) => {
+                let _ = ctx.library_store.record_analysis_attempt_failure(
+                    item.track_id,
+                    item.capabilities,
+                    item.context,
+                );
+                false
+            }
+        };
         let outcome = WorkOutcome {
             track_id: item.track_id,
             succeeded,
@@ -728,6 +759,7 @@ fn supervisor_loop(receiver: mpsc::Receiver<SchedulerCommand>, config: AnalysisS
                 absolute_path,
                 capabilities: dispatch_caps,
                 context,
+                duration: track.metadata.duration,
             };
             match work_tx.try_send(work_item) {
                 Ok(()) => {
@@ -1086,7 +1118,7 @@ mod tests {
     }
 
     fn ok_analyzer() -> AnalyzerFn {
-        Arc::new(|_path, _caps, _opts| {
+        Arc::new(|_path, _caps, _opts, _duration| {
             Ok(TrackAnalysis {
                 bpm: Some(120.0),
                 key: Some(MusicalKey::CMajor),
@@ -1105,7 +1137,7 @@ mod tests {
     }
 
     fn err_analyzer() -> AnalyzerFn {
-        Arc::new(|_path, _caps, _opts| {
+        Arc::new(|_path, _caps, _opts, _duration| {
             Err(AnalysisError::TooShort {
                 path: "stub".into(),
                 samples: 0,
@@ -1279,12 +1311,13 @@ mod tests {
         // every capability off.
         let calls = Arc::new(AtomicU32::new(0));
         let counted = calls.clone();
-        let analyzer: AnalyzerFn = Arc::new(move |_path, _caps, _opts| {
+        let analyzer: AnalyzerFn = Arc::new(move |_path, _caps, _opts, _duration| {
             counted.fetch_add(1, Ordering::SeqCst);
             ok_analyzer()(
                 std::path::Path::new("ignored"),
                 AnalysisCapabilities::all(),
                 AnalysisOptions::default(),
+                None,
             )
         });
 
@@ -1372,12 +1405,13 @@ mod tests {
         // Analyzer that artificially extends per-track work so the
         // test has a chance to send the toggle-off before the
         // scheduler drains the queue.
-        let analyzer: AnalyzerFn = Arc::new(|_path, _caps, _opts| {
+        let analyzer: AnalyzerFn = Arc::new(|_path, _caps, _opts, _duration| {
             std::thread::sleep(Duration::from_millis(80));
             ok_analyzer()(
                 std::path::Path::new("ignored"),
                 AnalysisCapabilities::all(),
                 AnalysisOptions::default(),
+                None,
             )
         });
 
@@ -1586,7 +1620,7 @@ mod tests {
 
         let observed: Arc<Mutex<Option<AnalysisCapabilities>>> = Arc::new(Mutex::new(None));
         let observed_for_closure = observed.clone();
-        let analyzer: AnalyzerFn = Arc::new(move |_path, caps, _opts| {
+        let analyzer: AnalyzerFn = Arc::new(move |_path, caps, _opts, _duration| {
             if let Ok(mut guard) = observed_for_closure.lock() {
                 *guard = Some(caps);
             }
@@ -1594,6 +1628,7 @@ mod tests {
                 std::path::Path::new("ignored"),
                 AnalysisCapabilities::all(),
                 AnalysisOptions::default(),
+                None,
             )
         });
 
@@ -1663,7 +1698,7 @@ mod tests {
         use std::sync::Mutex;
         let call_times: Arc<Mutex<Vec<Instant>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded_times = call_times.clone();
-        let analyzer: AnalyzerFn = Arc::new(move |_path, _caps, _opts| {
+        let analyzer: AnalyzerFn = Arc::new(move |_path, _caps, _opts, _duration| {
             if let Ok(mut guard) = recorded_times.lock() {
                 guard.push(Instant::now());
             }
@@ -1672,6 +1707,7 @@ mod tests {
                 std::path::Path::new("ignored"),
                 AnalysisCapabilities::all(),
                 AnalysisOptions::default(),
+                None,
             )
         });
 
@@ -1767,12 +1803,13 @@ mod tests {
 
         let observed: Arc<Mutex<Vec<AnalysisCapabilities>>> = Arc::new(Mutex::new(Vec::new()));
         let observed_for_closure = observed.clone();
-        let analyzer: AnalyzerFn = Arc::new(move |_path, caps, _opts| {
+        let analyzer: AnalyzerFn = Arc::new(move |_path, caps, _opts, _duration| {
             observed_for_closure.lock().expect("lock").push(caps);
             ok_analyzer()(
                 std::path::Path::new("ignored"),
                 AnalysisCapabilities::all(),
                 AnalysisOptions::default(),
+                None,
             )
         });
 
@@ -1844,7 +1881,7 @@ mod tests {
 
         let order: Arc<Mutex<Vec<TrackId>>> = Arc::new(Mutex::new(Vec::new()));
         let order_for_closure = order.clone();
-        let analyzer: AnalyzerFn = Arc::new(move |path, _caps, _opts| {
+        let analyzer: AnalyzerFn = Arc::new(move |path, _caps, _opts, _duration| {
             // Recover the TrackId from the path stem so the test can
             // assert on processing order without needing a richer
             // analyzer hook.
@@ -1867,6 +1904,7 @@ mod tests {
                 std::path::Path::new("ignored"),
                 AnalysisCapabilities::all(),
                 AnalysisOptions::default(),
+                None,
             )
         });
 

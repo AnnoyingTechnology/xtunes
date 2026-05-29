@@ -150,15 +150,10 @@ pub(crate) fn connect_titlebar_playback_controls(
         }
     });
 
-    let command_controller_for_play_pause = command_controller.clone();
-    let playback_changed_for_play_pause = playback_changed.clone();
-    titlebar.play_pause.connect_clicked(move |_| {
-        if command_controller_for_play_pause.dispatch_succeeded(ApplicationCommand::Playback(
-            PlaybackCommand::TogglePlayPause,
-        )) {
-            playback_changed_for_play_pause();
-        }
-    });
+    // The Play/Pause button is wired separately in
+    // [`connect_titlebar_play_button`] — its behaviour depends on the
+    // visible view (cold-starting that view's first track when nothing
+    // is loaded), which only exists later in window construction.
 
     let command_controller_for_next = command_controller.clone();
     let playback_changed_for_next = playback_changed.clone();
@@ -230,6 +225,21 @@ pub(crate) fn connect_titlebar_playback_controls(
     ));
 }
 
+/// Wire the top-bar Play/Pause button.
+///
+/// Unlike Previous / Next, the Play button is not a fixed transport
+/// command: when a track is already loaded it toggles play/pause, but on
+/// a cold start (nothing loaded) it begins playback from the currently
+/// visible view. That decision needs the content stack, which only
+/// exists later in window construction, so the caller supplies a
+/// ready-made closure that owns the full "toggle or cold-start, then
+/// refresh" behaviour and this function simply binds it to the click.
+pub(crate) fn connect_titlebar_play_button(titlebar: &Titlebar, on_play_pause: Rc<dyn Fn()>) {
+    titlebar
+        .play_pause
+        .connect_clicked(move |_| on_play_pause());
+}
+
 fn schedule_volume_save(
     volume: VolumePercent,
     pending_save: Rc<RefCell<Option<glib::SourceId>>>,
@@ -266,6 +276,13 @@ impl Titlebar {
 
     pub(crate) fn set_search_text(&self, text: &str) {
         self.search.set_text(text);
+    }
+
+    /// Enable or disable the Play/Pause button. Disabled when the library
+    /// is empty and nothing is loaded, so a press is never a silent
+    /// no-op (issue #60).
+    pub(crate) fn set_play_pause_sensitive(&self, sensitive: bool) {
+        self.play_pause.set_sensitive(sensitive);
     }
 
     /// Cancel any pending debounced volume save and run it now. Invoked from

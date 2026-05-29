@@ -1976,6 +1976,7 @@ dependencies = [
  "stratum-dsp",
  "sustain-domain",
  "symphonia",
+ "tempfile",
  "thiserror",
 ]
 

@@ -18,11 +18,14 @@ use cells::{
 };
 use columns::{TRACK_TABLE_COLUMNS, TrackTableColumn};
 use empty_row_painter::EmptyRowPainter;
+use inline_edit::InlineEditController;
+pub(crate) use inline_edit::{EditableField, InlineEditHooks};
 pub(crate) use row::TrackTableRow;
 
 mod cells;
 mod columns;
 mod empty_row_painter;
+mod inline_edit;
 mod row;
 
 pub(crate) type TrackActivatedCallback = Rc<dyn Fn(TrackId)>;
@@ -417,6 +420,7 @@ pub(crate) fn build_track_table(
     context_menu: Option<TrackRowContextMenu>,
     rating_changed: Option<RatingChangedCallback>,
     row_reorder: Option<RowReorderCallback>,
+    inline_edit: Option<InlineEditHooks>,
 ) -> TrackTable {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     for row in rows {
@@ -436,6 +440,10 @@ pub(crate) fn build_track_table(
     let status_bindings = StatusBindings::default();
     let text_bindings = TextBindings::default();
     let rating_bindings = RatingBindings::default();
+    // One controller per table coordinates every editable cell's click
+    // gesture and the single open edit session. `None` on tables that did
+    // not opt into inline editing (everything but the Songs view today).
+    let inline_edit = inline_edit.map(InlineEditController::new);
 
     let sorted_rows = gtk::SortListModel::new(Some(store.clone()), table.sorter());
     let selection = gtk::MultiSelection::new(Some(sorted_rows));
@@ -517,6 +525,7 @@ pub(crate) fn build_track_table(
             context_menu.clone(),
             rating_changed.clone(),
             row_reorder_hooks.clone(),
+            inline_edit.clone(),
         );
         let action = gio::SimpleAction::new_stateful(
             column.action_name(),
@@ -683,6 +692,7 @@ fn install_layout_change_listeners(
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_table_column(
     column: TrackTableColumn,
     header_menu: &gio::Menu,
@@ -691,11 +701,18 @@ fn build_table_column(
     context_menu: Option<TrackTableContextMenu>,
     rating_changed: Option<RatingChangedCallback>,
     row_reorder: Option<RowReorderHooks>,
+    inline_edit: Option<InlineEditController>,
 ) -> gtk::ColumnViewColumn {
     let factory = if column == TrackTableColumn::Rating {
         build_rating_cell_factory(rating_bindings, context_menu, rating_changed, row_reorder)
     } else {
-        build_text_cell_factory(column, text_bindings, context_menu, row_reorder)
+        build_text_cell_factory(
+            column,
+            text_bindings,
+            context_menu,
+            row_reorder,
+            inline_edit,
+        )
     };
     let table_column = gtk::ColumnViewColumn::new(Some(column.title()), Some(factory));
     table_column.set_resizable(true);

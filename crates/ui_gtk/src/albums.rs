@@ -307,6 +307,33 @@ impl AlbumsView {
         self.apply_search();
     }
 
+    /// Resolve the cold-start play request for the Albums view: the
+    /// first playable track of the first album in the current
+    /// (search-filtered) ordering, with the rest of that album pinned
+    /// behind it as the queue. Mirrors [`play_album`] but targets
+    /// whichever album currently leads the grid. Returns `None` when no
+    /// album is visible or the leading album has no playable track —
+    /// used by the top-bar Play button when nothing is loaded yet
+    /// (issue #60).
+    pub(crate) fn first_album_play_request(&self) -> Option<(TrackId, PlaybackQueueRequest)> {
+        let albums = self.albums.borrow();
+        let first = albums.first()?;
+        let ordered_track_ids: Vec<TrackId> = first
+            .tracks
+            .iter()
+            .filter(|track| !track.is_missing)
+            .map(|track| track.id)
+            .collect();
+        let track_id = *ordered_track_ids.first()?;
+        Some((
+            track_id,
+            PlaybackQueueRequest::Explicit {
+                source: PlaybackQueueSource::Album,
+                ordered_track_ids,
+            },
+        ))
+    }
+
     pub(crate) fn set_playing_track_id(&self, playing_track_id: Option<TrackId>) {
         if self.playing_track_id.get() == playing_track_id {
             return;

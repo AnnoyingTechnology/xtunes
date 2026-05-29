@@ -6,13 +6,42 @@
 //!
 //! [`Analyzer`] is the single public surface: a stateful,
 //! capability-driven analyzer that owns a single track and caches the
-//! intermediate work shared between bands (a mono decode and an STFT
-//! of that decode). Callers pick exactly which bands they want by
-//! calling [`Analyzer::bpm`], [`Analyzer::key`], and
-//! [`Analyzer::waveform`] independently — a method that is never
-//! called does zero work. This is the API the background scheduler
-//! uses, so toggling off (say) waveform generation in Preferences
-//! actually skips the waveform decode pass.
+//! decoded audio shared between bands. Callers pick exactly which bands
+//! they want by calling [`Analyzer::bpm`], [`Analyzer::key`],
+//! [`Analyzer::acoustics`], and [`Analyzer::waveform`] independently —
+//! a method that is never called does zero work. This is the API the
+//! background scheduler uses, so toggling off (say) waveform generation
+//! in Preferences actually skips the waveform decode pass.
+//!
+//! ## Analysis windows
+//!
+//! BPM and key are read off a **centered** window — the middle
+//! `BPM_KEY_WINDOW_SECS` of the track — not the opening seconds. The
+//! intro of a track (especially electronic music) is the least
+//! representative part: sparse, tame, often beatless. The middle is
+//! where the groove and the tonal centre actually live. The window is
+//! seeked to, so even on a long file we never decode the lead-in.
+//!
+//! Tracks are tiered by length to keep the working set bounded:
+//!
+//! * **Normal** (≤ 15 min, `LONG_TRACK_THRESHOLD_SECS`): acoustics
+//!   measure the whole track (so the loudness guard's short-term max
+//!   sees a real finale, §7), and the waveform renders the whole track
+//!   at full detail.
+//! * **Long** (> 15 min — classical movements, DJ mixes, podcasts):
+//!   acoustics measure a centered `ACOUSTICS_LONG_WINDOW_SECS` sample
+//!   instead of the whole track, and the **waveform is skipped
+//!   entirely** (the caller checks [`Analyzer::is_long_track`]). A
+//!   whole-track decode of a two-hour file is gigabytes of working set
+//!   for a feature that, at that length, is a coarse smear nobody
+//!   scrubs; the high-detail, device-specific waveforms a Pioneer
+//!   export needs are computed on demand by that export, not here.
+//!
+//! The windows nest — the BPM/key window is always the centre of the
+//! acoustics window — so when `audio` analysis is enabled the acoustics
+//! decode is computed once and BPM/key slice their window out of it for
+//! free. BPM/key requested *without* audio decode only their own
+//! centered window.
 //!
 //! The Analyzer reaches into `stratum_dsp::features::*` directly
 //! (chroma extractor for the STFT, period::tempogram for BPM, key
@@ -49,7 +78,9 @@ pub use sustain_domain::{
     TrackAnalysis, WaveformSegment, WaveformSegments,
 };
 
-use decode::{DecodedAudio, decode_capped, decode_full};
+use std::time::Duration;
+
+use decode::{DecodedAudio, decode_full, decode_window};
 use stratum_dsp::features::chroma::extractor::{
     compute_stft, extract_chroma_from_spectrogram_with_options,
 };
@@ -81,20 +112,29 @@ pub use waveform::WaveformTiers;
 /// set (loudness, onset density, timbral band ratios, low-band
 /// variation, tonalness) Smart Shuffle consumes. Tracks attempted under
 /// version 2 have no `track_acoustics` row, so they must be re-attempted.
-pub const ANALYZER_VERSION: u32 = 3;
+///
+/// Version 4: BPM/key moved from the opening 120 s to a *centered*
+/// window, and long tracks (> 15 min) now measure acoustics over a
+/// centered 8-min sample with the waveform skipped. The values these
+/// produce differ from version 3, so previously-attempted rows must be
+/// re-attempted. Note the storage layer's `FILL_*_IF_NULL` policy: a
+/// re-attempt overwrites acoustics but leaves an existing BPM/key value
+/// in place (it never clobbers a populated field), so an existing
+/// library only picks up the new centered BPM/key on a wipe-and-rescan
+/// — the documented pre-release workflow.
+pub const ANALYZER_VERSION: u32 = 4;
 
 /// DSP tunables exposed to callers. Defaults reflect the values the
 /// rhythmbox-to-pioneer-xdj-exporter author landed on after testing on
-/// a large DJ-style library, with one Sustain-specific deviation:
-/// no max-sample cap is applied to the waveform decode (the whole
-/// track is decoded so the preview/detail reflect the full audio),
-/// while BPM/key detection still observes the 120-second cap to keep
-/// the working set bounded.
+/// a large DJ-style library.
 ///
 /// Capability gating (which bands to compute) is **not** in this
 /// struct — that lives on the call site, which simply chooses which
-/// [`Analyzer`] methods to invoke. Anything in here is DSP tuning
-/// every band-method-call uses identically.
+/// [`Analyzer`] methods to invoke. The window placement and long-track
+/// tiering are not tunables either; they are fixed policy
+/// (`BPM_KEY_WINDOW_SECS`, `LONG_TRACK_THRESHOLD_SECS`,
+/// `ACOUSTICS_LONG_WINDOW_SECS`). Anything in here is DSP tuning every
+/// band-method-call uses identically.
 #[derive(Clone, Copy, Debug)]
 pub struct AnalysisOptions {
     /// Lower bound of the BPM range used for octave normalization
@@ -140,11 +180,27 @@ pub enum AnalysisError {
     DspFailed { path: String, message: String },
 }
 
-/// Cap (seconds) on how much audio the BPM/key pass decodes. Long
-/// enough that BPM/key estimates are reliable on full tracks, short
-/// enough that the working set stays bounded. Matches the upstream
-/// rhythmbox-to-pioneer-xdj-exporter figure.
-const BPM_KEY_DECODE_CAP_SECONDS: u32 = 120;
+/// Length (seconds) of the centered window BPM and key are measured
+/// over. Long enough for a reliable tempogram + chroma estimate, short
+/// enough that the working set stays bounded and the window stays
+/// inside a single musical section (so a track that changes key or
+/// tempo does not smear). Matches the upstream
+/// rhythmbox-to-pioneer-xdj-exporter figure, now centered rather than
+/// taken from the opening.
+const BPM_KEY_WINDOW_SECS: f64 = 120.0;
+
+/// Track length (seconds) above which a track is treated as *long*:
+/// acoustics measure a centered sample rather than the whole track, and
+/// the waveform is skipped. 15 minutes is comfortably past any normal
+/// song and lands on the classical-movement / DJ-mix / podcast material
+/// where whole-track analysis is both expensive and low-value.
+const LONG_TRACK_THRESHOLD_SECS: f64 = 15.0 * 60.0;
+
+/// Length (seconds) of the centered acoustics sample on long tracks. 8
+/// minutes is a generous, representative slice of the body of a long
+/// piece while keeping the decode + STFT bounded (a two-hour file would
+/// otherwise be gigabytes of working set per worker).
+const ACOUSTICS_LONG_WINDOW_SECS: f64 = 8.0 * 60.0;
 
 /// Minimum number of samples the DSP engine needs to do anything
 /// meaningful. Roughly one second at 44.1 kHz; below that the FFT
@@ -189,16 +245,33 @@ const ONSET_FLUX_PERCENTILE: f32 = 0.8;
 const LOUDNESS_RANGE_GATE_LU: f32 = 20.0;
 
 /// Capability-driven, stateful analyzer for one audio file. Cheap to
-/// construct — the constructor does no I/O — and caches every
-/// intermediate result the band methods share, so a caller that
-/// requests both BPM and key only pays for one decode + one STFT.
+/// construct — the constructor does no I/O — and caches the decoded
+/// regions the band methods share, so a caller that requests both BPM
+/// and key only pays for one decode + one STFT, and a caller that also
+/// requests audio analysis pays for the acoustics decode and slices the
+/// BPM/key window out of it for free.
 ///
-/// The cache is per-band and lazy. Calling [`Self::bpm`] decodes the
-/// audio (capped at 120 s), runs the STFT, and produces a BPM
-/// estimate. A subsequent [`Self::key`] call reuses the same decode
-/// and STFT — only the chroma extraction and key matching run
-/// fresh. [`Self::waveform`] is independent: it uses the full
-/// uncapped decode and never touches the STFT.
+/// The caches are lazy and region-keyed:
+///
+/// * [`Self::waveform`] uses the **whole-track** decode (`full_audio`).
+/// * [`Self::acoustics`] uses the whole track on normal-length tracks
+///   (sharing `full_audio` with the waveform) and a centered
+///   `ACOUSTICS_LONG_WINDOW_SECS` decode on long tracks.
+/// * [`Self::bpm`] / [`Self::key`] use a centered `BPM_KEY_WINDOW_SECS`
+///   window plus its STFT. When a larger region is already in memory
+///   (the audio pass ran first), the window is sliced from its centre —
+///   no extra I/O. Otherwise it is decoded on its own.
+///
+/// To get the free slice, a caller that wants everything should prime
+/// the larger region first: call [`Self::waveform`]/[`Self::acoustics`]
+/// before [`Self::bpm`]/[`Self::key`]. The production scheduler closure
+/// does exactly that. Calling BPM/key first is still correct, only
+/// slightly less efficient (the centered window is decoded separately).
+///
+/// The `duration_hint` (the library's stored track duration) places the
+/// centered windows and classifies the track as normal vs. long without
+/// a preliminary probe. When it is absent the analyzer treats the track
+/// as normal and windows from the start (centering needs a length).
 ///
 /// Failures inside any band collapse to `None`; the caller decides
 /// how to record the attempt. Errors that prevent any band from
@@ -211,23 +284,46 @@ const LOUDNESS_RANGE_GATE_LU: f32 = 20.0;
 pub struct Analyzer {
     path: PathBuf,
     options: AnalysisOptions,
-    capped_audio: OnceCell<Option<DecodedAudio>>,
+    duration_hint: Option<Duration>,
+    /// Whole-track decode (waveform; acoustics on normal-length tracks).
     full_audio: OnceCell<Option<DecodedAudio>>,
-    stft: OnceCell<Option<Vec<Vec<f32>>>>,
+    /// Centered acoustics window — only populated on long tracks; normal
+    /// tracks route acoustics through `full_audio`.
+    acoustics_window: OnceCell<Option<DecodedAudio>>,
+    /// Centered BPM/key window (a slice of a larger region when one is
+    /// in memory, otherwise its own decode).
+    bpmkey_audio: OnceCell<Option<DecodedAudio>>,
+    bpmkey_stft: OnceCell<Option<Vec<Vec<f32>>>>,
 }
 
 impl Analyzer {
-    /// Build an analyzer bound to `path` with the given DSP tunings.
-    /// Performs no I/O — the audio file is opened lazily on the first
-    /// band call.
-    pub fn new(path: impl Into<PathBuf>, options: AnalysisOptions) -> Self {
+    /// Build an analyzer bound to `path` with the given DSP tunings and
+    /// an optional `duration_hint` (the library's stored track length,
+    /// used to place the centered windows and classify the track length
+    /// without a probe). Performs no I/O — the audio file is opened
+    /// lazily on the first band call.
+    pub fn new(
+        path: impl Into<PathBuf>,
+        options: AnalysisOptions,
+        duration_hint: Option<Duration>,
+    ) -> Self {
         Self {
             path: path.into(),
             options,
-            capped_audio: OnceCell::new(),
+            duration_hint,
             full_audio: OnceCell::new(),
-            stft: OnceCell::new(),
+            acoustics_window: OnceCell::new(),
+            bpmkey_audio: OnceCell::new(),
+            bpmkey_stft: OnceCell::new(),
         }
+    }
+
+    /// Whether this track is *long* (> `LONG_TRACK_THRESHOLD_SECS`).
+    /// The production closure consults this to skip the waveform on long
+    /// tracks. With no duration hint the track is treated as normal.
+    pub fn is_long_track(&self) -> bool {
+        self.duration_hint
+            .is_some_and(|d| d.as_secs_f64() > LONG_TRACK_THRESHOLD_SECS)
     }
 
     /// Detected tempo in beats per minute, after octave normalization
@@ -235,11 +331,11 @@ impl Analyzer {
     /// file cannot be decoded, is too short for analysis, or the DSP
     /// engine cannot produce a confident estimate.
     pub fn bpm(&self) -> Option<f32> {
-        let stft = self.stft_for_capped()?;
-        let capped = self.capped()?;
+        let stft = self.bpmkey_stft()?;
+        let window = self.bpmkey_audio()?;
         let estimate = estimate_bpm_tempogram(
             stft,
-            capped.sample_rate,
+            window.sample_rate,
             u32::try_from(STFT_HOP_SIZE).unwrap_or(u32::MAX),
             self.options.min_bpm,
             self.options.max_bpm,
@@ -261,11 +357,11 @@ impl Analyzer {
     /// the key detector's best match does not correspond to one of
     /// Sustain's 24 canonical [`MusicalKey`] variants.
     pub fn key(&self) -> Option<MusicalKey> {
-        let stft = self.stft_for_capped()?;
-        let capped = self.capped()?;
+        let stft = self.bpmkey_stft()?;
+        let window = self.bpmkey_audio()?;
         let chroma = extract_chroma_from_spectrogram_with_options(
             stft,
-            capped.sample_rate,
+            window.sample_rate,
             STFT_FRAME_SIZE,
             true,
             0.5,
@@ -296,18 +392,21 @@ impl Analyzer {
     /// if the file cannot be decoded, is too short, or carries no
     /// measurable loudness (effectively silent).
     ///
-    /// Measured over the **whole track** via the full decode — not the
-    /// 120 s BPM/key cap — because the loudness guard keys off the
-    /// short-term *max*, and a loud finale after the cap must still
-    /// count (§7). That full decode is the same one [`Self::waveform`]
-    /// uses, shared through the analyzer's cache, so enabling waveform
-    /// and acoustics together decodes the track only once. The STFT for
-    /// the spectral features is computed here over the full samples
-    /// (acoustics is its only consumer, so it is not cached).
+    /// On a **normal-length** track this measures the whole track (the
+    /// loudness guard keys off the short-term *max*, and a loud finale
+    /// must still count, §7) via the same decode [`Self::waveform`]
+    /// uses, so enabling waveform and acoustics together decodes the
+    /// track only once. On a **long** track (> `LONG_TRACK_THRESHOLD_SECS`)
+    /// it measures a centered `ACOUSTICS_LONG_WINDOW_SECS` sample
+    /// instead — a whole-track decode + STFT of a two-hour file is
+    /// gigabytes of working set, and the middle is a faithful proxy for
+    /// the body of the piece. The STFT for the spectral features is
+    /// computed here over the region's samples (acoustics is its only
+    /// consumer, so it is not cached).
     pub fn acoustics(&self) -> Option<AcousticFeatures> {
-        let full = self.full()?;
-        let sample_rate = full.sample_rate;
-        let samples = &full.samples;
+        let region = self.acoustics_audio()?;
+        let sample_rate = region.sample_rate;
+        let samples = &region.samples;
         if samples.len() < MIN_SAMPLES_FOR_ANALYSIS {
             return None;
         }
@@ -345,38 +444,102 @@ impl Analyzer {
         })
     }
 
-    fn capped(&self) -> Option<&DecodedAudio> {
-        self.capped_audio
-            .get_or_init(
-                || match decode_capped(&self.path, BPM_KEY_DECODE_CAP_SECONDS) {
-                    Ok(audio) if audio.samples.len() >= MIN_SAMPLES_FOR_ANALYSIS => Some(audio),
-                    _ => None,
-                },
-            )
-            .as_ref()
-    }
-
+    /// Whole-track decode. Used by the waveform and, on normal-length
+    /// tracks, by acoustics.
     fn full(&self) -> Option<&DecodedAudio> {
         self.full_audio
             .get_or_init(|| decode_full(&self.path).ok())
             .as_ref()
     }
 
-    fn stft_for_capped(&self) -> Option<&Vec<Vec<f32>>> {
-        // Initialize the STFT cache. We can't call `capped()` inside
-        // `get_or_init` because that would borrow `self` twice, so we
-        // explicitly pull the decoded samples first and pass them in.
-        if self.stft.get().is_none() {
-            let computed = match self.capped() {
+    /// The region acoustics measure: the whole track on normal-length
+    /// tracks (shared with the waveform), or a centered
+    /// `ACOUSTICS_LONG_WINDOW_SECS` sample on long tracks.
+    fn acoustics_audio(&self) -> Option<&DecodedAudio> {
+        if self.is_long_track() {
+            self.acoustics_window
+                .get_or_init(|| {
+                    let start = self.window_start(ACOUSTICS_LONG_WINDOW_SECS);
+                    match decode_window(&self.path, start, ACOUSTICS_LONG_WINDOW_SECS) {
+                        Ok(audio) if audio.samples.len() >= MIN_SAMPLES_FOR_ANALYSIS => Some(audio),
+                        _ => None,
+                    }
+                })
+                .as_ref()
+        } else {
+            self.full()
+        }
+    }
+
+    /// The centered BPM/key window. Sliced from a larger region already
+    /// in memory when one exists (the audio pass primed it), otherwise
+    /// decoded on its own. We only *peek* the larger caches — never
+    /// initialize them — so requesting BPM/key alone never triggers a
+    /// whole-track or acoustics decode.
+    fn bpmkey_audio(&self) -> Option<&DecodedAudio> {
+        self.bpmkey_audio
+            .get_or_init(|| {
+                let cached_region = self
+                    .acoustics_window
+                    .get()
+                    .and_then(|cell| cell.as_ref())
+                    .or_else(|| self.full_audio.get().and_then(|cell| cell.as_ref()));
+                let candidate = match cached_region {
+                    Some(region) => center_slice(region, BPM_KEY_WINDOW_SECS),
+                    None => {
+                        let start = self.window_start(BPM_KEY_WINDOW_SECS);
+                        decode_window(&self.path, start, BPM_KEY_WINDOW_SECS).ok()?
+                    }
+                };
+                (candidate.samples.len() >= MIN_SAMPLES_FOR_ANALYSIS).then_some(candidate)
+            })
+            .as_ref()
+    }
+
+    /// STFT of the centered BPM/key window, shared by `bpm` and `key`.
+    fn bpmkey_stft(&self) -> Option<&Vec<Vec<f32>>> {
+        // Pull the decoded window out first: we cannot call
+        // `bpmkey_audio()` inside `get_or_init` without borrowing `self`
+        // twice.
+        if self.bpmkey_stft.get().is_none() {
+            let computed = match self.bpmkey_audio() {
                 Some(audio) => compute_stft(&audio.samples, STFT_FRAME_SIZE, STFT_HOP_SIZE).ok(),
                 None => None,
             };
-            // OnceCell::set returns Err if already initialised by a
-            // concurrent call (impossible here since OnceCell is
-            // !Sync), so just ignore that case.
-            let _ = self.stft.set(computed);
+            // OnceCell::set returns Err only on a concurrent init, which
+            // cannot happen (OnceCell is !Sync); ignore that case.
+            let _ = self.bpmkey_stft.set(computed);
         }
-        self.stft.get().and_then(|cached| cached.as_ref())
+        self.bpmkey_stft.get().and_then(|cached| cached.as_ref())
+    }
+
+    /// Start offset (seconds) that centers a `len_secs` window in the
+    /// track, from the duration hint. With no hint, window from the
+    /// start (`0.0`) — centering needs a length.
+    fn window_start(&self, len_secs: f64) -> f64 {
+        match self.duration_hint {
+            Some(duration) => ((duration.as_secs_f64() - len_secs) / 2.0).max(0.0),
+            None => 0.0,
+        }
+    }
+}
+
+/// Copy the central `len_secs` of a decoded region into a fresh buffer.
+/// Both the whole-track decode and the centered acoustics window are
+/// centred on the track, so their middle `len_secs` is exactly the
+/// track's centered BPM/key window — no offset bookkeeping needed. A
+/// region shorter than the window is returned whole.
+fn center_slice(region: &DecodedAudio, len_secs: f64) -> DecodedAudio {
+    let want = (len_secs * region.sample_rate as f64) as usize;
+    let samples = if region.samples.len() <= want {
+        region.samples.clone()
+    } else {
+        let start = (region.samples.len() - want) / 2;
+        region.samples[start..start + want].to_vec()
+    };
+    DecodedAudio {
+        samples,
+        sample_rate: region.sample_rate,
     }
 }
 
@@ -667,8 +830,12 @@ fn map_stratum_key(name: &str) -> Option<MusicalKey> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnalysisOptions, Analyzer, map_stratum_key, octave_normalize, stratum_key_label};
+    use super::{
+        AnalysisOptions, Analyzer, BPM_KEY_WINDOW_SECS, map_stratum_key, octave_normalize,
+        stratum_key_label,
+    };
     use std::path::PathBuf;
+    use std::time::Duration;
     use sustain_domain::MusicalKey;
 
     #[test]
@@ -740,6 +907,7 @@ mod tests {
         let analyzer = Analyzer::new(
             PathBuf::from("/does/not/exist/sustain_tests_missing.flac"),
             AnalysisOptions::default(),
+            None,
         );
         assert_eq!(analyzer.bpm(), None);
         assert_eq!(analyzer.key(), None);
@@ -755,10 +923,61 @@ mod tests {
         let _analyzer = Analyzer::new(
             PathBuf::from("/this/path/does/not/exist.flac"),
             AnalysisOptions::default(),
+            None,
         );
         // Reaching this line proves no I/O happened in `new`; the
         // call sites lower in the method chain (bpm/key/waveform)
         // are where the actual `File::open` lives.
+    }
+
+    #[test]
+    fn long_track_classification_keys_off_the_duration_hint() {
+        let opts = AnalysisOptions::default();
+        let path = PathBuf::from("/does/not/matter.flac");
+        // 20 min > 15 min threshold → long.
+        assert!(Analyzer::new(&path, opts, Some(Duration::from_secs(20 * 60))).is_long_track());
+        // 4 min → normal.
+        assert!(!Analyzer::new(&path, opts, Some(Duration::from_secs(4 * 60))).is_long_track());
+        // Exactly the threshold is *not* long (strictly greater).
+        assert!(!Analyzer::new(&path, opts, Some(Duration::from_secs(15 * 60))).is_long_track());
+        // No hint → treated as normal.
+        assert!(!Analyzer::new(&path, opts, None).is_long_track());
+    }
+
+    #[test]
+    fn window_start_centers_the_window_in_the_track() {
+        let opts = AnalysisOptions::default();
+        let path = PathBuf::from("/does/not/matter.flac");
+        // A 4-min (240 s) track, 120 s BPM/key window → starts at 60 s
+        // (the "skip the intro" behaviour the centering subsumes).
+        let normal = Analyzer::new(&path, opts, Some(Duration::from_secs(240)));
+        assert!((normal.window_start(BPM_KEY_WINDOW_SECS) - 60.0).abs() < 1e-6);
+        // A window longer than the track clamps to 0 (decode the whole
+        // short track).
+        let short = Analyzer::new(&path, opts, Some(Duration::from_secs(30)));
+        assert_eq!(short.window_start(BPM_KEY_WINDOW_SECS), 0.0);
+        // No hint → window from the start.
+        let unknown = Analyzer::new(&path, opts, None);
+        assert_eq!(unknown.window_start(BPM_KEY_WINDOW_SECS), 0.0);
+    }
+
+    #[test]
+    fn center_slice_takes_the_middle_span() {
+        // 10 s of mono at 1 kHz = 10_000 samples; the central 2 s is
+        // samples [4000, 6000).
+        let region = super::DecodedAudio {
+            samples: (0..10_000).map(|i| i as f32).collect(),
+            sample_rate: 1_000,
+        };
+        let slice = super::center_slice(&region, 2.0);
+        assert_eq!(slice.sample_rate, 1_000);
+        assert_eq!(slice.samples.len(), 2_000);
+        assert_eq!(slice.samples.first().copied(), Some(4_000.0));
+        assert_eq!(slice.samples.last().copied(), Some(5_999.0));
+
+        // A region shorter than the window is returned whole.
+        let whole = super::center_slice(&region, 30.0);
+        assert_eq!(whole.samples.len(), region.samples.len());
     }
 }
 

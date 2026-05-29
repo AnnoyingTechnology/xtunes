@@ -9,9 +9,10 @@ use sustain_app_runtime::{FieldChange, MetadataChange, PlayStatistics, Rating, T
 
 use crate::date_format::format_system_time_short;
 
+use crate::metadata_diff::{bool_diff, number_diff, signed_number_diff, text_diff};
+
 use super::{
     NUMBER_ENTRY_WIDTH_CHARS, PAIR_ENTRY_WIDTH_CHARS,
-    diff::{bool_diff, number_diff, signed_number_diff, text_diff},
     form::{attach_field, attach_paired_field, number_entry, text_entry},
 };
 
