@@ -590,6 +590,122 @@ fn managed_import_lazily_hashes_same_size_existing_tracks_for_duplicates() {
 }
 
 #[test]
+fn managed_import_skips_strict_exact_duplicate_when_stored_hash_is_stale() {
+    // Regression: a track that was copy-imported (so it carries a content
+    // hash) and then edited or online-enriched keeps a STALE hash — the
+    // in-place rewrite never refreshes it. Re-importing the file as it now
+    // exists on disk slipped past the hash-based dedup (which trusted the
+    // stale stored hash) and, finding the canonical name occupied on disk,
+    // wrote a byte-identical " 2" copy. The disk-anchored guard compares
+    // the destination's bytes to the source and skips the import instead.
+    let library_root = unique_test_directory();
+    let external_root = unique_test_directory();
+    let canonical_dir = library_root.join("Unknown Artist").join("Unknown Album");
+    std::fs::create_dir_all(&canonical_dir).expect("create canonical dir");
+    std::fs::create_dir_all(&external_root).expect("create external root");
+    let canonical_path = canonical_dir.join("Track.flac");
+    let source_path = external_root.join("source.flac");
+    std::fs::write(&canonical_path, b"same audio").expect("write library file");
+    std::fs::write(&source_path, b"same audio").expect("write external source");
+
+    let mut settings = UserSettings::with_library_path(Some(library_root.clone()));
+    settings.library.management_mode = LibraryManagementMode::CopyAddedFilesIntoLibrary;
+    let store = Arc::new(InMemoryLibraryStore::new());
+    let stale_hash =
+        sustain_domain::TrackContentHash::new("0".repeat(64)).expect("valid stale hash");
+    let mut existing_track = test_track(track_id(7), "Unknown Artist/Unknown Album/Track.flac");
+    existing_track.content_hash = Some(stale_hash);
+    assert_eq!(store.save_track(existing_track.clone()), Ok(()));
+    let mut runtime =
+        ApplicationRuntime::with_settings_store(Box::new(TestSettingsStore::new(settings)))
+            .expect("load settings")
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+    assert_eq!(
+        runtime.handle_command(ApplicationCommand::AddExternalLibraryItems {
+            paths: vec![source_path]
+        }),
+        Ok(())
+    );
+
+    assert_eq!(runtime.library_tracks(), &[existing_track]);
+    assert!(
+        !canonical_dir.join("Track 2.flac").exists(),
+        "import must not write a byte-identical numbered copy"
+    );
+    assert_eq!(
+        runtime.last_library_import_summary(),
+        Some(&super::LibraryImportSummary {
+            discovered_files: 1,
+            imported_tracks: 0,
+            duplicate_files: 1,
+            cancelled: false,
+        })
+    );
+
+    std::fs::remove_dir_all(library_root).expect("remove library root");
+    std::fs::remove_dir_all(external_root).expect("remove external root");
+}
+
+#[test]
+fn managed_import_skips_strict_exact_duplicate_already_on_disk_without_a_row() {
+    // The disk is ground truth even when the database does not know a
+    // file. After dropping the database, the library folder still holds
+    // every copied file; importing one of those again before a scan
+    // re-indexes it used to find the canonical name free of any row, bump
+    // to a numbered name, and write a byte-identical copy. With no row to
+    // dedup against, the disk-anchored guard in plan_destination catches
+    // the identical occupant and skips it.
+    let library_root = unique_test_directory();
+    let external_root = unique_test_directory();
+    let canonical_dir = library_root.join("Unknown Artist").join("Unknown Album");
+    std::fs::create_dir_all(&canonical_dir).expect("create canonical dir");
+    std::fs::create_dir_all(&external_root).expect("create external root");
+    let canonical_path = canonical_dir.join("Track.flac");
+    let source_path = external_root.join("source.flac");
+    std::fs::write(&canonical_path, b"same audio").expect("write orphan library file");
+    std::fs::write(&source_path, b"same audio").expect("write external source");
+
+    let mut settings = UserSettings::with_library_path(Some(library_root.clone()));
+    settings.library.management_mode = LibraryManagementMode::CopyAddedFilesIntoLibrary;
+    let store = Arc::new(InMemoryLibraryStore::new());
+    let mut runtime =
+        ApplicationRuntime::with_settings_store(Box::new(TestSettingsStore::new(settings)))
+            .expect("load settings")
+            .with_library_services(store, Arc::new(TestMetadataService))
+            .expect("library services initialize");
+
+    assert_eq!(
+        runtime.handle_command(ApplicationCommand::AddExternalLibraryItems {
+            paths: vec![source_path]
+        }),
+        Ok(())
+    );
+
+    assert!(
+        runtime.library_tracks().is_empty(),
+        "an already-present file must not be imported as a new row"
+    );
+    assert!(
+        !canonical_dir.join("Track 2.flac").exists(),
+        "import must not write a byte-identical numbered copy"
+    );
+    assert_eq!(
+        runtime.last_library_import_summary(),
+        Some(&super::LibraryImportSummary {
+            discovered_files: 1,
+            imported_tracks: 0,
+            duplicate_files: 1,
+            cancelled: false,
+        })
+    );
+
+    std::fs::remove_dir_all(library_root).expect("remove library root");
+    std::fs::remove_dir_all(external_root).expect("remove external root");
+}
+
+#[test]
 fn unmanaged_external_import_indexes_library_files_in_place() {
     let library_root = unique_test_directory();
     std::fs::create_dir_all(&library_root).expect("create library root");

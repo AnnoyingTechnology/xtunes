@@ -145,13 +145,21 @@ impl LibraryImportContext {
                 .metadata_service
                 .read_initial_tags(&source_path)
                 .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
-            let plan = plan_destination(
+            let plan = match plan_destination(
                 &planner,
                 &mut occupied_paths,
                 &library_path,
                 &source_path,
                 &metadata,
-            )?;
+                source_size,
+                &content_hash,
+            )? {
+                PlannedManagedDestination::Fresh(plan) => plan,
+                PlannedManagedDestination::AlreadyPresent => {
+                    duplicate_files += 1;
+                    continue;
+                }
+            };
             seen_hashes.insert(content_hash.as_str().to_owned());
             imports.push(PlannedManagedImport {
                 source_path,
@@ -331,10 +339,13 @@ impl LibraryImportContext {
             if track.content_hash.as_ref() == Some(content_hash) {
                 return Ok(true);
             }
-            if track.content_hash.is_some() {
-                continue;
-            }
 
+            // A non-matching or absent stored hash is not conclusive: the
+            // stored hash goes stale because in-place tag edits and online
+            // enrichment rewrite the file without refreshing it. Fall back
+            // to ground truth and compare the bytes on disk whenever the
+            // size matches — the size pre-filter keeps this from hashing
+            // the whole library on every import.
             let track_path = track.location.absolute_path(library_path);
             let Ok(metadata) = fs::metadata(&track_path) else {
                 continue;
@@ -419,13 +430,25 @@ fn cancelled_import_result(discovered_files: usize) -> LibraryImportResult {
     }
 }
 
+/// Outcome of planning a managed destination for an incoming file.
+enum PlannedManagedDestination {
+    /// A free canonical path the file should be copied to.
+    Fresh(sustain_domain::ManagedTrackPathPlan),
+    /// The canonical destination is already occupied on disk by a
+    /// byte-identical file, so the track is already in the library and
+    /// the import must skip it rather than write a numbered copy.
+    AlreadyPresent,
+}
+
 fn plan_destination(
     planner: &ManagedTrackPathPlanner,
     occupied_paths: &mut BTreeSet<sustain_domain::TrackRelativePath>,
     library_path: &Path,
     source_path: &Path,
     metadata: &sustain_domain::TrackMetadata,
-) -> ApplicationRuntimeResult<sustain_domain::ManagedTrackPathPlan> {
+    source_size: u64,
+    content_hash: &TrackContentHash,
+) -> ApplicationRuntimeResult<PlannedManagedDestination> {
     for _attempt in 0..10_000 {
         let plan = planner
             .plan(
@@ -436,15 +459,44 @@ fn plan_destination(
                 occupied_paths,
             )
             .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
-        if library_path.join(plan.relative_path.as_path()).exists() {
+        let candidate = library_path.join(plan.relative_path.as_path());
+        if candidate.exists() {
+            // Disk-anchored strict-exact guard. The hash-based dedup
+            // above trusts the database, which can disagree with the
+            // disk: the row may be absent (dropped database), carry no
+            // hash (added by scan), or carry a stale one (tag edits and
+            // online enrichment rewrite the file without refreshing it).
+            // When any of those let a file that is physically already
+            // here slip through, the planner would otherwise bump to a
+            // numbered name and copy_file_verified would write a
+            // byte-identical duplicate. The occupant on disk is ground
+            // truth: if it matches the source byte for byte, the track
+            // is already in the library, so skip it.
+            if destination_holds_identical_content(&candidate, source_size, content_hash) {
+                return Ok(PlannedManagedDestination::AlreadyPresent);
+            }
             occupied_paths.insert(plan.relative_path);
             continue;
         }
         occupied_paths.insert(plan.relative_path.clone());
-        return Ok(plan);
+        return Ok(PlannedManagedDestination::Fresh(plan));
     }
 
     Err(ApplicationRuntimeError::LibraryImportFailed)
+}
+
+fn destination_holds_identical_content(
+    candidate: &Path,
+    source_size: u64,
+    content_hash: &TrackContentHash,
+) -> bool {
+    let Ok(metadata) = fs::metadata(candidate) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() != source_size {
+        return false;
+    }
+    matches!(hash_file_content(candidate), Ok(hash) if &hash == content_hash)
 }
 
 fn reference_relative_path_for_source(
