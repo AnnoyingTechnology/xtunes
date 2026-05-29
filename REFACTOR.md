@@ -192,7 +192,36 @@ Split into `artwork_loader/{loader.rs, disk_cache.rs, decode.rs}`.
 
 Findings verified by direct comparison of function bodies.
 
-## Two parallel scheduler shells
+## Two parallel scheduler shells — OBSOLETE (schedulers diverged)
+
+> **Resolution (2026-05-29): no harness.** The premise below no longer holds.
+> Since this snapshot the analysis scheduler was rewritten into a
+> multi-threaded `WorkerPool` + `supervisor_loop` with resource-usage presets:
+> it gained a `ResourceUsageChanged` command, a richer `SupervisorState` that
+> threads a `pool` through `drain_commands`/`apply_command`, efficiency-core
+> pinning, and an MPMC dispatch queue. The online scheduler is still a single
+> sequential `worker_loop`. `drain_commands`/`apply_command` now have different
+> signatures, command sets, and state structs — they are no longer identical.
+>
+> A generic `SchedulerHarness` over the *execution loop* would have to either
+> force the online path into a pool model (over-engineering rate-limited
+> network I/O), force the analysis path back into a single loop (a performance
+> regression, forbidden by the perf rules), or abstract over "single-loop vs
+> pool" (a leaky over-abstraction). None is acceptable, so the harness is
+> dropped.
+>
+> What remains genuinely duplicated is narrow: the `SchedulerProgress` enum
+> (identical, and the UI deliberately relies on the shapes matching) and the
+> `ProgressSink`/`TrackUpdatedSink`/`UnixClockFn` aliases, plus the
+> `{ sender, handle }` struct with its byte-identical `shutdown`/`Drop`
+> discipline. These are leaf-level and not worth a generic abstraction given
+> the divergence; left as-is by maintainer decision.
+>
+> `smart_shuffle_scheduler.rs` (added after this snapshot) is a different
+> design entirely — a request-driven async rebuild over `async_channel` — and
+> was never part of this duplication.
+
+The original (now-stale) analysis is preserved below for history.
 
 `crates/app_runtime/src/analysis_scheduler.rs` and
 `crates/app_runtime/src/online_scheduler.rs` share large parts of their
@@ -216,13 +245,6 @@ Verified parallels:
 What actually differs: only the per-iteration work (`process_track`), the
 settings type (`AnalysisSettings` vs `OnlineSettings`), the capabilities
 type, and the thread-name string.
-
-Fix: extract a generic harness — `SchedulerHarness<S: SchedulerJob>` in a
-new `crates/app_runtime/src/scheduler.rs`, where `SchedulerJob` encapsulates
-the per-iteration work, settings type, and progress type. The two concrete
-schedulers become ~150 lines each: just the `process_track` implementation
-and the trait impl. Adding a third background scheduler later becomes a
-single trait impl, not a third 800-line copy.
 
 ## Three `url_encode` functions in `metadata_remote/`
 
@@ -321,9 +343,10 @@ The detail page picks up consistent styling for free.
 4. **`library_store/src/lib.rs`** trait-impl split by table.
 5. **`managed_library.rs`** — extract `journal.rs` and `file_ops.rs` first
    (cleanly self-contained), then split import vs. consolidation.
-6. **Scheduler harness** — by far the biggest architectural win. Sequence
-   after Tier 1 so the per-scheduler test suites are already in sibling
-   files and easy to split between the harness module and the per-job
-   `process_track` modules.
+6. ~~**Scheduler harness**~~ — **obsolete.** The analysis and online
+   schedulers diverged architecturally after this snapshot (see "Two parallel
+   scheduler shells — OBSOLETE" above); a unified execution-loop harness is no
+   longer viable without a regression or a leaky abstraction. Skipped by
+   maintainer decision.
 7. **`main_window.rs`** topic-grouped callback extraction.
 8. **Tier 3** — opportunistic, as those files get touched for feature work.
