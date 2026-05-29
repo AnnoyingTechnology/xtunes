@@ -34,6 +34,7 @@ mod now_playing;
 mod playlists_header;
 mod preferences;
 mod shortcuts;
+mod shuffle_icon;
 mod sidebar;
 mod sidebar_context;
 mod smart_playlist_editor;

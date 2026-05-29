@@ -16,6 +16,7 @@ use super::{
     artwork_color::ArtworkPalette,
     artwork_loader::{ArtworkLoader, ArtworkSource, DecodedArtwork},
     command_controller::SharedCommandController,
+    shuffle_icon::ShuffleShineIcon,
 };
 use model::{
     artist_album_text, playback_position, progress_fraction, remaining_time_text, time_text,
@@ -64,7 +65,7 @@ pub(crate) struct NowPlayingView {
     elapsed: gtk::Label,
     remaining: gtk::Label,
     hit_area: ProgressHitArea,
-    shuffle_icon: gtk::Image,
+    shuffle_icon: ShuffleShineIcon,
     shuffle_button: gtk::Button,
     repeat_icon: gtk::Image,
     repeat_button: gtk::Button,
@@ -121,12 +122,6 @@ struct MarqueeDrawModel {
     x_position: Rc<Cell<f64>>,
     fade_active: Rc<Cell<bool>>,
     style: MarqueeTextStyle,
-}
-
-struct SideStatusControl {
-    widget: gtk::Box,
-    button: gtk::Button,
-    icon: gtk::Image,
 }
 
 const EMPTY_STACK_NAME: &str = "no-track";
@@ -202,15 +197,25 @@ impl NowPlayingView {
 
         let elapsed = time_label();
         let remaining = time_label();
-        let shuffle = side_status("media-playlist-shuffle-symbolic", "Shuffle", &elapsed);
-        let repeat = side_status("media-playlist-repeat-symbolic", "Repeat", &remaining);
+
+        let shuffle_icon =
+            ShuffleShineIcon::new("media-playlist-shuffle-symbolic", NOW_PLAYING_ICON_SIZE);
+        let (shuffle_widget, shuffle_button) =
+            side_status_chrome(&shuffle_icon, "Shuffle", &elapsed);
+
+        let repeat_icon = gtk::Image::from_icon_name("media-playlist-repeat-symbolic");
+        repeat_icon.add_css_class("now-playing-side-icon");
+        repeat_icon.set_pixel_size(NOW_PLAYING_ICON_SIZE);
+        repeat_icon.set_halign(gtk::Align::Center);
+        let (repeat_widget, repeat_button) = side_status_chrome(&repeat_icon, "Repeat", &remaining);
+
         let detail_content = gtk::CenterBox::new();
         detail_content.set_hexpand(true);
         detail_content.set_vexpand(true);
         detail_content.set_valign(gtk::Align::Fill);
-        detail_content.set_start_widget(Some(&shuffle.widget));
+        detail_content.set_start_widget(Some(&shuffle_widget));
         detail_content.set_center_widget(Some(&metadata));
-        detail_content.set_end_widget(Some(&repeat.widget));
+        detail_content.set_end_widget(Some(&repeat_widget));
 
         let duration = Rc::new(Cell::new(Duration::ZERO));
         let hit_area = ProgressHitArea::new(command_controller.clone(), duration.clone());
@@ -248,10 +253,10 @@ impl NowPlayingView {
             elapsed,
             remaining,
             hit_area,
-            shuffle_icon: shuffle.icon,
-            shuffle_button: shuffle.button,
-            repeat_icon: repeat.icon,
-            repeat_button: repeat.button,
+            shuffle_icon,
+            shuffle_button,
+            repeat_icon,
+            repeat_button,
             artwork_box,
             artwork_inner_stack,
             artwork_image,
@@ -951,7 +956,15 @@ fn install_hover_pause(
     area.add_controller(motion);
 }
 
-fn side_status(icon_name: &str, tooltip: &str, time: &gtk::Label) -> SideStatusControl {
+/// Build the shared chrome for a now-playing side control — a centred,
+/// fixed-width column with a flat circular button above its time label —
+/// around an already-built icon widget. The shuffle control passes a
+/// [`ShuffleShineIcon`]; the repeat control passes a plain `gtk::Image`.
+fn side_status_chrome(
+    icon: &impl IsA<gtk::Widget>,
+    tooltip: &str,
+    time: &gtk::Label,
+) -> (gtk::Box, gtk::Button) {
     let status = gtk::Box::new(gtk::Orientation::Vertical, 2);
     status.set_width_request(NOW_PLAYING_SIDE_WIDTH);
     status.set_halign(gtk::Align::Center);
@@ -962,21 +975,12 @@ fn side_status(icon_name: &str, tooltip: &str, time: &gtk::Label) -> SideStatusC
     button.set_tooltip_text(Some(tooltip));
     button.set_halign(gtk::Align::Center);
     button.set_valign(gtk::Align::Center);
-
-    let icon = gtk::Image::from_icon_name(icon_name);
-    icon.add_css_class("now-playing-side-icon");
-    icon.set_pixel_size(NOW_PLAYING_ICON_SIZE);
-    icon.set_halign(gtk::Align::Center);
-    button.set_child(Some(&icon));
+    button.set_child(Some(icon));
 
     status.append(&button);
     status.append(time);
 
-    SideStatusControl {
-        widget: status,
-        button,
-        icon,
-    }
+    (status, button)
 }
 
 fn sync_playback_option_icon(icon: &gtk::Image, enabled: bool) {
@@ -987,24 +991,15 @@ fn sync_playback_option_icon(icon: &gtk::Image, enabled: bool) {
     }
 }
 
-/// Tri-state visual sync for the shuffle icon. The Active class is
-/// shared with Repeat (full opacity), the Smart class layers an
-/// animated accent-coloured gradient sweep on top — both are
-/// declared in `app.css`. Removing both classes is the Off state.
-fn sync_shuffle_icon(icon: &gtk::Image, mode: ShuffleMode) {
+/// Tri-state visual sync for the shuffle icon. Off is the muted glyph,
+/// Pure is the solid accent glyph (sharing the active class with
+/// Repeat), and Smart adds the periodic white reflection sweep owned by
+/// [`ShuffleShineIcon`].
+fn sync_shuffle_icon(icon: &ShuffleShineIcon, mode: ShuffleMode) {
     match mode {
-        ShuffleMode::Off => {
-            icon.remove_css_class("now-playing-side-icon-active");
-            icon.remove_css_class("now-playing-side-icon-smart");
-        }
-        ShuffleMode::Pure => {
-            icon.add_css_class("now-playing-side-icon-active");
-            icon.remove_css_class("now-playing-side-icon-smart");
-        }
-        ShuffleMode::Smart => {
-            icon.add_css_class("now-playing-side-icon-active");
-            icon.add_css_class("now-playing-side-icon-smart");
-        }
+        ShuffleMode::Off => icon.set_mode(false, false),
+        ShuffleMode::Pure => icon.set_mode(true, false),
+        ShuffleMode::Smart => icon.set_mode(true, true),
     }
 }
 
