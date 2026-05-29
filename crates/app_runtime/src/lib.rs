@@ -1207,6 +1207,18 @@ impl ApplicationRuntime {
         }
     }
 
+    /// Notify the installed [`TrackDataObserver`] that the persisted
+    /// state of a single track changed under it. Callers must have
+    /// already refreshed the matching entry in `library_tracks` so the
+    /// observer reads the new values when it defers back into the
+    /// runtime. Same re-entrancy contract as the other observers: the
+    /// closure must not synchronously re-enter the runtime.
+    pub(crate) fn fire_track_data_observer(&self, track_id: TrackId) {
+        if let Some(observer) = &self.track_data_observer {
+            observer(track_id);
+        }
+    }
+
     /// Reload the named track from the library store, replace its
     /// entry in `library_tracks` (preserving sort order: the vec is
     /// kept sorted by id and we never reorder), and fire the
@@ -1242,9 +1254,7 @@ impl ApplicationRuntime {
                 .unwrap_or_else(|index| index);
             self.library_tracks.insert(insertion, refreshed);
         }
-        if let Some(observer) = &self.track_data_observer {
-            observer(track_id);
-        }
+        self.fire_track_data_observer(track_id);
     }
 
     pub fn playback_state(&self) -> PlaybackState {
@@ -4887,6 +4897,69 @@ mod tests {
         assert_eq!(
             track.statistics.play_count, 1,
             "play must register exactly once per session"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test library");
+    }
+
+    #[test]
+    fn registering_a_play_fires_track_data_observer() {
+        // Regression for issue #46: committing a play increment must
+        // notify the UI so the table row repaints its play-count and
+        // last-played columns live, rather than only after a restart.
+        let root = unique_test_directory();
+        std::fs::create_dir_all(&root).expect("create test library");
+        std::fs::write(root.join("song.flac"), b"not real audio").expect("write fake track");
+
+        let store = Arc::new(InMemoryLibraryStore::new());
+        let id = track_id(1);
+        let mut track = test_track(id, "song.flac");
+        track.metadata.duration = Some(std::time::Duration::from_secs(60));
+        assert_eq!(store.save_track(track), Ok(()));
+
+        let mut runtime = ApplicationRuntime::with_settings_store(Box::new(
+            TestSettingsStore::new(UserSettings::with_library_path(Some(root.clone()))),
+        ))
+        .expect("load settings")
+        .with_library_services(store, Arc::new(TestMetadataService))
+        .expect("library services initialize")
+        .with_playback_service(Box::new(NullPlaybackService::new()));
+
+        let observed: Arc<std::sync::Mutex<Vec<TrackId>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_clone = observed.clone();
+        runtime.set_track_data_observer(Box::new(move |id| {
+            observed_clone.lock().expect("lock").push(id);
+        }));
+
+        runtime
+            .handle_command(ApplicationCommand::Playback(PlaybackCommand::PlayTrack {
+                track_id: id,
+                queue: PlaybackQueueRequest::Library,
+            }))
+            .expect("play track");
+
+        // Ticks below the 30s threshold mutate no statistics, so the
+        // observer must stay silent.
+        for _ in 0..29 {
+            runtime
+                .on_playback_tick(std::time::Duration::from_secs(1))
+                .expect("tick");
+        }
+        assert!(
+            observed.lock().expect("lock").is_empty(),
+            "observer must not fire before a play is committed"
+        );
+
+        // The tick that crosses the threshold commits the play and must
+        // notify the observer exactly once, for the played track.
+        runtime
+            .on_playback_tick(std::time::Duration::from_secs(1))
+            .expect("tick that crosses threshold");
+        assert_eq!(
+            observed.lock().expect("lock").as_slice(),
+            &[id],
+            "committing a play must fire the data observer for that track"
         );
 
         std::fs::remove_dir_all(root).expect("remove test library");
