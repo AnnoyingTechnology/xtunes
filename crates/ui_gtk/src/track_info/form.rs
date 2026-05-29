@@ -62,6 +62,10 @@ pub(super) fn attach_readonly_field(grid: &gtk::Grid, row: i32, label_text: &str
 pub(super) fn text_entry(initial: Option<&str>) -> gtk::Entry {
     let entry = gtk::Entry::new();
     entry.set_hexpand(true);
+    // Enter in any single-line field commits the dialog via its default
+    // widget (the OK button); multi-line TextViews never activate the
+    // default, so they keep inserting newlines. See issue #57.
+    entry.set_activates_default(true);
     if let Some(text) = initial {
         entry.set_text(text);
     }
@@ -74,6 +78,7 @@ pub(super) fn number_entry<T: ToString>(initial: Option<T>, width_chars: i32) ->
     entry.set_max_width_chars(width_chars);
     entry.set_hexpand(false);
     entry.set_halign(gtk::Align::Start);
+    entry.set_activates_default(true);
     if let Some(value) = initial {
         entry.set_text(&value.to_string());
     }

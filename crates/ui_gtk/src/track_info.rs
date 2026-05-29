@@ -125,6 +125,11 @@ pub(crate) fn open_track_info_dialog(
 
     window.set_child(Some(&outer));
 
+    // Make OK the dialog's default action so Enter in any single-line
+    // field commits the edits (issue #57). The entries opt in via
+    // `set_activates_default` in their form factories.
+    window.set_default_widget(Some(&ok));
+
     let window_for_cancel = window.clone();
     cancel.connect_clicked(move |_| {
         window_for_cancel.close();
