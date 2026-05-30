@@ -6,3 +6,16 @@ trun = "trun"
 # `mis-` prefix (`mis-reported`, `mis-spelled`, ...) trip on the bare
 # token `mis`, which it wants to "correct" to `miss`/`mist`.
 mis = "mis"
+# A Pioneer path-hash test vector reproduces a real on-disk filename
+# verbatim ("This Is The Begining.mp3"). The expected hash is computed
+# over that exact byte sequence, so the original misspelling must stay.
+begining = "begining"
+# Valid English ("cannot be parsed"); `typos` only prefers "unparsable".
+unparseable = "unparseable"
+# GLib/GTK emits CRITICAL log messages, referred to as "criticals" in the
+# GTK world — not a misspelling of the adjective "critical".
+criticals = "criticals"
+# The seek-operation past tense as used throughout the decoder (`let
+# seeked = ...`, "seeked to"); idiomatic in code even though English
+# prefers "sought".
+seeked = "seeked"
