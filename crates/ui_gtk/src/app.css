@@ -171,6 +171,19 @@ button.now-playing-side-button:focus {
     font-size: 0.9em;
 }
 
+/* Smart Shuffle index readout (Shuffle preferences tab): a centred status
+   block whose headline + tick badge announce readiness above an
+   emphasised one-line summary; the last-rebuild line below picks up the
+   muted .preference-helper styling. */
+.shuffle-index-headline {
+    font-size: 1.25em;
+    font-weight: 600;
+}
+
+.shuffle-index-stats {
+    font-size: 1.1em;
+}
+
 .preference-close-button {
     background: transparent;
     border: none;

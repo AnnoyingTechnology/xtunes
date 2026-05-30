@@ -75,37 +75,65 @@ fn build_index_status_section(
     window: &gtk::Window,
     command_controller: SharedCommandController,
 ) -> gtk::Widget {
-    let container = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    // Read-only status, centred as a small summary block. The index
+    // rebuilds itself on the events that actually change it (library scan,
+    // audio-analysis coverage, app launch), so there is nothing to
+    // schedule and no button to press — this just reports the current
+    // state. The badge mirrors the Pioneer export panel's vocabulary (see
+    // `analysis_status_row` in `device_panel`): a green tick when the index
+    // is ready, an amber mark when there is none yet.
+    let container = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    container.set_halign(gtk::Align::Center);
 
-    let header = gtk::Label::new(Some("Index"));
-    header.set_xalign(0.0);
-    container.append(&header);
+    let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    status_row.set_halign(gtk::Align::Center);
 
-    // Read-only status. The index rebuilds itself on the events that
-    // actually change it (library scan, audio-analysis coverage, app
-    // launch), so there is nothing to schedule and no button to press —
-    // this section just reports the current state.
-    let status_caption = gtk::Label::new(None);
-    status_caption.add_css_class("preference-helper");
-    status_caption.set_xalign(0.0);
-    status_caption.set_wrap(true);
-    status_caption.set_natural_wrap_mode(gtk::NaturalWrapMode::Word);
-    status_caption.set_width_chars(HELPER_MIN_WIDTH_CHARS);
-    status_caption.set_max_width_chars(HELPER_MAX_WIDTH_CHARS);
-    container.append(&status_caption);
+    let badge = gtk::Image::new();
+    badge.set_pixel_size(18);
+    badge.set_valign(gtk::Align::Center);
+    status_row.append(&badge);
+
+    let headline = gtk::Label::new(None);
+    headline.add_css_class("shuffle-index-headline");
+    status_row.append(&headline);
+    container.append(&status_row);
+
+    let stats = gtk::Label::new(None);
+    stats.add_css_class("shuffle-index-stats");
+    stats.set_justify(gtk::Justification::Center);
+    container.append(&stats);
+
+    let muted = gtk::Label::new(None);
+    muted.add_css_class("preference-helper");
+    muted.set_justify(gtk::Justification::Center);
+    muted.set_wrap(true);
+    muted.set_natural_wrap_mode(gtk::NaturalWrapMode::Word);
+    muted.set_width_chars(HELPER_MIN_WIDTH_CHARS);
+    muted.set_max_width_chars(HELPER_MAX_WIDTH_CHARS);
+    container.append(&muted);
 
     // Live state refresh, driven by the runtime's smart-shuffle state
     // observer. Each fire goes through `idle_add_local_once` because
     // the runtime is mid-borrow when its `apply_smart_shuffle_rebuild_result`
     // emits the signal — we must not re-borrow synchronously.
     let runtime_for_refresh = command_controller.runtime();
-    let caption_for_refresh = status_caption.clone();
+    let badge_for_refresh = badge.clone();
+    let headline_for_refresh = headline.clone();
+    let stats_for_refresh = stats.clone();
+    let muted_for_refresh = muted.clone();
     let refresh: Rc<dyn Fn()> = Rc::new(move || {
         let runtime = runtime_for_refresh.borrow();
         let is_rebuilding = runtime.smart_shuffle_is_rebuilding();
         let metadata = runtime.smart_shuffle_metadata();
         let index_loaded = runtime.smart_shuffle_index_is_loaded();
-        caption_for_refresh.set_text(&status_caption_text(is_rebuilding, index_loaded, metadata));
+        drop(runtime);
+        apply_index_status(
+            &badge_for_refresh,
+            &headline_for_refresh,
+            &stats_for_refresh,
+            &muted_for_refresh,
+            index_status(is_rebuilding, index_loaded, metadata),
+        );
     });
     refresh();
 
@@ -235,47 +263,130 @@ fn entropy_caption(entropy: SmartShuffleEntropy) -> &'static str {
     }
 }
 
-/// The status caption beneath the rebuild controls. Reports reality
-/// (§12): whether the index is ready, how many tracks it covers, how
-/// much of the library has audio analysis, and when it was last
-/// rebuilt — never "trained", because nothing is trained.
-fn status_caption_text(
+/// The index readout's visual state, mirroring the Pioneer export
+/// panel's badge vocabulary: a green tick when the index is ready, an
+/// amber mark when there is none yet, plus a neutral state for the brief
+/// window a rebuild is running.
+enum IndexBadge {
+    Ready,
+    Rebuilding,
+    Unbuilt,
+}
+
+/// A badge variant, a headline, an emphasised one-line summary, and a
+/// muted line beneath it. `stats` and `muted` are absent in states that
+/// have nothing to put there.
+struct IndexStatus {
+    badge: IndexBadge,
+    headline: String,
+    stats: Option<String>,
+    muted: Option<String>,
+}
+
+/// Compute the index status. Reports reality (§12): whether the index is
+/// ready, how many tracks it covers, how much of the library has audio
+/// analysis, and when it was last rebuilt — never "trained", because
+/// nothing is trained.
+fn index_status(
     is_rebuilding: bool,
     index_loaded: bool,
     metadata: Option<SmartShuffleIndexMetadata>,
-) -> String {
+) -> IndexStatus {
     if is_rebuilding {
-        return "Rebuilding the Smart Shuffle index — this usually takes a moment.".to_owned();
+        return IndexStatus {
+            badge: IndexBadge::Rebuilding,
+            headline: "Rebuilding the Smart Shuffle index…".to_owned(),
+            stats: None,
+            muted: Some("This usually takes a moment.".to_owned()),
+        };
     }
     match (index_loaded, metadata) {
-        (true, Some(meta)) => {
-            let mut lines = vec![
-                "Smart Shuffle ready.".to_owned(),
-                format!(
-                    "Library indexed: {} tracks",
-                    group_thousands(meta.indexed_track_count)
-                ),
-                // Framed as an *optional enhancement*, not a measure of
-                // whether Smart Shuffle works: the core scorer runs on
-                // tag features (genre, tempo, key, year, …) at 0%
-                // coverage. This line reports how much of the library
-                // has the heavier audio analysis (loudness, timbre) that
-                // sharpens continuity — so "0%" reads as "not enhanced
-                // yet", not "relies on nothing".
-                format!(
-                    "Audio-enhanced coverage: {}%",
-                    (meta.analysis_coverage * 100.0).round() as i64
-                ),
-            ];
-            if let Some(when) = format_system_time_short(meta.built_at) {
-                lines.push(format!("Last index rebuild: {when}"));
-            }
-            lines.join("\n")
+        (true, Some(meta)) => IndexStatus {
+            badge: IndexBadge::Ready,
+            headline: "Smart Shuffle ready.".to_owned(),
+            // One emphasised line: track count plus the audio-enhanced
+            // coverage in parentheses. Coverage is an *optional
+            // enhancement*, not a measure of whether Smart Shuffle works —
+            // the core scorer runs on tag features (genre, tempo, key,
+            // year, …) at 0% coverage; this percentage is how much of the
+            // library also has the heavier audio analysis (loudness,
+            // timbre) that sharpens continuity.
+            stats: Some(format!(
+                "{} tracks indexed ({}%)",
+                group_thousands(meta.indexed_track_count),
+                (meta.analysis_coverage * 100.0).round() as i64
+            )),
+            muted: format_system_time_short(meta.built_at)
+                .map(|when| format!("Last index rebuild: {when}")),
+        },
+        _ => IndexStatus {
+            badge: IndexBadge::Unbuilt,
+            headline: "Smart Shuffle index not built yet.".to_owned(),
+            stats: None,
+            muted: Some(
+                "It builds the first time you turn Smart Shuffle on, then refreshes \
+                 whenever your library or its analysis changes."
+                    .to_owned(),
+            ),
+        },
+    }
+}
+
+/// Push an [`IndexStatus`] onto the badge / headline / stats / muted
+/// widgets, swapping the badge icon and the semantic colour classes so
+/// the row matches the Pioneer panel's tick / mark styling. The stats and
+/// muted labels are hidden when the state has no text for them.
+fn apply_index_status(
+    badge: &gtk::Image,
+    headline: &gtk::Label,
+    stats: &gtk::Label,
+    muted: &gtk::Label,
+    status: IndexStatus,
+) {
+    headline.set_text(&status.headline);
+    set_optional_label(stats, status.stats.as_deref());
+    set_optional_label(muted, status.muted.as_deref());
+
+    for class in ["device-analysis-badge", "ok", "warn", "dim-label"] {
+        badge.remove_css_class(class);
+    }
+    for class in ["device-analysis-ok", "device-analysis-warn"] {
+        headline.remove_css_class(class);
+    }
+
+    match status.badge {
+        IndexBadge::Ready => {
+            badge.set_icon_name(Some("object-select-symbolic"));
+            badge.add_css_class("device-analysis-badge");
+            badge.add_css_class("ok");
+            headline.add_css_class("device-analysis-ok");
         }
-        _ => "Smart Shuffle hasn't built its index yet — it will the first time you turn \
-              Smart Shuffle on, and refresh itself whenever your library or its analysis \
-              changes."
-            .to_owned(),
+        IndexBadge::Unbuilt => {
+            badge.set_icon_name(Some("emblem-important-symbolic"));
+            badge.add_css_class("device-analysis-badge");
+            badge.add_css_class("warn");
+            headline.add_css_class("device-analysis-warn");
+        }
+        IndexBadge::Rebuilding => {
+            // No filled disc here: a plain, dim refresh glyph. The badge
+            // classes recolour the symbol to the base colour for contrast
+            // against the coloured disc, which would make a disc-less icon
+            // invisible — so we leave them off.
+            badge.set_icon_name(Some("view-refresh-symbolic"));
+            badge.add_css_class("dim-label");
+        }
+    }
+}
+
+/// Set a label's text, hiding it entirely when there is none so it
+/// claims no vertical space in the column.
+fn set_optional_label(label: &gtk::Label, text: Option<&str>) {
+    match text {
+        Some(text) => {
+            label.set_text(text);
+            label.set_visible(true);
+        }
+        None => label.set_visible(false),
     }
 }
 
