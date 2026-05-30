@@ -476,6 +476,7 @@ pub(crate) fn build_main_window(
         playlists_dirty: &playlists_dirty,
         visible_summary_refresh: visible_summary_refresh.clone(),
         current_search_text: &current_search_text,
+        device_panel: &device_panel,
     });
     track_row_changed_holder.replace(Some(track_row_changed));
     install_metadata_write_result_consumer(

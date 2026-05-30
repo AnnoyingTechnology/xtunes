@@ -15,14 +15,15 @@
 //! lane, so the panel never schedules its own timers or pokes the status
 //! bar.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 
 use sustain_app_runtime::{
-    ApplicationCommand, ConnectedDevice, DeviceLayout, FilesPerFolderCap, PlaylistItem,
+    ApplicationCommand, ConnectedDevice, DeviceAnalysisReadiness, DeviceLayout, FilesPerFolderCap,
+    PlaylistItem,
 };
 
 use crate::SharedRuntime;
@@ -47,6 +48,15 @@ pub(crate) struct DeviceSyncPanel {
     /// show, selection toggle, and forget so the summary tracks the
     /// device's selected content instead of a stale earlier view.
     on_summary_refresh: Rc<RefCell<Option<SummaryRefresh>>>,
+    /// The Pioneer "Analysis" readiness box, when the current view shows a
+    /// Pioneer device. Held so a background analysis completion can refill
+    /// the BPM/Key/Waveform rows in place without rebuilding the panel.
+    /// `None` for other layouts (or no device shown).
+    readiness_section: Rc<RefCell<Option<gtk::Box>>>,
+    /// Set while an analysis-driven readiness refresh is already queued for
+    /// the next idle, so a burst of per-track completions collapses into a
+    /// single recompute instead of one O(selection) pass per track.
+    readiness_refresh_queued: Rc<Cell<bool>>,
     runtime: SharedRuntime,
     command_controller: SharedCommandController,
 }
@@ -77,6 +87,8 @@ impl DeviceSyncPanel {
             bottom_bar,
             current_device: Rc::new(RefCell::new(None)),
             on_summary_refresh: Rc::new(RefCell::new(None)),
+            readiness_section: Rc::new(RefCell::new(None)),
+            readiness_refresh_queued: Rc::new(Cell::new(false)),
             runtime,
             command_controller,
         }
@@ -124,6 +136,9 @@ impl DeviceSyncPanel {
 
     fn rebuild(&self, device: &ConnectedDevice) {
         Self::clear(&self.body);
+        // The readiness box belongs to the view we are about to discard;
+        // `append_pioneer_readiness` re-establishes it for Pioneer layouts.
+        self.readiness_section.replace(None);
 
         let config = self
             .runtime
@@ -173,25 +188,37 @@ impl DeviceSyncPanel {
         settings_column.set_valign(gtk::Align::Start);
         settings_column.set_size_request(SETTINGS_COLUMN_WIDTH, -1);
         settings_column.append(&section_label("On-drive format"));
-        let layout_labels: Vec<&str> = DeviceLayout::ALL.iter().map(|l| l.label()).collect();
-        let layout_dropdown = gtk::DropDown::from_strings(&layout_labels);
-        layout_dropdown.set_selected(config.layout.as_db() as u32);
-        {
-            let panel = self.clone();
-            let device = device.clone();
-            layout_dropdown.connect_selected_notify(move |dropdown| {
-                if let Some(layout) = DeviceLayout::ALL.get(dropdown.selected() as usize).copied() {
-                    panel.command_controller.dispatch_succeeded(
-                        ApplicationCommand::SetDeviceLayout {
-                            device_id: device.id.clone(),
-                            layout,
-                        },
-                    );
-                    panel.rebuild(&device);
-                }
-            });
+        let format_group = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let mut anchor: Option<gtk::CheckButton> = None;
+        for layout in DeviceLayout::ALL {
+            let radio = gtk::CheckButton::with_label(layout.label());
+            match &anchor {
+                Some(first) => radio.set_group(Some(first)),
+                None => anchor = Some(radio.clone()),
+            }
+            // Set state before wiring the handler so this construction-time
+            // activation does not dispatch a redundant command.
+            radio.set_active(layout == config.layout);
+            {
+                let panel = self.clone();
+                let device = device.clone();
+                radio.connect_toggled(move |radio| {
+                    // A group emits two toggles per switch (off + on); act
+                    // only on the one that became active.
+                    if radio.is_active() {
+                        panel.command_controller.dispatch_succeeded(
+                            ApplicationCommand::SetDeviceLayout {
+                                device_id: device.id.clone(),
+                                layout,
+                            },
+                        );
+                        panel.rebuild(&device);
+                    }
+                });
+            }
+            format_group.append(&radio);
         }
-        settings_column.append(&layout_dropdown);
+        settings_column.append(&format_group);
         match config.layout {
             DeviceLayout::FolderPerPlaylist => {
                 self.append_folder_cap(&settings_column, device, config.files_per_folder_cap)
@@ -213,47 +240,63 @@ impl DeviceSyncPanel {
         current: FilesPerFolderCap,
     ) {
         container.append(&section_label("Files per folder"));
-        let labels: Vec<&str> = FilesPerFolderCap::ALL.iter().map(|c| c.label()).collect();
-        let dropdown = gtk::DropDown::from_strings(&labels);
-        let selected = FilesPerFolderCap::ALL
-            .iter()
-            .position(|c| *c == current)
-            .unwrap_or(0) as u32;
-        dropdown.set_selected(selected);
-        {
-            let panel = self.clone();
-            let device = device.clone();
-            dropdown.connect_selected_notify(move |dropdown| {
-                if let Some(cap) = FilesPerFolderCap::ALL
-                    .get(dropdown.selected() as usize)
-                    .copied()
-                {
-                    panel.command_controller.dispatch_succeeded(
-                        ApplicationCommand::SetDeviceFilesPerFolderCap {
-                            device_id: device.id.clone(),
-                            cap,
-                        },
-                    );
-                }
-            });
+        let caption = gtk::Label::new(Some("Before chunking into numbered subfolders."));
+        caption.set_xalign(0.0);
+        caption.set_wrap(true);
+        caption.add_css_class("dim-label");
+        container.append(&caption);
+
+        let cap_group = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let mut anchor: Option<gtk::CheckButton> = None;
+        for cap in FilesPerFolderCap::ALL {
+            let radio = gtk::CheckButton::with_label(cap.label());
+            match &anchor {
+                Some(first) => radio.set_group(Some(first)),
+                None => anchor = Some(radio.clone()),
+            }
+            // Set state before wiring the handler so this construction-time
+            // activation does not dispatch a redundant command.
+            radio.set_active(cap == current);
+            {
+                let panel = self.clone();
+                let device = device.clone();
+                radio.connect_toggled(move |radio| {
+                    // A group emits two toggles per switch (off + on); act
+                    // only on the one that became active.
+                    if radio.is_active() {
+                        panel.command_controller.dispatch_succeeded(
+                            ApplicationCommand::SetDeviceFilesPerFolderCap {
+                                device_id: device.id.clone(),
+                                cap,
+                            },
+                        );
+                    }
+                });
+            }
+            cap_group.append(&radio);
         }
-        container.append(&dropdown);
+        container.append(&cap_group);
     }
 
     fn append_pioneer_readiness(&self, container: &gtk::Box, device: &ConnectedDevice) {
+        let section = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        self.populate_pioneer_readiness(&section, device);
+        container.append(&section);
+        // Retain the box so a background analysis completion can refill it
+        // in place (see [`refresh_readiness`]).
+        self.readiness_section.replace(Some(section));
+    }
+
+    /// Fill (or refill) the Pioneer "Analysis" section: a status row per
+    /// metric — BPM / Key / Waveform — and the Analyse action. We surface
+    /// only what is complete vs missing; a total count is noise here.
+    fn populate_pioneer_readiness(&self, section: &gtk::Box, device: &ConnectedDevice) {
+        Self::clear(section);
         let readiness = self.runtime.borrow().device_analysis_readiness(&device.id);
-        container.append(&section_label("Analysis"));
-        let summary = gtk::Label::new(Some(&format!(
-            "{} tracks · {} missing BPM · {} key · {} waveform",
-            readiness.total,
-            readiness.missing_bpm,
-            readiness.missing_key,
-            readiness.missing_waveform,
-        )));
-        summary.set_xalign(0.0);
-        summary.set_wrap(true);
-        summary.add_css_class("dim-label");
-        container.append(&summary);
+        section.append(&section_label("Analysis"));
+        section.append(&analysis_status_row("BPM", readiness.missing_bpm));
+        section.append(&analysis_status_row("Key", readiness.missing_key));
+        section.append(&analysis_status_row("Waveform", readiness.missing_waveform));
 
         let analyse =
             gtk::Button::with_label(&format!("Analyse {} missing tracks", readiness.analyzable));
@@ -270,7 +313,46 @@ impl DeviceSyncPanel {
                 );
             });
         }
-        container.append(&analyse);
+        section.append(&analyse);
+    }
+
+    /// Refill every part of the view that derives from the current
+    /// selection and analysis state: the Pioneer readiness rows (when a
+    /// Pioneer device is shown) and the bottom bar (occupation meter +
+    /// pre-sync warning, both of which read the live counts). One entry
+    /// point so a selection toggle and a background analysis completion
+    /// can never refresh one fragment and forget the other.
+    fn refresh_selection_derived(&self, device: &ConnectedDevice) {
+        if let Some(section) = self.readiness_section.borrow().clone() {
+            self.populate_pioneer_readiness(&section, device);
+        }
+        self.refresh_bottom_bar(device);
+    }
+
+    /// Recompute readiness after a background analysis run touches a track,
+    /// so the BPM/Key/Waveform rows and the pre-sync warning track reality
+    /// as the run progresses. A cheap no-op unless a Pioneer device view is
+    /// actually on screen. The recompute is coalesced onto the next idle so
+    /// a sweep of many completions costs one O(selection) pass, not one per
+    /// track.
+    pub(crate) fn refresh_readiness(&self) {
+        if !self.root.is_mapped() || self.readiness_section.borrow().is_none() {
+            return;
+        }
+        if self.readiness_refresh_queued.replace(true) {
+            return;
+        }
+        let panel = self.clone();
+        glib::idle_add_local_once(move || {
+            panel.readiness_refresh_queued.set(false);
+            // The view may have changed between scheduling and now.
+            if !panel.root.is_mapped() || panel.readiness_section.borrow().is_none() {
+                return;
+            }
+            if let Some(device) = panel.current_device.borrow().clone() {
+                panel.refresh_selection_derived(&device);
+            }
+        });
     }
 
     fn build_playlist_container(&self, device: &ConnectedDevice) -> gtk::Box {
@@ -327,11 +409,11 @@ impl DeviceSyncPanel {
                         selection,
                     },
                 );
-                // Re-evaluate occupation + the Sync action for the new
-                // selection, in place — never touching this checklist.
-                panel.refresh_bottom_bar(&device);
-                // The status-bar summary reflects the device's selected
-                // content, so it changes with every toggle too.
+                // The new selection changes occupation, the Sync action,
+                // the Pioneer readiness counts and the status-bar summary —
+                // refresh all of them in place, never touching this
+                // checklist.
+                panel.refresh_selection_derived(&device);
                 panel.fire_summary_refresh();
             });
         }
@@ -353,6 +435,18 @@ impl DeviceSyncPanel {
         let runtime = self.runtime.borrow();
         let plan = runtime.device_sync_plan(&device.id);
         let capacity = runtime.mount_capacity(&device.mount_path);
+        // Pioneer hardware reads BPM/key/waveforms from the export, so warn
+        // before syncing a selection that has gaps. Other layouts carry no
+        // such data, so the readiness is irrelevant and left at zero.
+        let is_pioneer = runtime
+            .device_config(&device.id)
+            .map(|config| config.layout == DeviceLayout::Pioneer)
+            .unwrap_or(false);
+        let readiness = if is_pioneer {
+            runtime.device_analysis_readiness(&device.id)
+        } else {
+            DeviceAnalysisReadiness::default()
+        };
         drop(runtime);
 
         let selected_bytes = plan.as_ref().map(|p| p.bytes_total).unwrap_or(0);
@@ -434,6 +528,12 @@ impl DeviceSyncPanel {
             let root = self.root.clone();
             let device_id = device.id.clone();
             let remove_count = plan.as_ref().map(|p| p.to_remove.len()).unwrap_or(0);
+            let warnings = PreSyncWarnings {
+                missing_bpm: readiness.missing_bpm,
+                missing_key: readiness.missing_key,
+                missing_waveform: readiness.missing_waveform,
+                remove_count,
+            };
             sync.connect_clicked(move |_| {
                 let dispatch = {
                     let command_controller = command_controller.clone();
@@ -445,17 +545,17 @@ impl DeviceSyncPanel {
                         });
                     }
                 };
-                // Removals are destructive, so confirm before a sync that
-                // would delete tracks the device no longer needs.
-                if remove_count > 0 {
+                // Confirm before a sync that would delete stale tracks
+                // (destructive) or leave analysis gaps on Pioneer hardware.
+                if warnings.needs_dialog() {
                     match root.root().and_downcast::<gtk::Window>() {
                         Some(parent) => {
-                            confirm_sync_removals(&parent, remove_count, move || dispatch(true));
+                            confirm_sync(&parent, warnings, move || dispatch(true));
                         }
                         // No window to host the dialog (should not happen
-                        // while visible): sync the additions, keep stale
-                        // files rather than deleting without consent.
-                        None => dispatch(false),
+                        // while visible): proceed, but keep stale files
+                        // rather than deleting without consent.
+                        None => dispatch(warnings.remove_count == 0),
                     }
                 } else {
                     dispatch(true);
@@ -473,6 +573,50 @@ fn section_label(text: &str) -> gtk::Label {
     label.set_xalign(0.0);
     label.set_margin_top(8);
     label
+}
+
+/// One per-metric analysis-coverage row for the Pioneer export panel:
+/// the metric name, a round status badge — a green tick when complete or
+/// an amber mark when not — and the matching caption. Pioneer hardware
+/// reads BPM, key and waveforms from the export, so a gap here is a gap
+/// on the player.
+fn analysis_status_row(name: &str, missing: usize) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+
+    let name_label = gtk::Label::new(Some(name));
+    name_label.set_xalign(0.0);
+    name_label.set_width_chars(9);
+    name_label.add_css_class("dim-label");
+    row.append(&name_label);
+
+    let (icon, badge_class, text, text_class) = if missing == 0 {
+        (
+            "object-select-symbolic",
+            "ok",
+            "Complete".to_owned(),
+            "device-analysis-ok",
+        )
+    } else {
+        (
+            "emblem-important-symbolic",
+            "warn",
+            format!("{missing} missing"),
+            "device-analysis-warn",
+        )
+    };
+
+    let badge = gtk::Image::from_icon_name(icon);
+    badge.set_pixel_size(12);
+    badge.add_css_class("device-analysis-badge");
+    badge.add_css_class(badge_class);
+    row.append(&badge);
+
+    let status = gtk::Label::new(Some(&text));
+    status.set_xalign(0.0);
+    status.add_css_class(text_class);
+    row.append(&status);
+
+    row
 }
 
 /// Width of the right-hand settings column.
@@ -573,15 +717,75 @@ fn occupation_bar(segments: Vec<BarSegment>, text: &str, over_capacity: bool) ->
     frame.upcast()
 }
 
-/// Confirm a sync that would delete `remove_count` stale tracks from the
-/// device. Mirrors the trash-confirmation dialog: a small modal with
-/// Cancel as the default. `on_confirm` fires only on the destructive
-/// button.
-fn confirm_sync_removals(
-    parent: &gtk::Window,
+/// What the user should be told before a sync proceeds. A removal count
+/// (stale tracks that would be deleted — destructive) and the Pioneer
+/// analysis gaps (BPM/key/waveform the hardware will show as missing).
+/// Zero across the board means no dialog is needed.
+#[derive(Clone, Copy)]
+struct PreSyncWarnings {
+    missing_bpm: usize,
+    missing_key: usize,
+    missing_waveform: usize,
     remove_count: usize,
-    on_confirm: impl Fn() + 'static,
-) {
+}
+
+impl PreSyncWarnings {
+    /// Whether any selected track lacks BPM, key or waveform analysis.
+    fn analysis_incomplete(&self) -> bool {
+        self.missing_bpm + self.missing_key + self.missing_waveform > 0
+    }
+
+    /// Whether the sync warrants a confirmation modal at all.
+    fn needs_dialog(&self) -> bool {
+        self.remove_count > 0 || self.analysis_incomplete()
+    }
+
+    /// The caution sentence about analysis gaps, or `None` when complete.
+    fn analysis_sentence(&self) -> Option<String> {
+        if !self.analysis_incomplete() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if self.missing_bpm > 0 {
+            parts.push(format!("{} missing BPM", self.missing_bpm));
+        }
+        if self.missing_key > 0 {
+            parts.push(format!("{} missing key", self.missing_key));
+        }
+        if self.missing_waveform > 0 {
+            parts.push(format!("{} missing waveform", self.missing_waveform));
+        }
+        Some(format!(
+            "Some selected tracks are not fully analysed ({}). They will still sync, \
+             but that information will be missing on Pioneer players. Run Analyse first \
+             to fill the gaps.",
+            parts.join(", "),
+        ))
+    }
+
+    /// The destructive sentence about stale removals, or `None`.
+    fn removal_sentence(&self) -> Option<String> {
+        if self.remove_count == 0 {
+            return None;
+        }
+        Some(format!(
+            "Syncing will remove {} {} from this device that {} no longer in your selected playlists.",
+            self.remove_count,
+            if self.remove_count == 1 {
+                "track"
+            } else {
+                "tracks"
+            },
+            if self.remove_count == 1 { "is" } else { "are" },
+        ))
+    }
+}
+
+/// Confirm a sync that has something the user should weigh first: stale
+/// removals (destructive) and/or Pioneer analysis gaps (a caution).
+/// Mirrors the trash-confirmation dialog: a small modal with Cancel as
+/// the default. `on_confirm` fires only on the proceed button.
+fn confirm_sync(parent: &gtk::Window, warnings: PreSyncWarnings, on_confirm: impl Fn() + 'static) {
     let window = gtk::Window::builder()
         .title("Sync device")
         .transient_for(parent)
@@ -596,23 +800,34 @@ fn confirm_sync_removals(
     content.set_margin_bottom(18);
     content.set_margin_start(18);
 
-    let detail = gtk::Label::new(Some(&format!(
-        "Syncing will remove {} {} from this device that {} no longer in your selected playlists.",
-        remove_count,
-        if remove_count == 1 { "track" } else { "tracks" },
-        if remove_count == 1 { "is" } else { "are" },
-    )));
-    detail.add_css_class("dim-label");
-    detail.set_xalign(0.0);
-    detail.set_wrap(true);
-    content.append(&detail);
+    // Analysis caution first (informational), then the removal warning
+    // (destructive) closest to the action buttons.
+    for sentence in [warnings.analysis_sentence(), warnings.removal_sentence()]
+        .into_iter()
+        .flatten()
+    {
+        let detail = gtk::Label::new(Some(&sentence));
+        detail.add_css_class("dim-label");
+        detail.set_xalign(0.0);
+        detail.set_wrap(true);
+        content.append(&detail);
+    }
 
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     buttons.set_halign(gtk::Align::End);
 
     let cancel = gtk::Button::with_label("Cancel");
-    let confirm = gtk::Button::with_label("Sync and remove");
-    confirm.add_css_class("destructive-action");
+    // Removals delete files, so that path keeps the destructive styling and
+    // wording; an analysis-only caution is a plain "proceed anyway".
+    let confirm = if warnings.remove_count > 0 {
+        let button = gtk::Button::with_label("Sync and remove");
+        button.add_css_class("destructive-action");
+        button
+    } else {
+        let button = gtk::Button::with_label("Sync anyway");
+        button.add_css_class("suggested-action");
+        button
+    };
 
     {
         let window = window.clone();

@@ -110,6 +110,7 @@ pub(super) struct TrackRowChangedContext<'a> {
     pub(super) playlists_dirty: &'a Rc<Cell<bool>>,
     pub(super) visible_summary_refresh: VisibleSummaryRefreshCallback,
     pub(super) current_search_text: &'a Rc<RefCell<String>>,
+    pub(super) device_panel: &'a DeviceSyncPanel,
 }
 
 pub(super) fn track_row_changed_callback(
@@ -125,6 +126,7 @@ pub(super) fn track_row_changed_callback(
     let playlists_dirty = ctx.playlists_dirty.clone();
     let current_search_text = ctx.current_search_text.clone();
     let visible_summary_refresh = ctx.visible_summary_refresh;
+    let device_panel = ctx.device_panel.clone();
 
     Rc::new(move |track_id: TrackId| {
         let row = {
@@ -196,6 +198,9 @@ pub(super) fn track_row_changed_callback(
         }
 
         visible_summary_refresh();
+        // A background BPM/key/waveform completion changes the Pioneer
+        // export readiness; refresh it when that view is on screen.
+        device_panel.refresh_readiness();
     })
 }
 

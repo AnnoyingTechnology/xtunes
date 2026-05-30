@@ -932,11 +932,43 @@ columnview.track-table listview row:selected .track-table-status-missing,
     font-weight: bold;
 }
 
-/* The ticked-playlist list sits in its own faintly contrasting card. */
+/* The ticked-playlist list sits in its own faintly contrasting card. The
+   inner padding matches the panel's 18px content margin so the checklist
+   lines up with the surrounding columns. */
 .device-sync-playlist-container {
-    padding: 9px;
+    padding: 18px;
     border-radius: 6px;
     background-color: alpha(@theme_fg_color, 0.05);
+}
+
+/* Per-metric analysis readiness in the Pioneer export panel. Theme-aware
+   semantic colours from the same Adwaita palette as @error_color above,
+   so they read correctly in both light and dark. */
+.device-analysis-ok {
+    color: @success_color;
+}
+
+.device-analysis-warn {
+    color: @warning_color;
+}
+
+/* The round status badge: a filled success/warning disc with the symbolic
+   tick / mark recoloured to the badge's base so it reads on the fill in
+   both themes. */
+.device-analysis-badge {
+    border-radius: 9999px;
+    min-width: 14px;
+    min-height: 14px;
+    padding: 2px;
+    color: @theme_base_color;
+}
+
+.device-analysis-badge.ok {
+    background-color: @success_color;
+}
+
+.device-analysis-badge.warn {
+    background-color: @warning_color;
 }
 
 /* Fixed footer: no fill of its own, just a darker separator above it and
