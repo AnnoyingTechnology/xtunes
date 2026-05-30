@@ -15,6 +15,7 @@
 //! lane, so the panel never schedules its own timers or pokes the status
 //! bar.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk::prelude::*;
@@ -27,6 +28,10 @@ use sustain_app_runtime::{
 use crate::SharedRuntime;
 use crate::command_controller::SharedCommandController;
 
+/// Recomputes the status-bar track/duration/size summary for the device
+/// view. Supplied by the main window, which knows the status bar.
+type SummaryRefresh = Rc<dyn Fn()>;
+
 #[derive(Clone)]
 pub(crate) struct DeviceSyncPanel {
     root: gtk::Box,
@@ -35,6 +40,13 @@ pub(crate) struct DeviceSyncPanel {
     /// Fixed footer: occupation bar + Forget / Sync. Lives outside the
     /// body and is re-filled in place when the selection changes.
     bottom_bar: gtk::Box,
+    /// The device currently rendered, so the status-bar summary can be
+    /// computed for it while the device view is visible.
+    current_device: Rc<RefCell<Option<ConnectedDevice>>>,
+    /// Recomputes the status-bar track/duration/size summary. Fired on
+    /// show, selection toggle, and forget so the summary tracks the
+    /// device's selected content instead of a stale earlier view.
+    on_summary_refresh: Rc<RefCell<Option<SummaryRefresh>>>,
     runtime: SharedRuntime,
     command_controller: SharedCommandController,
 }
@@ -63,6 +75,8 @@ impl DeviceSyncPanel {
             root,
             body,
             bottom_bar,
+            current_device: Rc::new(RefCell::new(None)),
+            on_summary_refresh: Rc::new(RefCell::new(None)),
             runtime,
             command_controller,
         }
@@ -72,11 +86,34 @@ impl DeviceSyncPanel {
         &self.root
     }
 
+    /// Shared handle to the currently-rendered device, so the status-bar
+    /// summary callback can resolve its selected tracks while the device
+    /// view is visible.
+    pub(crate) fn current_device_cell(&self) -> Rc<RefCell<Option<ConnectedDevice>>> {
+        self.current_device.clone()
+    }
+
+    /// Install the callback that recomputes the status-bar summary. The
+    /// panel fires it whenever the device's selected content changes.
+    pub(crate) fn set_summary_refresh(&self, refresh: SummaryRefresh) {
+        self.on_summary_refresh.replace(Some(refresh));
+    }
+
+    fn fire_summary_refresh(&self) {
+        if let Some(refresh) = self.on_summary_refresh.borrow().as_ref() {
+            refresh();
+        }
+    }
+
     /// Render the panel for `device`, ensuring its saved-config row
     /// exists first so configuration commands have something to update.
+    /// Call only once the content stack is already showing the device
+    /// page, so the summary refresh resolves to the device's content.
     pub(crate) fn show_device(&self, device: ConnectedDevice) {
         let _ = self.runtime.borrow().ensure_device_config(&device);
+        self.current_device.replace(Some(device.clone()));
         self.rebuild(&device);
+        self.fire_summary_refresh();
     }
 
     fn clear(container: &gtk::Box) {
@@ -102,29 +139,40 @@ impl DeviceSyncPanel {
                 volume_id: device.volume_id.clone(),
             });
 
-        // --- Header: identity on the left, options in the top-right ---
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        // --- Header: device identity, full width ---
+        let header = gtk::Box::new(gtk::Orientation::Vertical, 1);
         header.set_margin_top(18);
         header.set_margin_start(18);
         header.set_margin_end(18);
-
-        let identity = gtk::Box::new(gtk::Orientation::Vertical, 1);
-        identity.set_hexpand(true);
-        identity.set_valign(gtk::Align::Start);
         let title = gtk::Label::new(Some(&config.label));
         title.add_css_class("device-sync-title");
         title.set_xalign(0.0);
-        identity.append(&title);
+        header.append(&title);
         let mount = gtk::Label::new(Some(&format!("Mounted at {}", device.mount_path.display())));
         mount.add_css_class("dim-label");
         mount.set_xalign(0.0);
-        identity.append(&mount);
-        header.append(&identity);
+        header.append(&mount);
+        self.body.append(&header);
 
-        let options = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        options.set_halign(gtk::Align::End);
-        options.set_valign(gtk::Align::Start);
-        options.append(&section_label("On-drive format"));
+        // --- Two columns: playlists (left) | settings (right) ---
+        let columns = gtk::Box::new(gtk::Orientation::Horizontal, 18);
+        columns.set_margin_top(12);
+        columns.set_margin_start(18);
+        columns.set_margin_end(18);
+        columns.set_margin_bottom(18);
+        columns.set_vexpand(true);
+
+        let playlists_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        playlists_column.set_hexpand(true);
+        playlists_column.set_vexpand(true);
+        playlists_column.append(&section_label("Playlists to sync"));
+        playlists_column.append(&self.build_playlist_container(device));
+        columns.append(&playlists_column);
+
+        let settings_column = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        settings_column.set_valign(gtk::Align::Start);
+        settings_column.set_size_request(SETTINGS_COLUMN_WIDTH, -1);
+        settings_column.append(&section_label("On-drive format"));
         let layout_labels: Vec<&str> = DeviceLayout::ALL.iter().map(|l| l.label()).collect();
         let layout_dropdown = gtk::DropDown::from_strings(&layout_labels);
         layout_dropdown.set_selected(config.layout.as_db() as u32);
@@ -143,23 +191,16 @@ impl DeviceSyncPanel {
                 }
             });
         }
-        options.append(&layout_dropdown);
+        settings_column.append(&layout_dropdown);
         match config.layout {
             DeviceLayout::FolderPerPlaylist => {
-                self.append_folder_cap(&options, device, config.files_per_folder_cap)
+                self.append_folder_cap(&settings_column, device, config.files_per_folder_cap)
             }
-            DeviceLayout::Pioneer => self.append_pioneer_readiness(&options, device),
+            DeviceLayout::Pioneer => self.append_pioneer_readiness(&settings_column, device),
             DeviceLayout::M3u => {}
         }
-        header.append(&options);
-        self.body.append(&header);
-
-        // --- Playlist list: its own container, fills remaining height ---
-        let playlists_label = section_label("Playlists to sync");
-        playlists_label.set_margin_start(18);
-        playlists_label.set_margin_end(18);
-        self.body.append(&playlists_label);
-        self.body.append(&self.build_playlist_container(device));
+        columns.append(&settings_column);
+        self.body.append(&columns);
 
         // --- Bottom bar (occupation + actions) ---
         self.refresh_bottom_bar(device);
@@ -209,13 +250,14 @@ impl DeviceSyncPanel {
             readiness.missing_key,
             readiness.missing_waveform,
         )));
-        summary.set_xalign(1.0);
+        summary.set_xalign(0.0);
+        summary.set_wrap(true);
         summary.add_css_class("dim-label");
         container.append(&summary);
 
         let analyse =
             gtk::Button::with_label(&format!("Analyse {} missing tracks", readiness.analyzable));
-        analyse.set_halign(gtk::Align::End);
+        analyse.set_halign(gtk::Align::Start);
         analyse.set_sensitive(readiness.analyzable > 0);
         {
             let panel = self.clone();
@@ -232,13 +274,12 @@ impl DeviceSyncPanel {
     }
 
     fn build_playlist_container(&self, device: &ConnectedDevice) -> gtk::Box {
+        // The enclosing column owns the outer spacing; this is just the
+        // contrasting card that fills the column height.
         let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
         container.add_css_class("device-sync-playlist-container");
+        container.set_hexpand(true);
         container.set_vexpand(true);
-        container.set_margin_top(0);
-        container.set_margin_start(18);
-        container.set_margin_end(18);
-        container.set_margin_bottom(18);
 
         let runtime = self.runtime.borrow();
         let selected: std::collections::HashSet<PlaylistItem> =
@@ -289,6 +330,9 @@ impl DeviceSyncPanel {
                 // Re-evaluate occupation + the Sync action for the new
                 // selection, in place — never touching this checklist.
                 panel.refresh_bottom_bar(&device);
+                // The status-bar summary reflects the device's selected
+                // content, so it changes with every toggle too.
+                panel.fire_summary_refresh();
             });
         }
 
@@ -375,6 +419,9 @@ impl DeviceSyncPanel {
                 note.set_margin_start(18);
                 note.set_margin_end(18);
                 panel.body.append(&note);
+                // The selection is gone; the summary now reads empty.
+                panel.current_device.replace(None);
+                panel.fire_summary_refresh();
             });
         }
         actions.append(&forget);
@@ -427,6 +474,9 @@ fn section_label(text: &str) -> gtk::Label {
     label.set_margin_top(8);
     label
 }
+
+/// Width of the right-hand settings column.
+const SETTINGS_COLUMN_WIDTH: i32 = 260;
 
 /// Sidebar-consistent icons for the two playlist kinds in the checklist.
 const PLAYLIST_ICON: &str = "view-list-symbolic";

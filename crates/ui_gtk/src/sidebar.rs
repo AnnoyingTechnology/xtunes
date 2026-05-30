@@ -122,8 +122,15 @@ pub(crate) struct PlaylistSidebar {
     /// Container holding the dynamically-rebuilt DEVICES rows.
     devices_body: gtk::Box,
     on_device_selected: Rc<RefCell<Option<SidebarDeviceSelectedCallback>>>,
-    /// The currently highlighted device row, for single-selection CSS.
-    selected_device_row: Rc<RefCell<Option<gtk::Widget>>>,
+    /// The currently highlighted *transient* row (a device today, the
+    /// future Duplicates scan), for single-selection CSS. Mutually
+    /// exclusive with the persistent highlight.
+    active_transient_row: Rc<RefCell<Option<gtk::Widget>>>,
+    /// The persistent selection live just before a transient view took
+    /// over. While a transient view is active this is what gets persisted
+    /// and restored — never the transient view itself, which could fail
+    /// or be costly to re-open at launch.
+    persistent_selection: Rc<Cell<SidebarSelection>>,
 }
 
 impl PlaylistSidebar {
@@ -166,7 +173,8 @@ impl PlaylistSidebar {
         );
         let on_device_selected: Rc<RefCell<Option<SidebarDeviceSelectedCallback>>> =
             Rc::new(RefCell::new(None));
-        let selected_device_row: Rc<RefCell<Option<gtk::Widget>>> = Rc::new(RefCell::new(None));
+        let active_transient_row: Rc<RefCell<Option<gtk::Widget>>> = Rc::new(RefCell::new(None));
+        let persistent_selection = Rc::new(Cell::new(SidebarSelection::Music));
 
         let (playlists_header, playlists_caret) = build_section_header("PLAYLISTS");
         root.append(&playlists_header);
@@ -312,7 +320,8 @@ impl PlaylistSidebar {
             playlists_section_collapsed,
             devices_body,
             on_device_selected,
-            selected_device_row,
+            active_transient_row,
+            persistent_selection,
         }
     }
 
@@ -392,7 +401,7 @@ impl PlaylistSidebar {
         while let Some(child) = self.devices_body.first_child() {
             self.devices_body.remove(&child);
         }
-        self.selected_device_row.replace(None);
+        self.active_transient_row.replace(None);
 
         if devices.is_empty() {
             let empty = gtk::Label::new(Some("No devices connected"));
@@ -411,18 +420,15 @@ impl PlaylistSidebar {
             let row = build_library_row(&device.label, icon);
             let gesture = gtk::GestureClick::new();
             gesture.set_button(gdk::BUTTON_PRIMARY);
-            let on_device_selected = self.on_device_selected.clone();
-            let selected_device_row = self.selected_device_row.clone();
+            let sidebar = self.clone();
             let row_widget = row.clone().upcast::<gtk::Widget>();
             let device = device.clone();
             gesture.connect_pressed(move |gesture, _n_press, _x, _y| {
                 gesture.set_state(gtk::EventSequenceState::Claimed);
-                if let Some(previous) = selected_device_row.borrow_mut().take() {
-                    previous.remove_css_class("selected");
-                }
-                row_widget.add_css_class("selected");
-                selected_device_row.replace(Some(row_widget.clone()));
-                if let Some(callback) = on_device_selected.borrow().as_ref() {
+                // A device is a transient view: take over the highlight,
+                // deactivating (but remembering) the persistent selection.
+                sidebar.activate_transient_view(&row_widget);
+                if let Some(callback) = sidebar.on_device_selected.borrow().as_ref() {
                     callback(device.clone());
                 }
             });
@@ -431,11 +437,56 @@ impl PlaylistSidebar {
         }
     }
 
-    /// Drop the DEVICES row highlight — called when a different sidebar
-    /// surface (a library row or a playlist) becomes active.
-    pub(crate) fn clear_device_highlight(&self) {
-        if let Some(previous) = self.selected_device_row.borrow_mut().take() {
+    /// Make `row` the sidebar's sole active highlight on behalf of a
+    /// *transient* view — a connected device today, the upcoming
+    /// compute-heavy Duplicates scan tomorrow. The persistent selection
+    /// (Music / Albums / a playlist) that was live is visually
+    /// deactivated but remembered, so it — not this transient view — is
+    /// what [`Self::persisted_selection`] reports and what is restored on
+    /// the next launch. Transient views are never persisted: re-opening
+    /// one at startup could fail (the device is gone) or be expensive.
+    pub(crate) fn activate_transient_view(&self, row: &gtk::Widget) {
+        // Entering the transient state from a persistent one: snapshot
+        // the persistent selection. Switching transient→transient keeps
+        // the original snapshot.
+        let already_transient = self.active_transient_row.borrow().is_some();
+        if !already_transient && let Some(selection) = self.current_selection() {
+            self.persistent_selection.set(selection);
+        }
+        if let Some(previous) = self.active_transient_row.borrow_mut().take() {
             previous.remove_css_class("selected");
+        }
+        // Clear the persistent highlight without firing the selection
+        // callback — that would switch the content area back to a library
+        // or playlist view, fighting the transient view being shown.
+        let suspended = self.on_selection_changed.borrow_mut().take();
+        self.library_state.set(LibraryRowState::None);
+        self.music_row.remove_css_class("selected");
+        self.albums_row.remove_css_class("selected");
+        self.selection.set_selected(gtk::INVALID_LIST_POSITION);
+        *self.on_selection_changed.borrow_mut() = suspended;
+
+        row.add_css_class("selected");
+        self.active_transient_row.replace(Some(row.clone()));
+    }
+
+    /// Drop the transient-view highlight — called when a persistent
+    /// sidebar surface (a library row or a playlist) becomes active.
+    pub(crate) fn clear_transient_highlight(&self) {
+        if let Some(previous) = self.active_transient_row.borrow_mut().take() {
+            previous.remove_css_class("selected");
+        }
+    }
+
+    /// The selection to persist and restore on launch. While a transient
+    /// view is active this is the persistent selection that preceded it
+    /// (never the transient view itself); otherwise it is the live
+    /// selection.
+    pub(crate) fn persisted_selection(&self) -> Option<SidebarSelection> {
+        if self.active_transient_row.borrow().is_some() {
+            Some(self.persistent_selection.get())
+        } else {
+            self.current_selection()
         }
     }
 
@@ -501,6 +552,7 @@ impl PlaylistSidebar {
     }
 
     pub(crate) fn refresh(&self) {
+        let transient_active = self.active_transient_row.borrow().is_some();
         let previous = self.current_selection();
         let tree_model = build_tree_model(&self.runtime.borrow());
         // Suppress the selection callback while we swap the model and
@@ -530,6 +582,12 @@ impl PlaylistSidebar {
             }
         }
         *self.on_selection_changed.borrow_mut() = suspended;
+        if transient_active {
+            // A transient view (e.g. a connected device) owns the content
+            // area; keep it shown and the persistent highlight cleared,
+            // rather than firing a selection change that switches back.
+            return;
+        }
         if let Some(callback) = self.on_selection_changed.borrow().as_ref() {
             callback(self.current_selection());
         }

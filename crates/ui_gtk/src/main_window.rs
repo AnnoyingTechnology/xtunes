@@ -452,7 +452,9 @@ pub(crate) fn build_main_window(
         &sidebar,
         &status_bar,
         &current_search_text,
+        device_panel.current_device_cell(),
     );
+    device_panel.set_summary_refresh(visible_summary_refresh.clone());
     let library_changed = library_changed_callback(
         &runtime,
         &songs_table,
@@ -795,8 +797,10 @@ fn install_device_sync_view(
         let content_stack = content_stack.clone();
         let device_panel = device_panel.clone();
         sidebar.set_device_selected_callback(Rc::new(move |connected: ConnectedDevice| {
-            device_panel.show_device(connected);
+            // Switch the stack first so `show_device`'s summary refresh
+            // resolves against the device page, not the outgoing view.
             content_stack.set_visible_child_name(DEVICES_VIEW);
+            device_panel.show_device(connected);
         }));
     }
 
@@ -821,8 +825,10 @@ fn install_device_sync_view(
         // singleton lives as long as the content stack; see the doc
         // comment above.
         let _keep_monitor_alive = &volume_monitor;
+        // Leaving a transient view's page (the device panel today) drops
+        // its sidebar highlight so the persistent selection shows through.
         if stack.visible_child_name().as_deref() != Some(DEVICES_VIEW) {
-            sidebar.clear_device_highlight();
+            sidebar.clear_transient_highlight();
         }
     });
 }
@@ -844,7 +850,12 @@ fn ui_settings_from_widgets(
 ) -> UiSettings {
     UiSettings {
         search_text: titlebar.search_text(),
-        sidebar_selection: match sidebar.current_selection() {
+        // `persisted_selection` (not `current_selection`) so a transient
+        // view that is showing right now — e.g. a connected device — is
+        // never what gets saved/restored; the persistent view beneath it
+        // is. Re-opening a transient view at launch could fail or be
+        // costly.
+        sidebar_selection: match sidebar.persisted_selection() {
             Some(SidebarSelection::Music) | None => UiSidebarSelection::Music,
             Some(SidebarSelection::Albums) => UiSidebarSelection::Albums,
             Some(SidebarSelection::Item(item)) => UiSidebarSelection::Playlist(item),
@@ -938,6 +949,7 @@ fn visible_summary_refresh_callback(
     sidebar: &PlaylistSidebar,
     status_bar: &StatusBar,
     current_search_text: &Rc<RefCell<String>>,
+    current_device: Rc<RefCell<Option<ConnectedDevice>>>,
 ) -> VisibleSummaryRefreshCallback {
     let runtime = runtime.clone();
     let content_stack = content_stack.clone();
@@ -946,6 +958,24 @@ fn visible_summary_refresh_callback(
     let current_search_text = current_search_text.clone();
 
     Rc::new(move || {
+        // On the device view the summary reflects the device's selected
+        // (deduplicated) tracks, not whatever table was last shown.
+        if content_stack.visible_child_name().as_deref() == Some(DEVICES_VIEW) {
+            let runtime = runtime.borrow();
+            let rows: Vec<TrackTableRow> = current_device
+                .borrow()
+                .as_ref()
+                .map(|device| {
+                    runtime
+                        .device_selected_tracks(&device.id)
+                        .iter()
+                        .map(TrackTableRow::from_track)
+                        .collect()
+                })
+                .unwrap_or_default();
+            status_bar.update_summary(&rows);
+            return;
+        }
         let search_text = current_search_text.borrow().clone();
         let rows = visible_view_rows(
             &runtime.borrow(),

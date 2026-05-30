@@ -11,7 +11,7 @@
 //! neutral inputs, drives the background sync scheduler, and reports
 //! progress through the [`crate::NotificationCenter`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
@@ -90,6 +90,30 @@ impl ApplicationRuntime {
             .as_ref()
             .and_then(|store| store.device_selection(id).ok())
             .unwrap_or_default()
+    }
+
+    /// The deduplicated set of library tracks the device's ticked
+    /// playlists resolve to, in first-seen order — a track in several
+    /// selected playlists counts once. Smart playlists are evaluated
+    /// live. Drives the status-bar track/duration/size summary while the
+    /// device view is shown.
+    pub fn device_selected_tracks(&self, id: &SyncDeviceId) -> Vec<Track> {
+        let by_id: HashMap<_, _> = self.library_tracks.iter().map(|t| (t.id, t)).collect();
+        let mut seen = HashSet::new();
+        let mut tracks = Vec::new();
+        for item in self.device_selection(id) {
+            let Some(track_ids) = self.playlist_item_track_ids(item) else {
+                continue;
+            };
+            for tid in track_ids {
+                if seen.insert(tid)
+                    && let Some(track) = by_id.get(&tid)
+                {
+                    tracks.push((*track).clone());
+                }
+            }
+        }
+        tracks
     }
 
     /// True while a device sync is running on the background worker.
