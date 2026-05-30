@@ -160,9 +160,13 @@ fn open_preferences_window(
     frame.set_margin_end(WINDOW_SHADOW_MARGIN);
     frame.set_margin_bottom(WINDOW_SHADOW_MARGIN);
     frame.set_margin_start(WINDOW_SHADOW_MARGIN);
-    // Width is pinned to keep the chrome stable across tab switches;
-    // height is left free (`-1`) so the window auto-sizes to whichever
-    // tab is currently visible, per the issue #17 spec.
+    // Width is pinned here, and this floor is the SOLE reason the chrome
+    // stays a stable width across tab switches: every page is built to fit
+    // within `PREFERENCES_WIDTH`, so this minimum dominates them all. The
+    // stack is intentionally not `hhomogeneous` (see the warning below it),
+    // so do not weaken or remove this floor without restoring some other
+    // width pin. Height is free (`-1`) so the window auto-sizes to the
+    // visible tab, per the issue #17 spec.
     frame.set_size_request(PREFERENCES_WIDTH, -1);
 
     let panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -173,15 +177,19 @@ fn open_preferences_window(
 
     let stack = gtk::Stack::new();
     stack.add_css_class("preferences-stack");
-    // Variable height: the window snaps to the visible page's natural
-    // height (`vhomogeneous = false`). Stable width across tabs comes from
-    // the frame's `PREFERENCES_WIDTH` floor below — every page is bounded
-    // to fit within it — NOT from `hhomogeneous`. `hhomogeneous = true`
-    // together with `vhomogeneous = false` drives a GTK4 `Stack`
-    // width-for-height feedback that balloons this `resizable(false)`
-    // window to the full monitor width whenever a page much shorter than
-    // the others (About) becomes visible on a fractional-scaled Wayland
-    // surface, so it is deliberately left off.
+    // Both dimensions are deliberately NON-homogeneous. Variable height
+    // (`vhomogeneous = false`) lets the window snap to the visible page's
+    // natural height (issue #17); stable width comes from the frame's
+    // `PREFERENCES_WIDTH` floor above, not from the stack.
+    //
+    // ⚠ DO NOT set `hhomogeneous = true`. Combined with
+    // `vhomogeneous = false` it drives a GTK4 `Stack` width-for-height
+    // feedback that balloons this `resizable(false)` window to the full
+    // monitor width when a page far shorter than the others (About)
+    // becomes visible — but ONLY on a fractional-scaled (HiDPI) Wayland
+    // surface. It is invisible at 1x, so `cargo test` and headless CI will
+    // never catch a regression here: any change to the stack/frame sizing
+    // must be checked on a real HiDPI display. See #53.
     stack.set_hhomogeneous(false);
     stack.set_vhomogeneous(false);
     stack.set_transition_type(gtk::StackTransitionType::None);
