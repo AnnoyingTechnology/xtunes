@@ -173,10 +173,16 @@ fn open_preferences_window(
 
     let stack = gtk::Stack::new();
     stack.add_css_class("preferences-stack");
-    // Stable width across tabs (`hhomogeneous = true`), variable height
-    // (`vhomogeneous = false`) — the window snaps to the visible page's
-    // natural height.
-    stack.set_hhomogeneous(true);
+    // Variable height: the window snaps to the visible page's natural
+    // height (`vhomogeneous = false`). Stable width across tabs comes from
+    // the frame's `PREFERENCES_WIDTH` floor below — every page is bounded
+    // to fit within it — NOT from `hhomogeneous`. `hhomogeneous = true`
+    // together with `vhomogeneous = false` drives a GTK4 `Stack`
+    // width-for-height feedback that balloons this `resizable(false)`
+    // window to the full monitor width whenever a page much shorter than
+    // the others (About) becomes visible on a fractional-scaled Wayland
+    // surface, so it is deliberately left off.
+    stack.set_hhomogeneous(false);
     stack.set_vhomogeneous(false);
     stack.set_transition_type(gtk::StackTransitionType::None);
 
