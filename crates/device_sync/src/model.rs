@@ -46,6 +46,10 @@ pub struct SyncInputTrack {
     pub waveform_preview: Option<WaveformSegments>,
     /// Detail waveform (Pioneer layout only).
     pub waveform_detail: Option<WaveformSegments>,
+    /// Embedded cover-art bytes (Pioneer layout only), rendered into the
+    /// drive's artwork thumbnails. `None` when the file has no cover or
+    /// the layout does not use artwork.
+    pub cover_art: Option<Vec<u8>>,
 }
 
 /// One resolved playlist: a name and the indices (into the request's

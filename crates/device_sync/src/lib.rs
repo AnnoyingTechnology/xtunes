@@ -72,6 +72,7 @@ mod tests {
                 fingerprint: format!("fp-{i}"),
                 waveform_preview: None,
                 waveform_detail: None,
+                cover_art: None,
             });
         }
         Fixture {
@@ -170,6 +171,51 @@ mod tests {
         // At least one ANLZ .EXT was written under USBANLZ.
         let exts = walk_files(fx.dest.path().join("PIONEER/USBANLZ"));
         assert!(exts >= 2, "expected per-track ANLZ files, found {exts}");
+    }
+
+    #[test]
+    fn pioneer_layout_writes_cover_thumbnails() {
+        // A 2×2 solid-green PNG — enough for the artwork pipeline to
+        // decode, resize, and re-encode.
+        const COVER_PNG: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0xfd, 0xd4, 0x9a, 0x73, 0x00, 0x00, 0x00, 0x0f, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0xda, 0x63, 0x60, 0xf8, 0xcf, 0x00, 0x42, 0x10, 0x0a, 0x00, 0x1b, 0xf2, 0x03, 0xfd,
+            0xd4, 0x2f, 0x04, 0x80, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42,
+            0x60, 0x82,
+        ];
+        let fx = fixture(2);
+        // Both tracks carry the same cover, so de-duplication collapses
+        // them to a single artwork id.
+        let tracks: Vec<SyncInputTrack> = fx
+            .tracks
+            .iter()
+            .cloned()
+            .map(|mut t| {
+                t.cover_art = Some(COVER_PNG.to_vec());
+                t
+            })
+            .collect();
+        let req = SyncRequest {
+            device: device(DeviceLayout::Pioneer),
+            mount_path: fx.dest.path().to_path_buf(),
+            tracks,
+            playlists: vec![SyncInputPlaylist {
+                name: "My Set".into(),
+                track_indices: vec![0, 1],
+            }],
+            previous_manifest: Vec::new(),
+            remove_stale: false,
+            export_date: "2026-01-01".into(),
+        };
+        run(&req);
+
+        let art = fx.dest.path().join("PIONEER/Artwork/00001");
+        assert!(art.join("a1.jpg").exists(), "small thumbnail written");
+        assert!(art.join("a1_m.jpg").exists(), "large thumbnail written");
+        // The shared cover de-duplicates to one id — no second entry.
+        assert!(!art.join("a2.jpg").exists(), "shared cover deduplicated");
     }
 
     #[test]

@@ -57,6 +57,9 @@ pub struct PioneerTrack {
     pub sample_rate_hz: u32,
     pub bit_depth: u16,
     pub file_type: PioneerFileType,
+    /// Artwork-table id linking this track to its cover thumbnails, or
+    /// `0` for no artwork. Assigned by [`crate::artwork::ArtworkSet`].
+    pub artwork_id: u32,
     /// `YYYY-MM-DD` the track entered the library, or `None` to leave the
     /// PDB's date-added string empty. Cosmetic (rekordbox's "date added"
     /// column); the format does not depend on it.
@@ -75,6 +78,18 @@ pub struct PioneerTrack {
 pub struct PioneerPlaylist {
     pub name: String,
     pub entries: Vec<usize>,
+}
+
+/// One row of the PDB artwork table: the id a track's `artwork_id`
+/// references and the on-drive path to its (small) JPEG thumbnail. The
+/// thumbnail files themselves are produced and written by
+/// [`crate::artwork::ArtworkSet`].
+#[derive(Clone, Debug)]
+pub struct PioneerArtwork {
+    pub id: u32,
+    /// On-drive path of the 80×80 thumbnail, e.g.
+    /// `/PIONEER/Artwork/00001/a1.jpg`.
+    pub path: String,
 }
 
 /// Inputs the ANLZ serializer needs for one track. The waveform tiers

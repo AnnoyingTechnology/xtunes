@@ -446,17 +446,18 @@ impl ApplicationRuntime {
         device: &SyncDevice,
         mount_path: PathBuf,
         remove_stale: bool,
-        load_waveforms: bool,
+        load_pioneer_assets: bool,
     ) -> ApplicationRuntimeResult<SyncRequest> {
         let store = self
             .library_store
             .as_ref()
             .ok_or(ApplicationRuntimeError::LibraryStoreFailed)?;
-        // Waveforms are only consumed when actually writing the Pioneer
-        // ANLZ files; planning (the occupation bar, the diff) never reads
-        // them, so skip the per-track SQLite loads on that path — it runs
-        // on every playlist toggle.
-        let want_waveforms = load_waveforms && device.layout == DeviceLayout::Pioneer;
+        // Waveforms (from SQLite) and cover art (read from each file) are
+        // only consumed when actually writing the Pioneer ANLZ/artwork
+        // files; planning (the occupation bar, the diff) never reads
+        // them, so skip those per-track loads on that path — it runs on
+        // every playlist toggle.
+        let want_pioneer_assets = load_pioneer_assets && device.layout == DeviceLayout::Pioneer;
         let by_id: HashMap<_, _> = self.library_tracks.iter().map(|t| (t.id, t)).collect();
 
         let mut index_of: HashMap<sustain_domain::TrackId, usize> = HashMap::new();
@@ -484,12 +485,17 @@ impl ApplicationRuntime {
                         let Some(source_path) = self.absolute_track_path(track) else {
                             continue;
                         };
-                        let preview_detail = if want_waveforms {
+                        let preview_detail = if want_pioneer_assets {
                             store.load_waveform(tid).ok().flatten()
                         } else {
                             None
                         };
-                        let input = sync_input_track(track, source_path, preview_detail);
+                        let cover_art = if want_pioneer_assets {
+                            self.read_artwork(&source_path)
+                        } else {
+                            None
+                        };
+                        let input = sync_input_track(track, source_path, preview_detail, cover_art);
                         let position = tracks.len();
                         tracks.push(input);
                         index_of.insert(tid, position);
@@ -551,6 +557,7 @@ fn sync_input_track(
     track: &Track,
     source_path: PathBuf,
     waveform: Option<sustain_library_store::StoredWaveform>,
+    cover_art: Option<Vec<u8>>,
 ) -> SyncInputTrack {
     let metadata = &track.metadata;
     let extension = source_path
@@ -598,6 +605,7 @@ fn sync_input_track(
         fingerprint,
         waveform_preview,
         waveform_detail,
+        cover_art,
     }
 }
 

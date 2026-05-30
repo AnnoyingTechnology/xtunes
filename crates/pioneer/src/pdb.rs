@@ -28,7 +28,7 @@ use std::path::Path;
 
 use crate::device_sql::encode;
 use crate::key;
-use crate::model::{PioneerPlaylist, PioneerTrack};
+use crate::model::{PioneerArtwork, PioneerPlaylist, PioneerTrack};
 
 const PAGE_SIZE: usize = 4096;
 const HEAP_START: usize = 0x28;
@@ -83,12 +83,15 @@ impl std::fmt::Display for PdbError {
 
 impl std::error::Error for PdbError {}
 
-/// Build the complete `export.pdb` byte image for the given tracks and
-/// playlists. `analyze_date` is the `YYYY-MM-DD` string stamped into
-/// each track's analyze-date field.
+/// Build the complete `export.pdb` byte image for the given tracks,
+/// playlists, and cover-art rows. `analyze_date` is the `YYYY-MM-DD`
+/// string stamped into each track's analyze-date field. `artworks` are
+/// the unique covers (id↔path) a track's `artwork_id` references; pass
+/// an empty slice to leave the artwork table empty (header only).
 pub fn build(
     tracks: &[PioneerTrack],
     playlists: &[PioneerPlaylist],
+    artworks: &[PioneerArtwork],
     analyze_date: &str,
 ) -> Result<Vec<u8>, PdbError> {
     let entities = Entities::build(tracks);
@@ -122,6 +125,7 @@ pub fn build(
         .map(|(i, p)| playlist_tree_row(&p.name, i))
         .collect();
     let mut entry_rows = playlist_entry_rows(playlists);
+    let artwork_rows: Vec<Vec<u8>> = artworks.iter().map(artwork_row).collect();
 
     let track_chunks = chunk_rows("tracks", &track_rows)?;
     let artist_chunks = chunk_rows("artists", &artist_rows)?;
@@ -138,6 +142,21 @@ pub fn build(
     let albums_alloc = assign(8, album_chunks.len(), 49, &mut next);
     let tree_alloc = assign(16, tree_chunks.len(), 46, &mut next);
     let entries_alloc = assign(18, entry_chunks.len(), 52, &mut next);
+    // Artwork: header at the fixed page 27, first data page at the fixed
+    // page 28, with any further pages and the empty-candidate drawn from
+    // the overflow counter — page 28 has no reserved out-of-file slot in
+    // the 41–52 zone (those are all taken), so its empty-candidate must
+    // be a real page, which also forces the file to grow past page 40.
+    let artwork_chunks = if artworks.is_empty() {
+        Vec::new()
+    } else {
+        chunk_rows("artwork", &artwork_rows)?
+    };
+    let artwork_alloc = if artworks.is_empty() {
+        None
+    } else {
+        Some(assign_artwork(28, artwork_chunks.len(), &mut next))
+    };
 
     let num_pages = if next > OVERFLOW_START {
         next as usize
@@ -288,9 +307,19 @@ pub fn build(
     file.set_header(21, 0x0A, Some(22), None);
     file.set_header(23, 0x0B, Some(24), None);
     file.set_header(25, 0x0C, Some(26), None);
-    file.set_header(27, T_ARTWORK, Some(28), None);
     file.set_header(29, 0x0E, Some(30), None);
     file.set_header(31, 0x0F, Some(32), None);
+
+    // --- Artwork (type 0x0D) ---
+    // With covers present the header at page 27 points at the data page;
+    // without, it stays the header-only placeholder (next/empty = 28).
+    match &artwork_alloc {
+        Some(alloc) => {
+            file.set_header(27, T_ARTWORK, Some(alloc.first()), Some(alloc.first()));
+            write_artwork_pages(&mut file, alloc, &artwork_chunks, &artwork_rows)?;
+        }
+        None => file.set_header(27, T_ARTWORK, Some(28), None),
+    }
 
     // --- Columns (type 0x10): reference data page ---
     file.set_header(33, T_COLUMNS, Some(34), Some(34));
@@ -326,6 +355,8 @@ pub fn build(
             tree_empty: tree_alloc.empty,
             entries_last: entries_alloc.last,
             entries_empty: entries_alloc.empty,
+            artwork_last: artwork_alloc.as_ref().map_or(27, |a| a.last),
+            artwork_empty: artwork_alloc.as_ref().map_or(28, |a| a.empty),
         },
     );
 
@@ -337,9 +368,10 @@ pub fn write_to(
     path: &Path,
     tracks: &[PioneerTrack],
     playlists: &[PioneerPlaylist],
+    artworks: &[PioneerArtwork],
     analyze_date: &str,
 ) -> io::Result<()> {
-    let bytes = build(tracks, playlists, analyze_date).map_err(io::Error::other)?;
+    let bytes = build(tracks, playlists, artworks, analyze_date).map_err(io::Error::other)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -442,6 +474,27 @@ fn assign(first: u32, num_chunks: usize, reserved_empty: u32, next: &mut u32) ->
     } else {
         reserved_empty
     };
+    let last = *data_pages.last().unwrap_or(&first);
+    Alloc {
+        data_pages,
+        empty,
+        last,
+    }
+}
+
+/// Allocate the artwork table's pages. Unlike [`assign`], the
+/// empty-candidate is always drawn from the overflow counter (never a
+/// reserved 41–52 slot): the fixed first data page 28 has no reserved
+/// out-of-file companion, so its empty-candidate must be a real page,
+/// which in turn extends the file past the standard 41 pages.
+fn assign_artwork(first: u32, num_chunks: usize, next: &mut u32) -> Alloc {
+    let mut data_pages = vec![first];
+    for _ in 1..num_chunks {
+        data_pages.push(*next);
+        *next += 1;
+    }
+    let empty = *next;
+    *next += 1;
     let last = *data_pages.last().unwrap_or(&first);
     Alloc {
         data_pages,
@@ -798,6 +851,57 @@ fn write_colors_page(file: &mut FileBuf) {
     );
 }
 
+/// Write the artwork table's data page(s). Faithful to the reference
+/// exporter, which differs from the generic [`write_rows_table`] in two
+/// ways for this table: `unknown4` is always zero, and the per-page
+/// sequence uses the plain base-8 / step-5 accumulation below (no
+/// "+1 at 11 rows" adjustment).
+fn write_artwork_pages(
+    file: &mut FileBuf,
+    alloc: &Alloc,
+    chunks: &[Range<usize>],
+    rows: &[Vec<u8>],
+) -> Result<(), PdbError> {
+    let mut cumulative = 8u32;
+    for (chunk_index, range) in chunks.iter().enumerate() {
+        let n = range.len();
+        let is_last = chunk_index + 1 == chunks.len();
+        let page_num = alloc.data_pages[chunk_index];
+        let next_page = if is_last {
+            alloc.empty
+        } else {
+            alloc.data_pages[chunk_index + 1]
+        };
+
+        let sequence = cumulative + (n.saturating_sub(1) as u32) * 5;
+        cumulative = sequence + 5;
+
+        let mut header = PageHeader {
+            table_type: T_ARTWORK,
+            page_index: page_num,
+            next_page,
+            num_rows_small: n.min(255) as u8,
+            num_rows_large: if n == 0 { 0 } else { (n - 1) as u16 },
+            unknown3: ((n % 8) * 0x20) as u8,
+            unknown4: 0,
+            page_flags: 0x24,
+            unknown1: sequence,
+            unknown2: 0,
+            unknown5: 0x0001,
+            unknown6: 0,
+            unknown7: 0,
+        };
+        build_data_page(
+            "artwork",
+            &mut header,
+            &rows[range.clone()],
+            RowGroupUnknown::HighBit,
+            file.page_mut(page_num),
+        )?;
+    }
+    Ok(())
+}
+
 fn write_history_header(file: &mut FileBuf, track_count: usize) {
     let (unk5, num_rows_large) = if track_count <= 1 {
         (0x0001u16, 0x0000u16)
@@ -885,6 +989,23 @@ fn genre_row(name: &str, id: u32) -> Vec<u8> {
     let mut row = Vec::new();
     row.extend_from_slice(&id.to_le_bytes());
     row.extend_from_slice(&encode(name));
+    row
+}
+
+/// Minimum artwork-row stride (id + DeviceSQL path, zero-padded). The
+/// reference packs rows at this fixed size; matching it keeps the
+/// row-group offsets identical for the short paths it ever produces. A
+/// pathologically long path simply yields a longer, 4-byte-aligned row,
+/// which the offset-addressed page layout still parses correctly.
+const ARTWORK_ROW_SIZE: usize = 36;
+
+fn artwork_row(artwork: &PioneerArtwork) -> Vec<u8> {
+    let mut row = Vec::with_capacity(ARTWORK_ROW_SIZE);
+    row.extend_from_slice(&artwork.id.to_le_bytes());
+    row.extend_from_slice(&encode(&artwork.path));
+    while row.len() < ARTWORK_ROW_SIZE {
+        row.push(0);
+    }
     row
 }
 
@@ -984,7 +1105,7 @@ fn track_row(
     u32_(&mut row, (track_id + 5) | 0x100); // u2 (waveform-ready flag in bit 8)
     u16(&mut row, 0xE5B6); // u3
     u16(&mut row, 0x6A76); // u4
-    u32_(&mut row, 0); // artwork_id
+    u32_(&mut row, track.artwork_id); // artwork_id (0 = none)
     u32_(&mut row, key_id);
     u32_(&mut row, 0); // original_artist_id
     u32_(&mut row, 0); // label_id
@@ -1080,6 +1201,8 @@ struct TablePointers {
     tree_empty: u32,
     entries_last: u32,
     entries_empty: u32,
+    artwork_last: u32,
+    artwork_empty: u32,
 }
 
 fn write_file_header(
@@ -1126,7 +1249,7 @@ fn write_file_header(
         (0x0A, 22, 21, 21),
         (0x0B, 24, 23, 23),
         (0x0C, 26, 25, 25),
-        (T_ARTWORK, 28, 27, 27),
+        (T_ARTWORK, p.artwork_empty, 27, p.artwork_last),
         (0x0E, 30, 29, 29),
         (0x0F, 32, 31, 31),
         (T_COLUMNS, 43, 33, 34),
@@ -1166,6 +1289,7 @@ mod tests {
             sample_rate_hz: 44_100,
             bit_depth: 16,
             file_type: PioneerFileType::Mp3,
+            artwork_id: 0,
             date_added: Some("2026-01-01".into()),
             device_audio_path: format!("/Contents/{artist}/{album}/{n:02} {title}.mp3"),
             device_anlz_path: format!("/PIONEER/USBANLZ/P000/0000000{n}/ANLZ0000.DAT"),
@@ -1179,7 +1303,7 @@ mod tests {
             name: "Set".into(),
             entries: vec![0, 1],
         }];
-        let bytes = build(&tracks, &playlists, "2026-01-01").expect("build pdb");
+        let bytes = build(&tracks, &playlists, &[], "2026-01-01").expect("build pdb");
         assert_eq!(bytes.len(), STANDARD_PAGES * PAGE_SIZE);
         // File header self-describes page size and table count.
         assert_eq!(
@@ -1199,7 +1323,7 @@ mod tests {
             name: "Set".into(),
             entries: vec![0],
         }];
-        let bytes = build(&tracks, &playlists, "2026-01-01").expect("build pdb");
+        let bytes = build(&tracks, &playlists, &[], "2026-01-01").expect("build pdb");
         // Columns at page 34, history at page 40.
         assert_eq!(
             &bytes[34 * PAGE_SIZE..35 * PAGE_SIZE],
@@ -1216,13 +1340,126 @@ mod tests {
     #[test]
     fn track_row_header_is_well_formed() {
         let entities = Entities::build(&[track("T", "Ar", "Al", 1)]);
-        let row = track_row(&track("T", "Ar", "Al", 1), &entities, 0, "2026-01-01");
+        let mut t = track("T", "Ar", "Al", 1);
+        t.artwork_id = 7;
+        let row = track_row(&t, &entities, 0, "2026-01-01");
         assert_eq!(&row[0..2], &0x0024u16.to_le_bytes());
+        // artwork_id at 0x1C
+        assert_eq!(
+            u32::from_le_bytes([row[0x1C], row[0x1D], row[0x1E], row[0x1F]]),
+            7
+        );
         // track id at 0x48
         assert_eq!(
             u32::from_le_bytes([row[0x48], row[0x49], row[0x4A], row[0x4B]]),
             1
         );
+    }
+
+    #[test]
+    fn artwork_table_is_populated_and_grows_file() {
+        let tracks = vec![track("One", "A", "Alpha", 1)];
+        let playlists = vec![PioneerPlaylist {
+            name: "Set".into(),
+            entries: vec![0],
+        }];
+        let artworks = vec![PioneerArtwork {
+            id: 1,
+            path: "/PIONEER/Artwork/00001/a1.jpg".into(),
+        }];
+        let bytes = build(&tracks, &playlists, &artworks, "2026-01-01").expect("build pdb");
+
+        // The artwork empty-candidate (page 53) must be a real page, so
+        // the file grows from the standard 41 pages to 54.
+        assert_eq!(bytes.len(), 54 * PAGE_SIZE);
+
+        // Artwork is the 14th table pointer (index 13) at 0x1C, 16 bytes
+        // each: (type, empty, first, last).
+        let ptr = 0x1C + 13 * 16;
+        let read = |off: usize| {
+            u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+        };
+        assert_eq!(read(ptr), T_ARTWORK);
+        assert_eq!(read(ptr + 4), OVERFLOW_START); // empty candidate = 53
+        assert_eq!(read(ptr + 8), 27); // header/first page
+        assert_eq!(read(ptr + 12), 28); // last (data) page
+
+        // The header at page 27 chains into the data page 28.
+        let header = &bytes[27 * PAGE_SIZE..28 * PAGE_SIZE];
+        assert_eq!(
+            u32::from_le_bytes([header[0x0C], header[0x0D], header[0x0E], header[0x0F]]),
+            28
+        );
+
+        // Page 28 is the artwork data page: self-index 28, table 0x0D,
+        // one row, chaining to the empty candidate.
+        let data = &bytes[28 * PAGE_SIZE..29 * PAGE_SIZE];
+        assert_eq!(
+            u32::from_le_bytes([data[0x04], data[0x05], data[0x06], data[0x07]]),
+            28
+        );
+        assert_eq!(
+            u32::from_le_bytes([data[0x08], data[0x09], data[0x0A], data[0x0B]]),
+            T_ARTWORK
+        );
+        assert_eq!(
+            u32::from_le_bytes([data[0x0C], data[0x0D], data[0x0E], data[0x0F]]),
+            OVERFLOW_START
+        );
+        assert_eq!(data[0x18], 1); // num_rows_small
+        // The row begins at the heap start with artwork id 1.
+        assert_eq!(
+            u32::from_le_bytes([
+                data[HEAP_START],
+                data[HEAP_START + 1],
+                data[HEAP_START + 2],
+                data[HEAP_START + 3],
+            ]),
+            1
+        );
+    }
+
+    #[test]
+    fn artwork_overflows_into_extra_pages() {
+        // Enough covers to exceed one page of 36-byte artwork rows,
+        // forcing a second data page drawn from the overflow zone.
+        let tracks = vec![track("One", "A", "Alpha", 1)];
+        let playlists = vec![PioneerPlaylist {
+            name: "Set".into(),
+            entries: vec![0],
+        }];
+        let artworks: Vec<PioneerArtwork> = (1..=200)
+            .map(|id| PioneerArtwork {
+                id,
+                path: format!("/PIONEER/Artwork/00001/a{id}.jpg"),
+            })
+            .collect();
+        let bytes = build(&tracks, &playlists, &artworks, "2026-01-01").expect("build pdb");
+
+        let self_index = |idx: usize| {
+            let page = &bytes[idx * PAGE_SIZE..(idx + 1) * PAGE_SIZE];
+            u32::from_le_bytes([page[4], page[5], page[6], page[7]])
+        };
+        let next_of = |idx: usize| {
+            let page = &bytes[idx * PAGE_SIZE..(idx + 1) * PAGE_SIZE];
+            u32::from_le_bytes([page[0x0C], page[0x0D], page[0x0E], page[0x0F]])
+        };
+
+        // First artwork data page is the fixed 28; its overflow page is
+        // the first free page in the overflow zone (53).
+        assert_eq!(self_index(28), 28);
+        assert_eq!(next_of(28), OVERFLOW_START); // 28 -> 53
+        assert_eq!(self_index(OVERFLOW_START as usize), OVERFLOW_START);
+        assert_eq!(next_of(OVERFLOW_START as usize), OVERFLOW_START + 1); // 53 -> empty(54)
+
+        // The artwork table pointer (index 13) reports first=27, last=53.
+        let ptr = 0x1C + 13 * 16;
+        let read = |off: usize| {
+            u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+        };
+        assert_eq!(read(ptr), T_ARTWORK);
+        assert_eq!(read(ptr + 8), 27); // first (header) page
+        assert_eq!(read(ptr + 12), OVERFLOW_START); // last data page = 53
     }
 
     #[test]
@@ -1236,7 +1473,7 @@ mod tests {
             name: "Big".into(),
             entries,
         }];
-        let bytes = build(&tracks, &playlists, "2026-01-01").expect("build pdb");
+        let bytes = build(&tracks, &playlists, &[], "2026-01-01").expect("build pdb");
         // Must have grown beyond the standard 41 pages, with overflow
         // drawn from page 53 onward.
         assert!(bytes.len() > STANDARD_PAGES * PAGE_SIZE);

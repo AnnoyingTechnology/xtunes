@@ -21,7 +21,7 @@ use std::path::Path;
 
 use sustain_domain::{DeviceLayout, WaveformSegments};
 use sustain_pioneer::{
-    AnlzInput, PioneerFileType, PioneerPlaylist, PioneerTrack, anlz, path_hash, pdb,
+    AnlzInput, ArtworkSet, PioneerFileType, PioneerPlaylist, PioneerTrack, anlz, path_hash, pdb,
 };
 
 use crate::model::{Placement, SyncError, SyncRequest};
@@ -237,10 +237,19 @@ fn write_pioneer(
     // One placement per track, in `req.tracks` order, so a track's index
     // is its PDB row index.
     let mut pioneer_tracks = Vec::with_capacity(placements.len());
+    // Covers are de-duplicated across the whole set: an album's shared
+    // art is rendered and stored once, and each track records the id it
+    // resolves to. A cover that fails to decode degrades to "no
+    // artwork" (id 0) rather than failing the sync.
+    let mut artwork = ArtworkSet::new();
     for (placement_index, placement) in placements.iter().enumerate() {
         let track = &req.tracks[placement.track_index];
         let audio_path = format!("/{}", placement.rel_path);
         let anlz_dat = path_hash::anlz_file(&audio_path, "DAT");
+        let artwork_id = match &track.cover_art {
+            Some(bytes) => artwork.add(bytes).unwrap_or(0),
+            None => 0,
+        };
 
         // Write ANLZ when the audio was (re)written this run or when the
         // .EXT is missing on the device (out-of-band deletion / first run).
@@ -280,6 +289,7 @@ fn write_pioneer(
             sample_rate_hz: track.sample_rate_hz,
             bit_depth: track.bit_depth,
             file_type: PioneerFileType::from_extension(&track.extension),
+            artwork_id,
             date_added: track.date_added.clone(),
             device_audio_path: audio_path,
             device_anlz_path: anlz_dat,
@@ -307,9 +317,22 @@ fn write_pioneer(
         })
         .collect();
 
+    // Render the cover thumbnails onto the drive (clearing any stale set
+    // from a previous, differently-numbered export) before stamping the
+    // matching id↔path rows into the PDB.
+    artwork
+        .write_files(root)
+        .map_err(|e| SyncError::io(root, e))?;
+    let artwork_rows = artwork.rows();
+
     let pdb_path = root.join(sustain_pioneer::PDB_RELATIVE_PATH);
-    let bytes = pdb::build(&pioneer_tracks, &pioneer_playlists, &req.export_date)
-        .map_err(SyncError::Pdb)?;
+    let bytes = pdb::build(
+        &pioneer_tracks,
+        &pioneer_playlists,
+        &artwork_rows,
+        &req.export_date,
+    )
+    .map_err(SyncError::Pdb)?;
     if let Some(parent) = pdb_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| SyncError::io(parent, e))?;
     }

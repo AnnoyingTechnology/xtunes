@@ -711,7 +711,10 @@ Three on-drive formats, chosen per device:
   `PIONEER/USBANLZ/`, consumable by Pioneer XDJ/CDJ hardware and Rekordbox.
   BPM, key, and waveforms come from Sustain's own analysis pipeline; the panel
   shows how many tracks in the selection are missing analysis and offers to run
-  it before export.
+  it before export. Each track's embedded cover art is rendered to the 80×80
+  and 240×240 JPEG thumbnails the XDJ shows in its browse and now-playing
+  screens, written under `PIONEER/Artwork/00001/` and linked from the database;
+  identical covers (an album's shared art) are stored once.
 
 Android (MTP) transport is not yet implemented — only mounted block devices
 (USB sticks, SD cards, external SSDs) are synced today.
