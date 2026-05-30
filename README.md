@@ -25,7 +25,7 @@ Sustain (`open-sustain/sustain`) is a Linux music player heavily inspired by old
 
 This player is not pixel-perfect iTunes taxidermy for a few reasons :
 - each versions brought and took away good things, I'm cherry picking what I believe to be tasteful,
-- captivity has been converted into freedom, especially exports which are not iPod-bound
+- captivity has been converted into freedom, especially sync, which isn't iPod-bound
 - features for local-first music lovers have been added.
 
 This player is not designed by commity. 
@@ -70,13 +70,14 @@ Implemented:
 - Background BPM and musical-key detection, with a tempo/harmony-aware smart-playlist rule engine (*Sustain-native*)
 - Background backfill of artwork, ID3 tags, and lyrics via MusicBrainz, Cover Art Archive, AcoustID, and LRClib (*iTunes-adjacent*)
 - Smart Shuffle that picks each next track as a continuation of the one playing — a local, transparent perceptual match, no cloud, no learning (*Sustain-native*)
-- Sync playlists to USB sticks / SD cards — deduplicated `.m3u8` tree, one-folder-per-playlist, or Pioneer Rekordbox/[XDJ](https://github.com/AnnoyingTechnology/rhythmbox-to-pioneer-xdj-exporter) format, incremental (*Sustain-native*)
+- Sync playlists and smart playlists to USB sticks and SD cards, incrementally — as a deduplicated `.m3u8` tree or one folder per playlist (*Sustain-native*)
+- **CDJ/XDJ-ready Rekordbox export** — writes the full Pioneer feature set to the drive (BPM, key, beat grids, waveforms and artwork) so the hardware reads it natively; the only Linux music app I know of that does this, not just copies files (*Sustain-native*)
 - Native light / dark theme and system accent color (*Sustain-native*)
 
 ## Roadmap
 
 - Duplicates consolidation (preserve the best audio version, aggregate tags)
-- Sync to Android phones over MTP (USB/SD-card sync and Pioneer XDJ export already ship)
+- Sync to Android phones over MTP (USB/SD-card sync and Pioneer Rekordbox export already ship)
 
 ## Install
 
@@ -121,9 +122,13 @@ But directing this project took weeks of full-time work, even with the best LLM 
 
 A huge amount of time went into the engineering details: anticipating race conditions, resolving conflicting features, optimizing performance, and making sure the code quality doesn't degrade. It still requires doing the research, choosing between different technical approaches, ensuring the app is a good citizen with online services, making sure it’s gentle on the user's hardware, testing features, and maintaining strict visual consistency.
 
-### Sidenote
+### Why Linux only
 
-Apple has lost its way, but 2010-era Apple really nailed music playback. I just wanted to build on top of what made that era great. Honestly, seeing where Apple Music is today, there’s probably room for a deshitified iTunes on macOS, too.
+Sustain won't ship for macOS or Windows. Doing it right would mean a native rewrite per platform (proper AppKit/Win32, not GTK bolted onto a foreign desktop) plus replacing all the wiring that just isn't there or isn't clean off Linux. That's most of the invisible work that built Sustain, all over again.
+
+It's also not where I want to be. Windows is a dying OS, and the direction Apple has taken for years isn't something I can condone.
+
+Seeing where Apple Music is today, there's probably room for a deshitified iTunes on macOS, and some users over there would likely appreciate it. Just not from me.
 
 
 ## No Apple intellectual property

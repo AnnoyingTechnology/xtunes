@@ -712,15 +712,23 @@ Three on-drive formats, chosen per device:
   adding tracks does not reshuffle the folder. An optional per-folder file cap
   (64 / 128 / 256 / 512, off by default) splits oversized playlists into
   numbered subfolders. For folder-navigating car stereos.
-- **Pioneer (Rekordbox / XDJ)** — Pioneer's on-device database
-  (`PIONEER/rekordbox/export.pdb`) plus per-track ANLZ waveform files under
-  `PIONEER/USBANLZ/`, consumable by Pioneer XDJ/CDJ hardware and Rekordbox.
-  BPM, key, and waveforms come from Sustain's own analysis pipeline; the panel
-  shows how many tracks in the selection are missing analysis and offers to run
-  it before export. Each track's embedded cover art is rendered to the 80×80
-  and 240×240 JPEG thumbnails the XDJ shows in its browse and now-playing
-  screens, written under `PIONEER/Artwork/00001/` and linked from the database;
-  identical covers (an album's shared art) are stored once.
+- **Pioneer (Rekordbox / XDJ)** — a full Rekordbox export that Pioneer CDJ/XDJ
+  hardware (and Rekordbox itself) reads directly off the USB, not just copied
+  audio. Sustain writes Pioneer's on-device database
+  (`PIONEER/rekordbox/export.pdb`) plus per-track ANLZ analysis files
+  (`ANLZ0000.DAT` / `.EXT`) under `PIONEER/USBANLZ/`. Each track carries its
+  BPM, musical key, a constant-tempo beat grid, both monochrome and colour
+  waveforms (the small browse preview and the full detailed overview), star
+  rating, genre and year — all from Sustain's own analysis pipeline and
+  library, not re-read from the files. The panel shows how many tracks in the
+  selection are missing BPM / key / waveform analysis and offers to run it
+  before export. Each track's embedded cover art is rendered to the 80×80 and
+  240×240 JPEG thumbnails the XDJ shows in its browse and now-playing screens,
+  written under `PIONEER/Artwork/00001/` and linked from the database;
+  identical covers (an album's shared art) are stored once. This is the full
+  set of analysis data Pioneer gear normally only receives from Rekordbox
+  itself — to the maintainer's knowledge, no other Linux application produces
+  it. (Hot cues and memory cues are not written.)
 
 Android (MTP) transport is not yet implemented — only mounted block devices
 (USB sticks, SD cards, external SSDs) are synced today.
