@@ -4,14 +4,16 @@
 //! The device-sync panel shown in the main content column when a device
 //! is selected in the DEVICES sidebar section (issues #23 / #24).
 //!
-//! Layout: a scrollable body (device header, on-drive format, per-layout
-//! options, and the ticked-playlist list in its own contrasting
-//! container) above a fixed bottom bar. The bottom bar carries the
-//! disk-occupation bar — how much of the device the ticked playlists
-//! would occupy — and the `Forget device` / `Sync` actions. All mutations
-//! go through the command controller; all progress flows through the
-//! runtime's notification lane, so the panel never schedules its own
-//! timers or pokes the status bar.
+//! Layout: a header whose left side identifies the device (name + mount
+//! path) and whose right corner holds the configuration options
+//! (on-drive format, per-layout settings); below it the ticked-playlist
+//! list fills the remaining height in its own contrasting container; and
+//! a fixed bottom bar carries the disk-occupation bar (how much of the
+//! device the ticked playlists would occupy) alongside the `Forget
+//! device` / `Sync` actions. All mutations go through the command
+//! controller; all progress flows through the runtime's notification
+//! lane, so the panel never schedules its own timers or pokes the status
+//! bar.
 
 use std::rc::Rc;
 
@@ -25,16 +27,13 @@ use sustain_app_runtime::{
 use crate::SharedRuntime;
 use crate::command_controller::SharedCommandController;
 
-/// Height of the disk-occupation bar.
-const OCCUPATION_BAR_HEIGHT: i32 = 14;
-
 #[derive(Clone)]
 pub(crate) struct DeviceSyncPanel {
     root: gtk::Box,
-    /// Scrollable content (device header + playlist container).
+    /// Header + playlist container; fills the height above the bottom bar.
     body: gtk::Box,
     /// Fixed footer: occupation bar + Forget / Sync. Lives outside the
-    /// scroller and is re-filled in place when the selection changes.
+    /// body and is re-filled in place when the selection changes.
     bottom_bar: gtk::Box,
     runtime: SharedRuntime,
     command_controller: SharedCommandController,
@@ -47,16 +46,14 @@ impl DeviceSyncPanel {
         root.set_hexpand(true);
         root.set_vexpand(true);
 
-        let scroller = gtk::ScrolledWindow::new();
-        scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        scroller.set_vexpand(true);
-        scroller.set_hexpand(true);
-
-        // Children carry their own margins so the playlist container can
-        // sit at the same 18px inset as the bottom bar's padding.
+        // The playlist container inside the body fills the leftover height
+        // and scrolls its own checklist, so the body itself does not
+        // scroll. Children carry their own 18px margins to match the
+        // bottom bar's padding.
         let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        scroller.set_child(Some(&body));
-        root.append(&scroller);
+        body.set_hexpand(true);
+        body.set_vexpand(true);
+        root.append(&body);
 
         let bottom_bar = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         bottom_bar.add_css_class("device-sync-bottom-bar");
@@ -105,27 +102,32 @@ impl DeviceSyncPanel {
                 volume_id: device.volume_id.clone(),
             });
 
-        // --- Header (device + configuration), inset 18px ---
-        let header = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        // --- Header: identity on the left, options in the top-right ---
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         header.set_margin_top(18);
         header.set_margin_start(18);
         header.set_margin_end(18);
 
+        let identity = gtk::Box::new(gtk::Orientation::Vertical, 1);
+        identity.set_hexpand(true);
+        identity.set_valign(gtk::Align::Start);
         let title = gtk::Label::new(Some(&config.label));
         title.add_css_class("device-sync-title");
         title.set_xalign(0.0);
-        header.append(&title);
-
+        identity.append(&title);
         let mount = gtk::Label::new(Some(&format!("Mounted at {}", device.mount_path.display())));
         mount.add_css_class("dim-label");
         mount.set_xalign(0.0);
-        header.append(&mount);
+        identity.append(&mount);
+        header.append(&identity);
 
-        header.append(&section_label("On-drive format"));
+        let options = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        options.set_halign(gtk::Align::End);
+        options.set_valign(gtk::Align::Start);
+        options.append(&section_label("On-drive format"));
         let layout_labels: Vec<&str> = DeviceLayout::ALL.iter().map(|l| l.label()).collect();
         let layout_dropdown = gtk::DropDown::from_strings(&layout_labels);
         layout_dropdown.set_selected(config.layout.as_db() as u32);
-        layout_dropdown.set_halign(gtk::Align::Start);
         {
             let panel = self.clone();
             let device = device.clone();
@@ -141,20 +143,22 @@ impl DeviceSyncPanel {
                 }
             });
         }
-        header.append(&layout_dropdown);
-
+        options.append(&layout_dropdown);
         match config.layout {
             DeviceLayout::FolderPerPlaylist => {
-                self.append_folder_cap(&header, device, config.files_per_folder_cap)
+                self.append_folder_cap(&options, device, config.files_per_folder_cap)
             }
-            DeviceLayout::Pioneer => self.append_pioneer_readiness(&header, device),
+            DeviceLayout::Pioneer => self.append_pioneer_readiness(&options, device),
             DeviceLayout::M3u => {}
         }
-
-        header.append(&section_label("Playlists to sync"));
+        header.append(&options);
         self.body.append(&header);
 
-        // --- Playlist list in its own contrasting container ---
+        // --- Playlist list: its own container, fills remaining height ---
+        let playlists_label = section_label("Playlists to sync");
+        playlists_label.set_margin_start(18);
+        playlists_label.set_margin_end(18);
+        self.body.append(&playlists_label);
         self.body.append(&self.build_playlist_container(device));
 
         // --- Bottom bar (occupation + actions) ---
@@ -175,7 +179,6 @@ impl DeviceSyncPanel {
             .position(|c| *c == current)
             .unwrap_or(0) as u32;
         dropdown.set_selected(selected);
-        dropdown.set_halign(gtk::Align::Start);
         {
             let panel = self.clone();
             let device = device.clone();
@@ -200,19 +203,19 @@ impl DeviceSyncPanel {
         let readiness = self.runtime.borrow().device_analysis_readiness(&device.id);
         container.append(&section_label("Analysis"));
         let summary = gtk::Label::new(Some(&format!(
-            "{} tracks · {} missing BPM · {} missing key · {} missing waveform",
+            "{} tracks · {} missing BPM · {} key · {} waveform",
             readiness.total,
             readiness.missing_bpm,
             readiness.missing_key,
             readiness.missing_waveform,
         )));
-        summary.set_xalign(0.0);
+        summary.set_xalign(1.0);
         summary.add_css_class("dim-label");
         container.append(&summary);
 
         let analyse =
             gtk::Button::with_label(&format!("Analyse {} missing tracks", readiness.analyzable));
-        analyse.set_halign(gtk::Align::Start);
+        analyse.set_halign(gtk::Align::End);
         analyse.set_sensitive(readiness.analyzable > 0);
         {
             let panel = self.clone();
@@ -231,7 +234,8 @@ impl DeviceSyncPanel {
     fn build_playlist_container(&self, device: &ConnectedDevice) -> gtk::Box {
         let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
         container.add_css_class("device-sync-playlist-container");
-        container.set_margin_top(18);
+        container.set_vexpand(true);
+        container.set_margin_top(0);
         container.set_margin_start(18);
         container.set_margin_end(18);
         container.set_margin_bottom(18);
@@ -244,15 +248,13 @@ impl DeviceSyncPanel {
         let mut entries: Vec<(PlaylistItem, gtk::CheckButton)> = Vec::new();
         for playlist in runtime.playlists() {
             let item = PlaylistItem::Playlist(playlist.id);
-            let check = gtk::CheckButton::with_label(&playlist.name);
-            check.set_active(selected.contains(&item));
+            let check = playlist_check(&playlist.name, PLAYLIST_ICON, selected.contains(&item));
             list.append(&check);
             entries.push((item, check));
         }
         for smart in runtime.smart_playlists() {
             let item = PlaylistItem::SmartPlaylist(smart.id);
-            let check = gtk::CheckButton::with_label(&format!("{} (smart)", smart.name));
-            check.set_active(selected.contains(&item));
+            let check = playlist_check(&smart.name, SMART_PLAYLIST_ICON, selected.contains(&item));
             list.append(&check);
             entries.push((item, check));
         }
@@ -261,6 +263,7 @@ impl DeviceSyncPanel {
         if entries.is_empty() {
             let empty = gtk::Label::new(Some("No playlists yet. Create a playlist to sync it."));
             empty.set_xalign(0.0);
+            empty.set_valign(gtk::Align::Start);
             empty.add_css_class("dim-label");
             container.append(&empty);
             return container;
@@ -291,8 +294,7 @@ impl DeviceSyncPanel {
 
         let scroller = gtk::ScrolledWindow::new();
         scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        scroller.set_min_content_height(120);
-        scroller.set_max_content_height(280);
+        scroller.set_vexpand(true);
         scroller.set_child(Some(&list));
         container.append(&scroller);
         container
@@ -313,73 +315,44 @@ impl DeviceSyncPanel {
         let total_bytes = capacity.map(|c| c.total_bytes).unwrap_or(0);
         let available_bytes = capacity.map(|c| c.available_bytes).unwrap_or(0);
         let needed_bytes = plan.as_ref().map(|p| p.bytes_to_copy).unwrap_or(0);
-        let fits = needed_bytes <= available_bytes;
+        let over_capacity = total_bytes > 0 && needed_bytes > available_bytes;
 
-        // --- Occupation area (fills the width) ---
-        let occupation = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        occupation.set_hexpand(true);
-        occupation.set_valign(gtk::Align::Center);
-
-        let headline = gtk::Label::new(Some(&if total_bytes == 0 {
-            "Device capacity unavailable".to_owned()
-        } else {
-            format!(
-                "{} of {} used by selection",
-                human_bytes(selected_bytes),
-                human_bytes(total_bytes)
+        let (fraction, text) = if total_bytes == 0 {
+            (0.0, "Device capacity unavailable".to_owned())
+        } else if over_capacity {
+            (
+                1.0,
+                format!(
+                    "Not enough space — {} needed, {} free",
+                    human_bytes(needed_bytes),
+                    human_bytes(available_bytes)
+                ),
             )
-        }));
-        headline.set_xalign(0.0);
-        occupation.append(&headline);
-
-        let fraction = if total_bytes > 0 {
-            selected_bytes as f64 / total_bytes as f64
         } else {
-            0.0
+            (
+                selected_bytes as f64 / total_bytes as f64,
+                format!(
+                    "{} of {}",
+                    human_bytes(selected_bytes),
+                    human_bytes(total_bytes)
+                ),
+            )
         };
+
         // One total segment today; a per-genre breakdown will pass several
         // coloured segments to the same renderer (issue #23 follow-up).
-        occupation.append(&occupation_bar(vec![BarSegment {
-            fraction,
-            color: None,
-        }]));
-
-        let mut parts: Vec<String> = Vec::new();
-        if total_bytes > 0 {
-            parts.push(format!("{} free", human_bytes(available_bytes)));
-        }
-        if let Some(plan) = &plan {
-            if plan.to_copy > 0 {
-                parts.push(format!("{} to copy", plan.to_copy));
-            }
-            if plan.to_update > 0 {
-                parts.push(format!("{} to update", plan.to_update));
-            }
-            if !plan.to_remove.is_empty() {
-                parts.push(format!("{} to remove", plan.to_remove.len()));
-            }
-        }
-        if !parts.is_empty() {
-            let sub = gtk::Label::new(Some(&parts.join(" · ")));
-            sub.set_xalign(0.0);
-            sub.add_css_class("dim-label");
-            occupation.append(&sub);
-        }
-        if total_bytes > 0 && !fits {
-            let warning = gtk::Label::new(Some(&format!(
-                "Not enough free space — needs {}, {} free",
-                human_bytes(needed_bytes),
-                human_bytes(available_bytes)
-            )));
-            warning.set_xalign(0.0);
-            warning.add_css_class("error");
-            occupation.append(&warning);
-        }
-        self.bottom_bar.append(&occupation);
+        let bar = occupation_bar(
+            vec![BarSegment {
+                fraction,
+                color: None,
+            }],
+            &text,
+            over_capacity,
+        );
+        self.bottom_bar.append(&bar);
 
         // --- Actions (extreme right) ---
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        actions.set_valign(gtk::Align::Center);
 
         let forget = gtk::Button::with_label("Forget device");
         {
@@ -397,6 +370,7 @@ impl DeviceSyncPanel {
                     "Device forgotten. Its saved playlists and sync history were cleared.",
                 ));
                 note.set_xalign(0.0);
+                note.set_valign(gtk::Align::Start);
                 note.set_margin_top(18);
                 note.set_margin_start(18);
                 note.set_margin_end(18);
@@ -407,7 +381,7 @@ impl DeviceSyncPanel {
 
         let sync = gtk::Button::with_label("Sync");
         sync.add_css_class("suggested-action");
-        sync.set_sensitive(plan.is_some() && fits);
+        sync.set_sensitive(plan.is_some() && !over_capacity);
         {
             let command_controller = self.command_controller.clone();
             let root = self.root.clone();
@@ -454,6 +428,26 @@ fn section_label(text: &str) -> gtk::Label {
     label
 }
 
+/// Sidebar-consistent icons for the two playlist kinds in the checklist.
+const PLAYLIST_ICON: &str = "view-list-symbolic";
+const SMART_PLAYLIST_ICON: &str = "emblem-system-symbolic";
+
+/// A checklist row: a check button whose child is the playlist's icon
+/// (normal vs smart, matching the sidebar) followed by its name.
+fn playlist_check(name: &str, icon: &str, active: bool) -> gtk::CheckButton {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    row.append(&gtk::Image::from_icon_name(icon));
+    let label = gtk::Label::new(Some(name));
+    label.set_xalign(0.0);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    row.append(&label);
+
+    let check = gtk::CheckButton::new();
+    check.set_child(Some(&row));
+    check.set_active(active);
+    check
+}
+
 /// One coloured run of the occupation bar, as a fraction of the device
 /// capacity. `color: None` uses the widget's accent (the single "total"
 /// segment shown today); the planned per-genre view passes explicit
@@ -464,33 +458,38 @@ struct BarSegment {
     color: Option<gdk::RGBA>,
 }
 
-/// A pill-shaped meter that paints `segments` left-to-right over a faint
-/// trough. Colours come from the widget's CSS `color` (the system
-/// accent) so it tracks the theme; segments may override with their own.
-fn occupation_bar(segments: Vec<BarSegment>) -> gtk::DrawingArea {
-    let area = gtk::DrawingArea::new();
-    area.add_css_class("device-occupation-bar");
-    area.set_hexpand(true);
-    area.set_content_height(OCCUPATION_BAR_HEIGHT);
-    area.set_draw_func(move |area, cr, width, height| {
+/// The disk-occupation meter: a button-height, button-radius pill that
+/// paints `segments` left-to-right over a faint trough and centres `text`
+/// over them. Trough/fill colours and the rounded clip come from CSS so
+/// the meter tracks the theme and matches the adjacent buttons; over
+/// capacity it switches to the theme's error colour. Returned as a plain
+/// widget so the bottom bar's horizontal box stretches it to the button
+/// height.
+fn occupation_bar(segments: Vec<BarSegment>, text: &str, over_capacity: bool) -> gtk::Widget {
+    let frame = gtk::Overlay::new();
+    frame.add_css_class("device-occupation-bar");
+    frame.set_hexpand(true);
+    // Clip the fill to the CSS border-radius.
+    frame.set_overflow(gtk::Overflow::Hidden);
+
+    let fill = gtk::DrawingArea::new();
+    fill.add_css_class("device-occupation-fill");
+    if over_capacity {
+        frame.add_css_class("over-capacity");
+        fill.add_css_class("over-capacity");
+    }
+    // hexpand only: the bar fills the row's height through the default
+    // valign=Fill, NOT vexpand — vexpand would propagate up through the
+    // Overlay to the bottom bar and make the whole footer claim vertical
+    // space, ballooning it (and the buttons) far past the button height.
+    fill.set_hexpand(true);
+    fill.set_draw_func(move |area, cr, width, height| {
         let w = width as f64;
         let h = height as f64;
         if w <= 0.0 || h <= 0.0 {
             return;
         }
-        let radius = h / 2.0;
         let accent = area.color();
-
-        rounded_rect(cr, 0.0, 0.0, w, h, radius);
-        cr.set_source_rgba(
-            accent.red() as f64,
-            accent.green() as f64,
-            accent.blue() as f64,
-            0.16,
-        );
-        let _ = cr.fill_preserve();
-        cr.clip();
-
         let mut x = 0.0;
         for segment in &segments {
             let segment_width = (segment.fraction.clamp(0.0, 1.0) * w).min(w - x);
@@ -502,26 +501,26 @@ fn occupation_bar(segments: Vec<BarSegment>) -> gtk::DrawingArea {
                 color.red() as f64,
                 color.green() as f64,
                 color.blue() as f64,
-                1.0,
+                0.45,
             );
             cr.rectangle(x, 0.0, segment_width, h);
             let _ = cr.fill();
             x += segment_width;
         }
     });
-    area
-}
+    frame.set_child(Some(&fill));
 
-/// Trace a rounded rectangle as the current Cairo path.
-fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
-    use std::f64::consts::{FRAC_PI_2, PI};
-    let r = r.min(w / 2.0).min(h / 2.0);
-    cr.new_sub_path();
-    cr.arc(x + w - r, y + r, r, -FRAC_PI_2, 0.0);
-    cr.arc(x + w - r, y + h - r, r, 0.0, FRAC_PI_2);
-    cr.arc(x + r, y + h - r, r, FRAC_PI_2, PI);
-    cr.arc(x + r, y + r, r, PI, 3.0 * FRAC_PI_2);
-    cr.close_path();
+    let label = gtk::Label::new(Some(text));
+    label.add_css_class("device-occupation-label");
+    label.set_hexpand(true);
+    label.set_halign(gtk::Align::Fill);
+    label.set_xalign(0.5);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label.set_margin_start(10);
+    label.set_margin_end(10);
+    frame.add_overlay(&label);
+
+    frame.upcast()
 }
 
 /// Confirm a sync that would delete `remove_count` stale tracks from the

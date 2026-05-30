@@ -921,7 +921,7 @@ columnview.track-table listview row:selected .track-table-status-missing,
 }
 
 .device-sync-title {
-    font-size: 1.3em;
+    font-size: 1.55em;
     font-weight: bold;
 }
 
@@ -946,8 +946,25 @@ columnview.track-table listview row:selected .track-table-status-missing,
     border-top: 1px solid alpha(@theme_fg_color, 0.15);
 }
 
-/* The occupation meter paints itself in Cairo; this only feeds it the
-   system accent through the CSS `color` property it reads at draw time. */
+/* The occupation meter is a pill matching the adjacent buttons: the box
+   draws the trough + rounded clip (the fill DrawingArea is clipped to
+   this radius), and `border-radius` tracks the GTK button radius. The
+   fill child paints itself in Cairo, reading its colour from the CSS
+   `color` below. Over capacity both switch to the theme error colour. */
 .device-occupation-bar {
+    border-radius: 6px;
+    min-width: 80px;
+    background-color: alpha(@theme_selected_bg_color, 0.15);
+}
+
+.device-occupation-bar.over-capacity {
+    background-color: alpha(@error_color, 0.15);
+}
+
+.device-occupation-fill {
     color: @theme_selected_bg_color;
+}
+
+.device-occupation-fill.over-capacity {
+    color: @error_color;
 }
