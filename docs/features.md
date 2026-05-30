@@ -695,6 +695,12 @@ before you sync; removing tracks no longer selected requires ticking an explicit
 confirmation. Progress and the outcome flow through the status-bar notification
 lane.
 
+A disk-occupation meter in the panel's footer shows how much of the drive the
+selection will occupy, **stacked by genre**: the largest genres each get a colour
+derived from the system accent, everything past the top eight folds into a single
+grey "other" segment, and hovering a segment pops up its genre and size. The meter
+turns red when the selection would not fit.
+
 Three on-drive formats, chosen per device:
 
 - **Playlists as `.m3u8`** — one deduplicated `Music/Artist/Album/NN Title.ext`

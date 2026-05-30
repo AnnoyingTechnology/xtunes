@@ -23,7 +23,7 @@ use gtk::{gdk, glib};
 
 use sustain_app_runtime::{
     ApplicationCommand, ConnectedDevice, DeviceAnalysisReadiness, DeviceLayout, FilesPerFolderCap,
-    PlaylistItem,
+    PlaylistItem, SyncPlan,
 };
 
 use crate::SharedRuntime;
@@ -288,8 +288,9 @@ impl DeviceSyncPanel {
     }
 
     /// Fill (or refill) the Pioneer "Analysis" section: a status row per
-    /// metric — BPM / Key / Waveform — and the Analyse action. We surface
-    /// only what is complete vs missing; a total count is noise here.
+    /// metric — BPM / Key / Waveform. We surface only what is complete vs
+    /// missing; a total count is noise here. The Analyse action lives in
+    /// the bottom bar (see [`Self::refresh_bottom_bar`]).
     fn populate_pioneer_readiness(&self, section: &gtk::Box, device: &ConnectedDevice) {
         Self::clear(section);
         let readiness = self.runtime.borrow().device_analysis_readiness(&device.id);
@@ -297,23 +298,6 @@ impl DeviceSyncPanel {
         section.append(&analysis_status_row("BPM", readiness.missing_bpm));
         section.append(&analysis_status_row("Key", readiness.missing_key));
         section.append(&analysis_status_row("Waveform", readiness.missing_waveform));
-
-        let analyse =
-            gtk::Button::with_label(&format!("Analyse {} missing tracks", readiness.analyzable));
-        analyse.set_halign(gtk::Align::Start);
-        analyse.set_sensitive(readiness.analyzable > 0);
-        {
-            let panel = self.clone();
-            let device_id = device.id.clone();
-            analyse.connect_clicked(move |_| {
-                panel.command_controller.dispatch_succeeded(
-                    ApplicationCommand::AnalyzeDeviceTracks {
-                        device_id: device_id.clone(),
-                    },
-                );
-            });
-        }
-        section.append(&analyse);
     }
 
     /// Refill every part of the view that derives from the current
@@ -477,16 +461,21 @@ impl DeviceSyncPanel {
             )
         };
 
-        // One total segment today; a per-genre breakdown will pass several
-        // coloured segments to the same renderer (issue #23 follow-up).
-        let bar = occupation_bar(
+        // Under capacity the meter stacks the selection by genre; over
+        // capacity (or with no capacity reading) it falls back to a single
+        // accent/error fill spanning `fraction`.
+        let segments = if over_capacity || total_bytes == 0 {
             vec![BarSegment {
                 fraction,
-                color: None,
-            }],
-            &text,
-            over_capacity,
-        );
+                tint: SegmentTint::Plain,
+                label: None,
+            }]
+        } else {
+            plan.as_ref()
+                .map(|plan| genre_segments(plan, total_bytes))
+                .unwrap_or_default()
+        };
+        let bar = occupation_bar(segments, &text, over_capacity);
         self.bottom_bar.append(&bar);
 
         // --- Actions (extreme right) ---
@@ -519,6 +508,32 @@ impl DeviceSyncPanel {
             });
         }
         actions.append(&forget);
+
+        // Analyse the selection's missing BPM/key/waveforms. Only shown
+        // when there is something analysable (always zero off Pioneer).
+        if readiness.analyzable > 0 {
+            let analyse = gtk::Button::with_label(&format!(
+                "Analyse {} missing {}",
+                readiness.analyzable,
+                if readiness.analyzable == 1 {
+                    "track"
+                } else {
+                    "tracks"
+                },
+            ));
+            {
+                let panel = self.clone();
+                let device_id = device.id.clone();
+                analyse.connect_clicked(move |_| {
+                    panel.command_controller.dispatch_succeeded(
+                        ApplicationCommand::AnalyzeDeviceTracks {
+                            device_id: device_id.clone(),
+                        },
+                    );
+                });
+            }
+            actions.append(&analyse);
+        }
 
         let sync = gtk::Button::with_label("Sync");
         sync.add_css_class("suggested-action");
@@ -643,13 +658,146 @@ fn playlist_check(name: &str, icon: &str, active: bool) -> gtk::CheckButton {
 }
 
 /// One coloured run of the occupation bar, as a fraction of the device
-/// capacity. `color: None` uses the widget's accent (the single "total"
-/// segment shown today); the planned per-genre view passes explicit
-/// palette colours.
-#[derive(Clone, Copy)]
+/// capacity. The tint is resolved at draw time so the meter tracks the
+/// live theme accent and light/dark appearance. `label`, when present,
+/// is the hover tooltip naming the slice (e.g. its genre and size).
+#[derive(Clone)]
 struct BarSegment {
     fraction: f64,
-    color: Option<gdk::RGBA>,
+    tint: SegmentTint,
+    label: Option<String>,
+}
+
+/// How a segment is coloured, resolved against the drawing area's live
+/// colour (the theme accent, or the error colour when over capacity) so
+/// nothing is baked in and the meter follows the system accent in both
+/// light and dark themes.
+#[derive(Clone, Copy)]
+enum SegmentTint {
+    /// The accent (or error colour) verbatim — the single fill shown when
+    /// over capacity or when the device capacity is unknown.
+    Plain,
+    /// The accent rotated this many degrees around the hue wheel, for the
+    /// genre palette. `0.0` is the largest genre; each further genre steps
+    /// one palette slot.
+    AccentHue(f64),
+    /// A neutral grey for the aggregated "other genres" tail.
+    Muted,
+}
+
+/// The genre palette size: the largest 8 genres get distinct accent-
+/// derived hues; everything past that aggregates into one grey segment.
+const GENRE_PALETTE_CAP: usize = 8;
+
+/// Resolve a [`SegmentTint`] to an opaque `(r, g, b)` against the live
+/// `accent` colour. Hues are spread from the accent so the palette
+/// honours the user's system accent; the muted tail is the accent fully
+/// desaturated and pulled to a mid lightness, so it reads as a neutral
+/// grey in either theme without a hard-coded colour.
+fn resolve_tint(tint: SegmentTint, accent: gdk::RGBA) -> (f64, f64, f64) {
+    match tint {
+        SegmentTint::Plain => (
+            accent.red() as f64,
+            accent.green() as f64,
+            accent.blue() as f64,
+        ),
+        // Nudge the saturation up a touch and floor it, so genres read as
+        // vivid as the meter's translucency allows and stay distinguishable
+        // even with a muted accent; clamp lightness away from the extremes
+        // so no hue washes out or goes black at that translucency.
+        SegmentTint::AccentHue(degrees) => {
+            let (h, s, l) = rgb_to_hsl(
+                accent.red() as f64,
+                accent.green() as f64,
+                accent.blue() as f64,
+            );
+            hsl_to_rgb(
+                (h + degrees).rem_euclid(360.0),
+                (s + 0.08).clamp(0.6, 1.0),
+                l.clamp(0.45, 0.62),
+            )
+        }
+        // Fully desaturated and mid-lightness: a theme-neutral grey.
+        SegmentTint::Muted => (0.6, 0.6, 0.6),
+    }
+}
+
+/// RGB (each `0.0..=1.0`) to HSL with hue in degrees `0.0..360.0`.
+fn rgb_to_hsl(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    let delta = max - min;
+    if delta <= f64::EPSILON {
+        return (0.0, 0.0, l);
+    }
+    let s = delta / (1.0 - (2.0 * l - 1.0).abs());
+    let h = if max == r {
+        60.0 * (((g - b) / delta).rem_euclid(6.0))
+    } else if max == g {
+        60.0 * ((b - r) / delta + 2.0)
+    } else {
+        60.0 * ((r - g) / delta + 4.0)
+    };
+    (h.rem_euclid(360.0), s, l)
+}
+
+/// Inverse of [`rgb_to_hsl`]; `h` in degrees, `s`/`l` in `0.0..=1.0`.
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h_prime = h / 60.0;
+    let x = c * (1.0 - (h_prime.rem_euclid(2.0) - 1.0).abs());
+    let (r1, g1, b1) = match h_prime as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    (r1 + m, g1 + m, b1 + m)
+}
+
+/// Build the occupation bar's per-genre segments from a sync plan. The
+/// largest [`GENRE_PALETTE_CAP`] genres each get an accent-derived hue
+/// (largest first); any remainder collapses into one trailing grey
+/// "other" segment. Each fraction is the genre's share of the whole
+/// device, so the stack spans exactly the `selected / total` width it
+/// replaces (the breakdown sums to the plan's `bytes_total`).
+fn genre_segments(plan: &SyncPlan, total_bytes: u64) -> Vec<BarSegment> {
+    if total_bytes == 0 {
+        return Vec::new();
+    }
+    let hue_step = 360.0 / GENRE_PALETTE_CAP as f64;
+    let mut segments = Vec::new();
+    let mut other_bytes = 0u64;
+    let mut other_count = 0usize;
+    for (rank, genre) in plan.genre_bytes.iter().enumerate() {
+        if rank < GENRE_PALETTE_CAP {
+            let name = genre.genre.as_deref().unwrap_or("Unknown");
+            segments.push(BarSegment {
+                fraction: genre.bytes as f64 / total_bytes as f64,
+                tint: SegmentTint::AccentHue(rank as f64 * hue_step),
+                label: Some(format!("{name} — {}", human_bytes(genre.bytes))),
+            });
+        } else {
+            other_bytes += genre.bytes;
+            other_count += 1;
+        }
+    }
+    if other_bytes > 0 {
+        segments.push(BarSegment {
+            fraction: other_bytes as f64 / total_bytes as f64,
+            tint: SegmentTint::Muted,
+            label: Some(format!(
+                "{other_count} other {} — {}",
+                if other_count == 1 { "genre" } else { "genres" },
+                human_bytes(other_bytes)
+            )),
+        });
+    }
+    segments
 }
 
 /// The disk-occupation meter: a button-height, button-radius pill that
@@ -677,6 +825,7 @@ fn occupation_bar(segments: Vec<BarSegment>, text: &str, over_capacity: bool) ->
     // Overlay to the bottom bar and make the whole footer claim vertical
     // space, ballooning it (and the buttons) far past the button height.
     fill.set_hexpand(true);
+    let draw_segments = segments.clone();
     fill.set_draw_func(move |area, cr, width, height| {
         let w = width as f64;
         let h = height as f64;
@@ -685,18 +834,13 @@ fn occupation_bar(segments: Vec<BarSegment>, text: &str, over_capacity: bool) ->
         }
         let accent = area.color();
         let mut x = 0.0;
-        for segment in &segments {
+        for segment in &draw_segments {
             let segment_width = (segment.fraction.clamp(0.0, 1.0) * w).min(w - x);
             if segment_width <= 0.0 {
                 continue;
             }
-            let color = segment.color.unwrap_or(accent);
-            cr.set_source_rgba(
-                color.red() as f64,
-                color.green() as f64,
-                color.blue() as f64,
-                0.45,
-            );
+            let (r, g, b) = resolve_tint(segment.tint, accent);
+            cr.set_source_rgba(r, g, b, 0.45);
             cr.rectangle(x, 0.0, segment_width, h);
             let _ = cr.fill();
             x += segment_width;
@@ -713,6 +857,101 @@ fn occupation_bar(segments: Vec<BarSegment>, text: &str, over_capacity: bool) ->
     label.set_margin_start(10);
     label.set_margin_end(10);
     frame.add_overlay(&label);
+
+    // Name the genre slice under the pointer with a popover whose arrow
+    // points at that slice — unlike a plain tooltip (which floats by the
+    // cursor with no anchor), it tracks the segment it describes. The fill
+    // and label are made input-transparent so the frame is the unambiguous
+    // hover target. Only built when some segment carries a label; segments
+    // with none (the single over-capacity fill) pop it back down.
+    if segments.iter().any(|s| s.label.is_some()) {
+        fill.set_can_target(false);
+        label.set_can_target(false);
+
+        let tip_label = gtk::Label::new(None);
+        tip_label.set_margin_top(4);
+        tip_label.set_margin_bottom(4);
+        tip_label.set_margin_start(8);
+        tip_label.set_margin_end(8);
+        let popover = gtk::Popover::new();
+        popover.set_autohide(false);
+        popover.set_position(gtk::PositionType::Top);
+        popover.set_child(Some(&tip_label));
+        popover.set_parent(&frame);
+        // A popover attached with `set_parent` must be unparented before
+        // its parent is finalized, or GTK warns and leaks the surface. The
+        // bottom bar rebuilds this frame on every selection change. Guard
+        // against a double unparent in case dispose already detached it.
+        {
+            let popover = popover.clone();
+            frame.connect_destroy(move |_| {
+                if popover.parent().is_some() {
+                    popover.unparent();
+                }
+            });
+        }
+
+        let motion = gtk::EventControllerMotion::new();
+        // Index of the slice the popover currently points at, so moving
+        // within one slice doesn't re-pop it; `usize::MAX` means hidden.
+        let shown = Rc::new(Cell::new(usize::MAX));
+        {
+            // Weak frame ref: capturing it strongly here would cycle
+            // (frame → controller → closure → frame) and leak the bar.
+            let frame = frame.downgrade();
+            let segments = segments.clone();
+            let popover = popover.clone();
+            let shown = shown.clone();
+            motion.connect_motion(move |_, x, _y| {
+                let Some(frame) = frame.upgrade() else {
+                    return;
+                };
+                let w = frame.width() as f64;
+                let height = frame.height();
+                if w <= 0.0 {
+                    return;
+                }
+                let mut start = 0.0;
+                for (index, segment) in segments.iter().enumerate() {
+                    let segment_width = (segment.fraction.clamp(0.0, 1.0) * w).min(w - start);
+                    if segment_width <= 0.0 {
+                        continue;
+                    }
+                    if x >= start && x < start + segment_width {
+                        match &segment.label {
+                            Some(text) if shown.replace(index) != index => {
+                                tip_label.set_text(text);
+                                popover.set_pointing_to(Some(&gdk::Rectangle::new(
+                                    start as i32,
+                                    0,
+                                    segment_width as i32,
+                                    height,
+                                )));
+                                popover.popup();
+                            }
+                            Some(_) => {}
+                            None => {
+                                shown.set(usize::MAX);
+                                popover.popdown();
+                            }
+                        }
+                        return;
+                    }
+                    start += segment_width;
+                }
+                shown.set(usize::MAX);
+                popover.popdown();
+            });
+        }
+        {
+            let popover = popover.clone();
+            motion.connect_leave(move |_| {
+                shown.set(usize::MAX);
+                popover.popdown();
+            });
+        }
+        frame.add_controller(motion);
+    }
 
     frame.upcast()
 }

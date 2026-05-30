@@ -25,8 +25,8 @@ pub use identity::{
     ConnectedDevice, MARKER_FILE, discover, generate_device_id, read_marker, write_marker,
 };
 pub use model::{
-    Placement, SyncError, SyncInputPlaylist, SyncInputTrack, SyncOutcome, SyncPlan, SyncProgress,
-    SyncRequest, SyncStage,
+    GenreBytes, Placement, SyncError, SyncInputPlaylist, SyncInputTrack, SyncOutcome, SyncPlan,
+    SyncProgress, SyncRequest, SyncStage,
 };
 
 #[cfg(test)]
@@ -270,6 +270,48 @@ mod tests {
             read_marker(fx.dest.path()).map(SyncDeviceId::into_string),
             Some("test-device".to_owned())
         );
+    }
+
+    #[test]
+    fn plan_breaks_down_footprint_by_genre() {
+        let mut fx = fixture(5);
+        // Distinct genres + sizes; a None and a whitespace-only tag both
+        // collapse into the "Unknown" (None) bucket.
+        let specs = [
+            (Some("House"), 100u64),
+            (Some("Techno"), 300),
+            (Some("House"), 50),
+            (None, 200),
+            (Some("   "), 10),
+        ];
+        for (track, (genre, size)) in fx.tracks.iter_mut().zip(specs) {
+            track.genre = genre.map(str::to_owned);
+            track.file_size = size;
+        }
+        let req = request(&fx, DeviceLayout::M3u, Vec::new(), false);
+        let plan = plan(&req).expect("plan");
+
+        // Largest first; House aggregated (150), Unknown aggregated (210).
+        assert_eq!(
+            plan.genre_bytes,
+            vec![
+                GenreBytes {
+                    genre: Some("Techno".into()),
+                    bytes: 300,
+                },
+                GenreBytes {
+                    genre: None,
+                    bytes: 210,
+                },
+                GenreBytes {
+                    genre: Some("House".into()),
+                    bytes: 150,
+                },
+            ]
+        );
+        // The breakdown accounts for exactly the occupation total.
+        let sum: u64 = plan.genre_bytes.iter().map(|g| g.bytes).sum();
+        assert_eq!(sum, plan.bytes_total);
     }
 
     #[test]

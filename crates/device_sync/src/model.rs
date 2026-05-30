@@ -88,6 +88,15 @@ pub struct Placement {
     pub fingerprint: String,
 }
 
+/// One genre's share of the selection's on-device footprint. `genre` is
+/// `None` for tracks with no (or blank) genre tag. Drives the occupation
+/// bar's per-genre stacking.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GenreBytes {
+    pub genre: Option<String>,
+    pub bytes: u64,
+}
+
 /// Summary of what a sync would do, for the confirmation step before any
 /// destructive removal.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -107,6 +116,10 @@ pub struct SyncPlan {
     /// sum over every placement, whether already present or not (so it
     /// reflects the layout's deduplication). Drives the occupation bar.
     pub bytes_total: u64,
+    /// The same `bytes_total` footprint broken down per genre, ordered
+    /// largest first (ties broken by genre name for determinism). Sums to
+    /// `bytes_total`. Drives the occupation bar's per-genre stacking.
+    pub genre_bytes: Vec<GenreBytes>,
 }
 
 /// Stage the engine is in, for progress reporting.

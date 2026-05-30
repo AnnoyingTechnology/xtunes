@@ -14,7 +14,7 @@ use sustain_pioneer::path_hash;
 
 use crate::layout;
 use crate::model::{
-    Placement, SyncError, SyncOutcome, SyncPlan, SyncProgress, SyncRequest, SyncStage,
+    GenreBytes, Placement, SyncError, SyncOutcome, SyncPlan, SyncProgress, SyncRequest, SyncStage,
 };
 
 /// The on-device root to write under: the Pioneer format owns the drive
@@ -98,6 +98,7 @@ pub fn plan(req: &SyncRequest) -> Result<SyncPlan, SyncError> {
         .iter()
         .map(|p| req.tracks[p.track_index].file_size)
         .sum();
+    let genre_bytes = genre_breakdown(req, &placements);
     Ok(SyncPlan {
         to_copy: diff.copy_count,
         to_update: diff.update_count,
@@ -105,7 +106,34 @@ pub fn plan(req: &SyncRequest) -> Result<SyncPlan, SyncError> {
         unchanged: diff.unchanged.len(),
         bytes_to_copy,
         bytes_total,
+        genre_bytes,
     })
+}
+
+/// Aggregate the placement footprint per genre, mirroring how
+/// `bytes_total` is summed so the breakdown adds up to it exactly. A
+/// blank or whitespace-only genre tag collapses to `None` ("Unknown").
+/// Ordered largest first, ties broken by genre name for a deterministic
+/// (test-stable) result.
+fn genre_breakdown(req: &SyncRequest, placements: &[Placement]) -> Vec<GenreBytes> {
+    use std::collections::HashMap;
+    let mut by_genre: HashMap<Option<String>, u64> = HashMap::new();
+    for placement in placements {
+        let track = &req.tracks[placement.track_index];
+        let genre = track
+            .genre
+            .as_deref()
+            .map(str::trim)
+            .filter(|g| !g.is_empty())
+            .map(str::to_owned);
+        *by_genre.entry(genre).or_default() += track.file_size;
+    }
+    let mut breakdown: Vec<GenreBytes> = by_genre
+        .into_iter()
+        .map(|(genre, bytes)| GenreBytes { genre, bytes })
+        .collect();
+    breakdown.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.genre.cmp(&b.genre)));
+    breakdown
 }
 
 /// Run the sync. `progress` is called as files are processed; `cancel`
