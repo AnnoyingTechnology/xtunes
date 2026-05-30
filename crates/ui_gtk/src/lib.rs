@@ -11,7 +11,7 @@ use main_window::build_main_window;
 
 pub use sustain_app_runtime::{
     ApplicationCommand, ApplicationQuery, ApplicationRuntime, ApplicationRuntimeError,
-    BackgroundResourceUsage, BackgroundTaskStatus, LibraryConsolidationResult,
+    BackgroundResourceUsage, BackgroundTaskStatus, ConnectedDevice, LibraryConsolidationResult,
     LibraryConsolidationSummary, LibraryImportResult, LibraryImportSummary, LibraryManagementMode,
     LibraryScanResult, LibraryScanSummary, SmartPlaylistTrackStatus, UserSettings,
     run_library_consolidation_task, run_library_import_task, run_library_scan_task,
@@ -25,6 +25,7 @@ mod artwork_loader;
 mod command_controller;
 mod content_stack;
 mod date_format;
+mod device_panel;
 mod library_consolidation;
 mod library_import;
 mod library_scan;
@@ -83,6 +84,7 @@ const APP_ID: &str = "io.github.open_sustain.sustain";
 const SONGS_VIEW: &str = "songs";
 const ALBUMS_VIEW: &str = "albums";
 const PLAYLISTS_VIEW: &str = "playlists";
+const DEVICES_VIEW: &str = "devices";
 
 pub(crate) type SharedRuntime = Rc<RefCell<ApplicationRuntime>>;
 pub(crate) type LibraryChangedCallback = Rc<dyn Fn()>;
@@ -115,6 +117,8 @@ pub(crate) type OnlineProgressReceiver =
 pub(crate) type TrackUpdatedReceiver = async_channel::Receiver<sustain_app_runtime::TrackId>;
 pub(crate) type SmartShuffleRebuildResultReceiver =
     async_channel::Receiver<sustain_app_runtime::SmartShuffleRebuildResult>;
+pub(crate) type DeviceSyncEventReceiver =
+    async_channel::Receiver<sustain_app_runtime::DeviceSyncEvent>;
 
 pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     let trun = std::time::Instant::now();
@@ -187,6 +191,7 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     // main loop. Without a drain, completed rebuilds would queue
     // forever in the channel and the index would never be adopted.
     let smart_shuffle_rebuild_result_rx = runtime.smart_shuffle_rebuild_result_receiver();
+    let device_sync_event_rx = runtime.device_sync_event_receiver();
 
     // Start the paced background analysis scheduler. The progress sink
     // is installed before `start_analysis_scheduler` so the worker's
@@ -257,6 +262,8 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
     let smart_shuffle_rebuild_result_rx_holder: Rc<
         RefCell<Option<SmartShuffleRebuildResultReceiver>>,
     > = Rc::new(RefCell::new(Some(smart_shuffle_rebuild_result_rx)));
+    let device_sync_event_rx_holder: Rc<RefCell<Option<DeviceSyncEventReceiver>>> =
+        Rc::new(RefCell::new(Some(device_sync_event_rx)));
 
     tlog!("mpris done; about to connect_activate");
     app.connect_activate({
@@ -275,6 +282,7 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
             let track_updated_rx = track_updated_rx_holder.borrow_mut().take();
             let smart_shuffle_rebuild_result_rx =
                 smart_shuffle_rebuild_result_rx_holder.borrow_mut().take();
+            let device_sync_event_rx = device_sync_event_rx_holder.borrow_mut().take();
             let main_window = build_main_window(
                 app,
                 runtime.clone(),
@@ -287,6 +295,7 @@ pub fn run(mut runtime: ApplicationRuntime, application_id: &str) {
                     online_progress_rx,
                     track_updated_rx,
                     smart_shuffle_rebuild_result_rx,
+                    device_sync_event_rx,
                 },
             );
             eprintln!(

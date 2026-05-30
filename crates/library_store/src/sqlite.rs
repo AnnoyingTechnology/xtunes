@@ -16,6 +16,7 @@ use super::*;
 
 mod analysis;
 mod column_layouts;
+mod devices;
 mod online;
 mod playlists;
 mod smart_playlists;
@@ -270,5 +271,53 @@ impl LibraryStore for SqliteLibraryStore {
     fn clear_smart_shuffle_index(&self) -> StoreResult<()> {
         let connection = self.connection_guard()?;
         smart_shuffle::clear_smart_shuffle_index(&connection)
+    }
+
+    fn save_sync_device(&self, device: &SyncDevice) -> StoreResult<()> {
+        let connection = self.connection_guard()?;
+        devices::save_sync_device(&connection, device)
+    }
+
+    fn sync_device(&self, id: &SyncDeviceId) -> StoreResult<Option<SyncDevice>> {
+        let connection = self.connection_guard()?;
+        devices::sync_device(&connection, id)
+    }
+
+    fn sync_devices(&self) -> StoreResult<Vec<SyncDevice>> {
+        let connection = self.connection_guard()?;
+        devices::sync_devices(&connection)
+    }
+
+    fn delete_sync_device(&self, id: &SyncDeviceId) -> StoreResult<()> {
+        let connection = self.connection_guard()?;
+        devices::delete_sync_device(&connection, id)
+    }
+
+    fn save_device_selection(
+        &self,
+        id: &SyncDeviceId,
+        selection: &[PlaylistItem],
+    ) -> StoreResult<()> {
+        let mut connection = self.connection_guard()?;
+        devices::save_device_selection(&mut connection, id, selection)
+    }
+
+    fn device_selection(&self, id: &SyncDeviceId) -> StoreResult<Vec<PlaylistItem>> {
+        let connection = self.connection_guard()?;
+        devices::device_selection(&connection, id)
+    }
+
+    fn save_device_manifest(
+        &self,
+        id: &SyncDeviceId,
+        entries: &[SyncManifestEntry],
+    ) -> StoreResult<()> {
+        let mut connection = self.connection_guard()?;
+        devices::save_device_manifest(&mut connection, id, entries)
+    }
+
+    fn device_manifest(&self, id: &SyncDeviceId) -> StoreResult<Vec<SyncManifestEntry>> {
+        let connection = self.connection_guard()?;
+        devices::device_manifest(&connection, id)
     }
 }

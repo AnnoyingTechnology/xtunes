@@ -22,6 +22,7 @@ trash = "5"
 libc = "0.2"
 sustain-analysis = { path = "../analysis" }
 sustain-settings = { path = "../settings" }
+sustain-device-sync = { path = "../device_sync" }
 sustain-domain = { path = "../domain" }
 sustain-library-store = { path = "../library_store" }
 sustain-metadata = { path = "../metadata" }

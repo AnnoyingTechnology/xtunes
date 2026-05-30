@@ -170,6 +170,25 @@ pub(super) fn install_smart_shuffle_rebuild_result_consumer(
     });
 }
 
+/// Drains [`DeviceSyncEvent`](sustain_app_runtime::DeviceSyncEvent)s
+/// posted by the background device-sync worker and feeds them into
+/// [`ApplicationRuntime::apply_device_sync_event`], which updates the
+/// progress notification and, on completion, persists the device
+/// manifest and publishes the outcome.
+pub(super) fn install_device_sync_event_consumer(
+    receiver: Option<DeviceSyncEventReceiver>,
+    runtime: SharedRuntime,
+) {
+    let Some(receiver) = receiver else {
+        return;
+    };
+    glib::MainContext::default().spawn_local(async move {
+        while let Ok(event) = receiver.recv().await {
+            runtime.borrow_mut().apply_device_sync_event(event);
+        }
+    });
+}
+
 /// Delay before the one-shot launch rebuild fires. A second is plenty
 /// to clear the cold-start window (the 400 ms first-idle budget plus
 /// margin) so the rebuild's main-thread prep — cloning the track list

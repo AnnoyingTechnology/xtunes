@@ -8,7 +8,7 @@ use std::{
 };
 
 use gtk::prelude::*;
-use gtk::{gdk, glib};
+use gtk::{gdk, gio, glib};
 use sustain_app_runtime::{
     MetadataChange, PlaybackCommand, PlaybackQueueRequest, PlaybackQueueSource, PlaybackState,
     Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistItem, Rating, ShuffleMode,
@@ -18,18 +18,20 @@ use sustain_app_runtime::{
 
 use super::{
     ALBUMS_VIEW, APP_ID, AnalysisProgressReceiver, ApplicationCommand, ApplicationRuntime,
-    ArtworkFetchResultReceiver, AvailabilityChangedCallback, LibraryChangedCallback,
-    LibraryChangedHolder, MetadataWriteResultReceiver, MprisCommandReceiver,
-    OnlineProgressReceiver, PLAYLISTS_VIEW, PlaybackChangedCallback, SIDEBAR_DEFAULT_WIDTH,
-    SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SONGS_VIEW, SharedMprisService, SharedRuntime,
-    ShowAlbumAction, ShowAlbumHolder, SmartPlaylistTrackStatus, SmartShuffleRebuildResultReceiver,
-    TrackRowChangedCallback, TrackRowChangedHolder, TrackUpdatedReceiver,
+    ArtworkFetchResultReceiver, AvailabilityChangedCallback, ConnectedDevice, DEVICES_VIEW,
+    DeviceSyncEventReceiver, LibraryChangedCallback, LibraryChangedHolder,
+    MetadataWriteResultReceiver, MprisCommandReceiver, OnlineProgressReceiver, PLAYLISTS_VIEW,
+    PlaybackChangedCallback, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH,
+    SONGS_VIEW, SharedMprisService, SharedRuntime, ShowAlbumAction, ShowAlbumHolder,
+    SmartPlaylistTrackStatus, SmartShuffleRebuildResultReceiver, TrackRowChangedCallback,
+    TrackRowChangedHolder, TrackUpdatedReceiver,
     accent::install_accent_css,
     albums::AlbumsView,
     app_css::install_app_css,
     artwork_loader::ArtworkLoader,
     command_controller::{SharedCommandController, UiCommandController},
     content_stack::build_content_stack,
+    device_panel::DeviceSyncPanel,
     library_consolidation::{
         library_consolidation_requested_callback, maybe_auto_resume_library_consolidation,
     },
@@ -98,10 +100,10 @@ use playlists::{
 };
 use result_consumers::{
     ArtworkFetchResultConsumerContext, install_analysis_progress_consumer,
-    install_artwork_fetch_result_consumer, install_metadata_write_result_consumer,
-    install_online_progress_consumer, install_smart_shuffle_launch_rebuild,
-    install_smart_shuffle_rebuild_result_consumer, install_track_data_observer,
-    install_track_updated_consumer,
+    install_artwork_fetch_result_consumer, install_device_sync_event_consumer,
+    install_metadata_write_result_consumer, install_online_progress_consumer,
+    install_smart_shuffle_launch_rebuild, install_smart_shuffle_rebuild_result_consumer,
+    install_track_data_observer, install_track_updated_consumer,
 };
 use search::{SearchWiringContext, install_search_wiring};
 use sidebar_callbacks::{
@@ -135,6 +137,7 @@ pub(crate) struct MainWindowAsyncReceivers {
     pub online_progress_rx: Option<OnlineProgressReceiver>,
     pub track_updated_rx: Option<TrackUpdatedReceiver>,
     pub smart_shuffle_rebuild_result_rx: Option<SmartShuffleRebuildResultReceiver>,
+    pub device_sync_event_rx: Option<DeviceSyncEventReceiver>,
 }
 
 pub(crate) fn build_main_window(
@@ -151,6 +154,7 @@ pub(crate) fn build_main_window(
         online_progress_rx,
         track_updated_rx,
         smart_shuffle_rebuild_result_rx,
+        device_sync_event_rx,
     } = receivers;
     let tbw = std::time::Instant::now();
     macro_rules! tlog {
@@ -404,9 +408,15 @@ pub(crate) fn build_main_window(
     songs_drop_overlay.set_child(Some(&songs_table.widget()));
     songs_drop_overlay.add_overlay(&songs_drop_indicator);
 
-    let content_stack =
-        build_content_stack(&songs_drop_overlay, &albums_view.widget(), &playlists_view);
+    let device_panel = DeviceSyncPanel::new(runtime.clone(), command_controller.clone());
+    let content_stack = build_content_stack(
+        &songs_drop_overlay,
+        &albums_view.widget(),
+        &playlists_view,
+        device_panel.widget(),
+    );
     install_albums_view_activator(&content_stack, &albums_view);
+    install_device_sync_view(&content_stack, &sidebar, &device_panel, &runtime);
     // The playlists table is built empty. It only needs to be populated
     // when the user actually opens the Playlists view; rebuilding it on
     // every library_changed / selection change while Songs is visible
@@ -485,6 +495,7 @@ pub(crate) fn build_main_window(
     install_track_data_observer(&runtime, track_row_changed_holder.clone());
     install_track_updated_consumer(track_updated_rx, runtime.clone());
     install_smart_shuffle_rebuild_result_consumer(smart_shuffle_rebuild_result_rx, runtime.clone());
+    install_device_sync_event_consumer(device_sync_event_rx, runtime.clone());
     install_smart_shuffle_launch_rebuild(&runtime);
     // The sidebar is now the sole navigation surface: its selection
     // chooses which content-stack page is visible (Music → SONGS_VIEW,
@@ -501,8 +512,19 @@ pub(crate) fn build_main_window(
         visible_summary_refresh.clone(),
         &current_search_text,
     ));
-    let deferred_startup =
-        DeferredStartup::new(initial_ui_settings.sidebar_selection, sidebar.clone());
+    let device_populate: Box<dyn FnOnce()> = {
+        let sidebar = sidebar.clone();
+        let runtime = runtime.clone();
+        Box::new(move || {
+            let devices = runtime.borrow().connected_devices();
+            sidebar.set_devices(&devices);
+        })
+    };
+    let deferred_startup = DeferredStartup::new(
+        initial_ui_settings.sidebar_selection,
+        sidebar.clone(),
+        device_populate,
+    );
     install_search_wiring(
         &titlebar,
         SearchWiringContext {
@@ -707,22 +729,33 @@ impl BuiltMainWindow {
 /// window has had a chance to paint.
 struct DeferredStartup {
     restore_selection: Option<Box<dyn FnOnce()>>,
+    populate_devices: Box<dyn FnOnce()>,
 }
 
 impl DeferredStartup {
-    fn new(selection: UiSidebarSelection, sidebar: PlaylistSidebar) -> Self {
+    fn new(
+        selection: UiSidebarSelection,
+        sidebar: PlaylistSidebar,
+        populate_devices: Box<dyn FnOnce()>,
+    ) -> Self {
         let restore_selection: Option<Box<dyn FnOnce()>> = match selection {
             UiSidebarSelection::Music => None,
             UiSidebarSelection::Albums => Some(Box::new(move || sidebar.select_albums())),
             UiSidebarSelection::Playlist(item) => Some(Box::new(move || sidebar.select_item(item))),
         };
-        Self { restore_selection }
+        Self {
+            restore_selection,
+            populate_devices,
+        }
     }
 
     fn run(self) {
         if let Some(restore) = self.restore_selection {
             restore();
         }
+        // Device enumeration probes the filesystem, so it runs here on
+        // the first idle rather than during the cold-start window.
+        (self.populate_devices)();
     }
 }
 
@@ -735,6 +768,65 @@ impl DeferredStartup {
 /// place — any caller that flips the stack to `ALBUMS_VIEW`
 /// automatically picks it up. `activate()` is idempotent, so the
 /// notification firing on every later switch is harmless.
+/// Wire the DEVICES sidebar section to the device-sync panel and keep
+/// the device list live.
+///
+/// Selecting a device shows its panel and flips the content stack to it;
+/// switching to any other page clears the device row highlight so only
+/// one navigation surface looks active at a time.
+///
+/// Discovery is otherwise run once, on the first idle, which would miss a
+/// stick plugged in (or auto-mounted by udisks moments) after launch.
+/// GIO's [`gio::VolumeMonitor`] is the native mount/unmount source on the
+/// session; each event re-runs the cheap `/proc/mounts` discovery and
+/// rebuilds the section. The monitor is a process singleton that GIO
+/// finalises once its last reference drops (its internal pointer is
+/// weak), which would silence further events — so it is parked in the
+/// content-stack notify closure below, owned for the whole session and
+/// freed with the UI. Anchoring it there rather than on the sidebar
+/// avoids a sidebar↔monitor reference cycle.
+fn install_device_sync_view(
+    content_stack: &gtk::Stack,
+    sidebar: &PlaylistSidebar,
+    device_panel: &DeviceSyncPanel,
+    runtime: &SharedRuntime,
+) {
+    {
+        let content_stack = content_stack.clone();
+        let device_panel = device_panel.clone();
+        sidebar.set_device_selected_callback(Rc::new(move |connected: ConnectedDevice| {
+            device_panel.show_device(connected);
+            content_stack.set_visible_child_name(DEVICES_VIEW);
+        }));
+    }
+
+    let refresh_devices: Rc<dyn Fn()> = {
+        let sidebar = sidebar.clone();
+        let runtime = runtime.clone();
+        Rc::new(move || sidebar.set_devices(&runtime.borrow().connected_devices()))
+    };
+    let volume_monitor = gio::VolumeMonitor::get();
+    {
+        let refresh_devices = refresh_devices.clone();
+        volume_monitor.connect_mount_added(move |_monitor, _mount| refresh_devices());
+    }
+    {
+        let refresh_devices = refresh_devices.clone();
+        volume_monitor.connect_mount_removed(move |_monitor, _mount| refresh_devices());
+    }
+
+    let sidebar = sidebar.clone();
+    content_stack.connect_visible_child_name_notify(move |stack| {
+        // `volume_monitor` is captured (not otherwise used here) so the
+        // singleton lives as long as the content stack; see the doc
+        // comment above.
+        let _keep_monitor_alive = &volume_monitor;
+        if stack.visible_child_name().as_deref() != Some(DEVICES_VIEW) {
+            sidebar.clear_device_highlight();
+        }
+    });
+}
+
 fn install_albums_view_activator(content_stack: &gtk::Stack, albums_view: &AlbumsView) {
     let albums_view = albums_view.clone();
     content_stack.connect_visible_child_name_notify(move |stack| {

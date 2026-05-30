@@ -10,9 +10,10 @@ use sustain_domain::TrackAnalysis;
 
 use crate::{
     AcousticFeatures, AnalysisCapabilities, AnalysisContext, LibraryStore, OnlineCapabilities,
-    OnlineContext, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, SmartPlaylist,
-    SmartPlaylistId, StoreError, StoreResult, StoredSmartShuffleIndex, StoredSyncedLyrics,
-    StoredWaveform, SyncedLyrics, Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
+    OnlineContext, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, PlaylistItem,
+    SmartPlaylist, SmartPlaylistId, StoreError, StoreResult, StoredSmartShuffleIndex,
+    StoredSyncedLyrics, StoredWaveform, SyncDevice, SyncDeviceId, SyncManifestEntry, SyncedLyrics,
+    Track, TrackColumnLayout, TrackColumnLayoutScope, TrackId,
 };
 
 #[derive(Debug, Default)]
@@ -30,6 +31,9 @@ pub struct InMemoryLibraryStore {
     online_bookkeeping: Mutex<BTreeMap<TrackId, OnlineBookkeeping>>,
     smart_shuffle_index: Mutex<Option<StoredSmartShuffleIndex>>,
     acoustics: Mutex<BTreeMap<TrackId, AcousticFeatures>>,
+    sync_devices: Mutex<BTreeMap<SyncDeviceId, SyncDevice>>,
+    device_selections: Mutex<BTreeMap<SyncDeviceId, Vec<PlaylistItem>>>,
+    device_manifests: Mutex<BTreeMap<SyncDeviceId, Vec<SyncManifestEntry>>>,
 }
 
 /// In-memory mirror of one `track_analysis` row. Mirrors the SQLite
@@ -696,5 +700,92 @@ impl LibraryStore for InMemoryLibraryStore {
             }
         }
         Ok(out)
+    }
+
+    fn save_sync_device(&self, device: &SyncDevice) -> StoreResult<()> {
+        self.sync_devices
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .insert(device.id.clone(), device.clone());
+        Ok(())
+    }
+
+    fn sync_device(&self, id: &SyncDeviceId) -> StoreResult<Option<SyncDevice>> {
+        Ok(self
+            .sync_devices
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .get(id)
+            .cloned())
+    }
+
+    fn sync_devices(&self) -> StoreResult<Vec<SyncDevice>> {
+        Ok(self
+            .sync_devices
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    fn delete_sync_device(&self, id: &SyncDeviceId) -> StoreResult<()> {
+        self.sync_devices
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .remove(id);
+        self.device_selections
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .remove(id);
+        self.device_manifests
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .remove(id);
+        Ok(())
+    }
+
+    fn save_device_selection(
+        &self,
+        id: &SyncDeviceId,
+        selection: &[PlaylistItem],
+    ) -> StoreResult<()> {
+        self.device_selections
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .insert(id.clone(), selection.to_vec());
+        Ok(())
+    }
+
+    fn device_selection(&self, id: &SyncDeviceId) -> StoreResult<Vec<PlaylistItem>> {
+        Ok(self
+            .device_selections
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .get(id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn save_device_manifest(
+        &self,
+        id: &SyncDeviceId,
+        entries: &[SyncManifestEntry],
+    ) -> StoreResult<()> {
+        self.device_manifests
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .insert(id.clone(), entries.to_vec());
+        Ok(())
+    }
+
+    fn device_manifest(&self, id: &SyncDeviceId) -> StoreResult<Vec<SyncManifestEntry>> {
+        Ok(self
+            .device_manifests
+            .lock()
+            .map_err(|_| StoreError::StoreUnavailable)?
+            .get(id)
+            .cloned()
+            .unwrap_or_default())
     }
 }

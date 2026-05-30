@@ -4,8 +4,9 @@
 use std::{path::PathBuf, time::Duration};
 
 use crate::{
-    LibraryQuery, MetadataChange, PlaybackCommand, PlaylistFolderId, PlaylistId, PlaylistItem,
-    Rating, SmartPlaylistId, SmartPlaylistRuleSet, TrackId, UserSettings,
+    DeviceLayout, FilesPerFolderCap, LibraryQuery, MetadataChange, PlaybackCommand,
+    PlaylistFolderId, PlaylistId, PlaylistItem, Rating, SmartPlaylistId, SmartPlaylistRuleSet,
+    SyncDeviceId, TrackId, UserSettings,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -106,6 +107,53 @@ pub enum ApplicationCommand {
     UpdateSettings(UserSettings),
     ScanLibrary {
         library_path: PathBuf,
+    },
+
+    // --- Device sync (issues #23 / #24) ---
+    /// Set the on-drive layout written for a device. Creates the
+    /// device's saved-config row if it does not exist yet.
+    SetDeviceLayout {
+        device_id: SyncDeviceId,
+        layout: DeviceLayout,
+    },
+    /// Set the sub-path under the device root to sync into (empty = root).
+    SetDeviceSubPath {
+        device_id: SyncDeviceId,
+        sub_path: String,
+    },
+    /// Set the per-folder file cap for the folder-per-playlist layout.
+    SetDeviceFilesPerFolderCap {
+        device_id: SyncDeviceId,
+        cap: FilesPerFolderCap,
+    },
+    /// Replace the ticked playlists/smart-playlists for a device.
+    SetDeviceSelection {
+        device_id: SyncDeviceId,
+        selection: Vec<PlaylistItem>,
+    },
+    /// Rename the device as shown in the sidebar.
+    RenameDevice {
+        device_id: SyncDeviceId,
+        label: String,
+    },
+    /// Forget a device: drop its saved selection, options, and manifest.
+    /// Does not touch the device's contents.
+    ForgetDevice {
+        device_id: SyncDeviceId,
+    },
+    /// Start an incremental sync of the device's ticked playlists. When
+    /// `remove_stale` is false, tracks no longer in the selection are
+    /// left on the device; when true, they are deleted (the UI confirms
+    /// destructive removals before setting this).
+    SyncDevice {
+        device_id: SyncDeviceId,
+        remove_stale: bool,
+    },
+    /// Run analysis (BPM / key / waveform) over the tracks in a device's
+    /// ticked playlists that are still missing it — the Pioneer export's
+    /// "analyse the missing ones" action.
+    AnalyzeDeviceTracks {
+        device_id: SyncDeviceId,
     },
 }
 

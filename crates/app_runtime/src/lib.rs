@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AnnoyingTechnology
 
-// The workspace already denies `unsafe_code`; the single audited
-// exception is `crate::priority`, whose module-level
-// `#![allow(unsafe_code)]` wraps three Linux syscalls in a safe API.
+// The workspace already denies `unsafe_code`; the only audited
+// exceptions are `crate::priority` (Linux scheduling syscalls) and
+// `crate::mount` (`statvfs`), each confining a `#![allow(unsafe_code)]`
+// to a small module that exposes a safe API.
 
 use std::{
     path::{Path, PathBuf},
@@ -15,18 +16,19 @@ use std::{
 
 pub use sustain_domain::{
     AnalysisSettings, ApplicationCommand, ApplicationQuery, BackgroundJobsSettings,
-    BackgroundResourceUsage, Clock, DEFAULT_PLAYBACK_VOLUME_PERCENT, FieldChange, LazyPickContext,
-    LibraryManagementMode, LibrarySettings, MetadataChange, PlayStatistics, PlaybackCommand,
-    PlaybackOptions, PlaybackQueue, PlaybackQueueRequest, PlaybackQueueSource, PlaybackSession,
-    PlaybackSettings, PlaybackState, Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId,
-    PlaylistId, PlaylistItem, Rating, RepeatMode, ShuffleMode, SmartPlaylist,
-    SmartPlaylistDateField, SmartPlaylistId, SmartPlaylistLimit, SmartPlaylistLimitSelection,
-    SmartPlaylistMatchKind, SmartPlaylistNumberField, SmartPlaylistNumberOperator,
-    SmartPlaylistRule, SmartPlaylistRuleSet, SmartPlaylistTextField, SmartPlaylistTextOperator,
-    SmartShuffleEntropy, SystemClock, Track, TrackAvailability, TrackColumnEntry,
-    TrackColumnLayout, TrackColumnLayoutScope, TrackContentHash, TrackId, TrackLocation,
-    TrackMetadata, TrackPlaybackSource, TrackRelativePath, UiSettings, UiSidebarSelection,
-    UserSettings, VolumePercent, compare_optional_text, matching_tracks, track_matches_rule_set,
+    BackgroundResourceUsage, Clock, DEFAULT_PLAYBACK_VOLUME_PERCENT, DeviceKind, DeviceLayout,
+    FieldChange, FilesPerFolderCap, LazyPickContext, LibraryManagementMode, LibrarySettings,
+    MetadataChange, PlayStatistics, PlaybackCommand, PlaybackOptions, PlaybackQueue,
+    PlaybackQueueRequest, PlaybackQueueSource, PlaybackSession, PlaybackSettings, PlaybackState,
+    Playlist, PlaylistEntry, PlaylistFolder, PlaylistFolderId, PlaylistId, PlaylistItem, Rating,
+    RepeatMode, ShuffleMode, SmartPlaylist, SmartPlaylistDateField, SmartPlaylistId,
+    SmartPlaylistLimit, SmartPlaylistLimitSelection, SmartPlaylistMatchKind,
+    SmartPlaylistNumberField, SmartPlaylistNumberOperator, SmartPlaylistRule, SmartPlaylistRuleSet,
+    SmartPlaylistTextField, SmartPlaylistTextOperator, SmartShuffleEntropy, SyncDevice,
+    SyncDeviceId, SystemClock, Track, TrackAvailability, TrackColumnEntry, TrackColumnLayout,
+    TrackColumnLayoutScope, TrackContentHash, TrackId, TrackLocation, TrackMetadata,
+    TrackPlaybackSource, TrackRelativePath, UiSettings, UiSidebarSelection, UserSettings,
+    VolumePercent, compare_optional_text, matching_tracks, track_matches_rule_set,
 };
 use sustain_library_store::{AnalysisCapabilities, LibraryStore, OnlineCapabilities};
 pub use sustain_metadata::MetadataService;
@@ -65,10 +67,13 @@ pub const ONLINE_PROVIDER_VERSION: u32 = 2;
 
 pub(crate) mod artwork_fetcher;
 mod commands;
+mod device_sync;
+pub mod device_sync_scheduler;
 mod library_mutation;
 mod library_scan;
 pub mod managed_library;
 pub(crate) mod metadata_writer;
+mod mount;
 pub mod notifications;
 pub mod online_scheduler;
 pub use online_scheduler::SchedulerProgress as OnlineProgress;
@@ -78,7 +83,10 @@ mod playlist_items;
 mod playlists;
 mod smart_playlists;
 pub mod smart_shuffle_scheduler;
+pub use device_sync::{DeviceAnalysisReadiness, DeviceCapacity};
+pub use device_sync_scheduler::{DeviceSyncCompletion, DeviceSyncEvent, DeviceSyncScheduler};
 pub use smart_shuffle_scheduler::{SmartShuffleRebuildResult, SmartShuffleScheduler};
+pub use sustain_device_sync::{ConnectedDevice, SyncPlan, SyncProgress, SyncStage};
 pub use sustain_smart_shuffle::{
     INDEX_SCHEMA_VERSION as SMART_SHUFFLE_INDEX_SCHEMA_VERSION, PickMode, SmartShuffleError,
     SmartShuffleIndex,
@@ -293,6 +301,13 @@ pub struct ApplicationRuntime {
     // the runtime so the picker can borrow it without crossing thread
     // boundaries.
     smart_shuffle_scheduler: SmartShuffleScheduler,
+    // Background worker for device syncs (issues #23/#24). Owns the
+    // thread spawn + progress/result channel; the device manifest is
+    // persisted by the runtime when a sync completes.
+    device_sync_scheduler: DeviceSyncScheduler,
+    // Id of the persistent notification shown while a device sync runs,
+    // so progress can update it in place and completion can dismiss it.
+    device_sync_notification_id: Option<NotificationId>,
     /// In-memory copy of the prepared Smart Shuffle index (genre IDF
     /// and, later, normalization statistics). `None` when the index
     /// has never been built yet, or when the persisted blob's schema
@@ -417,6 +432,8 @@ impl ApplicationRuntime {
             online_progress_sink: None,
             online_notification_id: None,
             smart_shuffle_scheduler: SmartShuffleScheduler::new(),
+            device_sync_scheduler: DeviceSyncScheduler::new(),
+            device_sync_notification_id: None,
             smart_shuffle_index: None,
             smart_shuffle_metadata: None,
             track_updated_sink: None,
@@ -475,6 +492,8 @@ impl ApplicationRuntime {
             online_progress_sink: None,
             online_notification_id: None,
             smart_shuffle_scheduler: SmartShuffleScheduler::new(),
+            device_sync_scheduler: DeviceSyncScheduler::new(),
+            device_sync_notification_id: None,
             smart_shuffle_index: None,
             smart_shuffle_metadata: None,
             track_updated_sink: None,
@@ -1080,6 +1099,13 @@ impl ApplicationRuntime {
         self.request_library_scan_cancellation();
         self.request_library_import_cancellation();
         self.request_library_consolidation_cancellation();
+        // A device sync runs on its own worker (not part of the
+        // mutually-exclusive library-task set), so cancel it here too:
+        // this is the method the status-bar Cancel button invokes, and
+        // the device-sync notification it may be cancelling is
+        // cancellable. The flag is reset when the next sync starts, so
+        // a stale request can never abort a future sync.
+        self.device_sync_scheduler.request_cancellation();
         self.notify_notification_observer();
     }
 

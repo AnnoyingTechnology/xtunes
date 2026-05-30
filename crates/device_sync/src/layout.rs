@@ -1,0 +1,318 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 AnnoyingTechnology
+
+//! Per-layout path planning and finalization.
+//!
+//! Each layout turns the resolved track set + playlists into a list of
+//! [`Placement`]s (which source track goes to which on-device path) and,
+//! after the audio has been copied, writes its index/database files:
+//!
+//! - **M3u** — a deduplicated `Music/Artist/Album` tree plus one
+//!   `.m3u8` per playlist referencing relative paths.
+//! - **FolderPerPlaylist** — one folder per playlist with real copies
+//!   (not deduplicated), stable per-track indices recorded so re-syncs
+//!   do not reshuffle, optional per-folder file cap with `01/`, `02/`
+//!   subfolder splits.
+//! - **Pioneer** — a deduplicated `Contents/Artist/Album` tree plus the
+//!   `export.pdb` database and per-track ANLZ waveform files.
+
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::Path;
+
+use sustain_domain::{DeviceLayout, WaveformSegments};
+use sustain_pioneer::{
+    AnlzInput, PioneerFileType, PioneerPlaylist, PioneerTrack, anlz, path_hash, pdb,
+};
+
+use crate::model::{Placement, SyncError, SyncRequest};
+
+const MUSIC_DIR: &str = "Music";
+const CONTENTS_DIR: &str = "Contents";
+/// Component cap for the m3u/Pioneer trees (FAT-safe, generous).
+const TREE_COMPONENT_CAP: usize = 60;
+/// Component cap for the folder-per-playlist layout (car-stereo target).
+const FOLDER_COMPONENT_CAP: usize = 32;
+
+/// Compute the desired placements for a request's layout.
+pub fn plan_placements(req: &SyncRequest) -> Vec<Placement> {
+    match req.device.layout {
+        DeviceLayout::M3u => tree_placements(req, MUSIC_DIR),
+        DeviceLayout::Pioneer => tree_placements(req, CONTENTS_DIR),
+        DeviceLayout::FolderPerPlaylist => folder_placements(req),
+    }
+}
+
+/// Write the layout's index/database files after audio is in place.
+/// `written` holds the indices (into `placements`) that were (re)copied
+/// this run, so the Pioneer writer can refresh only stale ANLZ files.
+pub fn finalize(
+    req: &SyncRequest,
+    root: &Path,
+    placements: &[Placement],
+    written: &HashSet<usize>,
+) -> Result<(), SyncError> {
+    match req.device.layout {
+        DeviceLayout::M3u => write_m3u_playlists(req, root, placements),
+        DeviceLayout::FolderPerPlaylist => Ok(()),
+        DeviceLayout::Pioneer => write_pioneer(req, root, placements, written),
+    }
+}
+
+/// True when the layout writes index/database files in [`finalize`]
+/// even if no audio changed (the selection itself may have changed).
+pub fn always_finalizes(layout: DeviceLayout) -> bool {
+    matches!(layout, DeviceLayout::M3u | DeviceLayout::Pioneer)
+}
+
+// ---------------------------------------------------------------------
+// Deduplicated tree layouts (m3u, Pioneer)
+// ---------------------------------------------------------------------
+
+fn tree_placements(req: &SyncRequest, root_dir: &str) -> Vec<Placement> {
+    let mut used: HashSet<String> = HashSet::new();
+    let mut placements = Vec::with_capacity(req.tracks.len());
+    for (index, track) in req.tracks.iter().enumerate() {
+        let artist =
+            crate::sanitize::component(&track.artist, TREE_COMPONENT_CAP, "Unknown Artist");
+        let album = crate::sanitize::component(&track.album, TREE_COMPONENT_CAP, "Unknown Album");
+        let mut name = crate::sanitize::filename(&track_stem(track), &track.extension, 120);
+        let mut rel = format!("{root_dir}/{artist}/{album}/{name}");
+        if used.contains(&rel) {
+            // Stable disambiguation keyed on the immutable track id.
+            let stem = format!("{} ({})", track_stem(track), track.track_id.get());
+            name = crate::sanitize::filename(&stem, &track.extension, 120);
+            rel = format!("{root_dir}/{artist}/{album}/{name}");
+        }
+        used.insert(rel.clone());
+        placements.push(Placement {
+            track_index: index,
+            rel_path: rel,
+            fingerprint: track.fingerprint.clone(),
+        });
+    }
+    placements
+}
+
+fn track_stem(track: &crate::model::SyncInputTrack) -> String {
+    match track.track_number {
+        Some(n) if n > 0 => format!("{n:02} {}", track.title),
+        _ => track.title.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Folder-per-playlist layout
+// ---------------------------------------------------------------------
+
+fn folder_placements(req: &SyncRequest) -> Vec<Placement> {
+    let cap = req.device.files_per_folder_cap.limit();
+    let mut used_folders: HashSet<String> = HashSet::new();
+    let mut placements = Vec::new();
+
+    for playlist in &req.playlists {
+        let folder = unique_name(
+            &mut used_folders,
+            crate::sanitize::component(&playlist.name, FOLDER_COMPONENT_CAP, "Playlist"),
+        );
+
+        // Recover stable indices from the previous manifest so existing
+        // files keep their slot and only new tracks are appended.
+        let prefix = format!("{folder}/");
+        let prior: HashMap<sustain_domain::TrackId, u32> = req
+            .previous_manifest
+            .iter()
+            .filter_map(|entry| {
+                let rest = entry.on_device_path.strip_prefix(&prefix)?;
+                let file = rest.rsplit('/').next()?;
+                Some((entry.track_id, leading_number(file)?))
+            })
+            .collect();
+
+        let mut used_idx: BTreeSet<u32> = prior.values().copied().collect();
+        let mut next_idx = used_idx.iter().max().copied().unwrap_or(0);
+        let mut assignments: Vec<(usize, u32)> = Vec::with_capacity(playlist.track_indices.len());
+        for &track_index in &playlist.track_indices {
+            let track_id = req.tracks[track_index].track_id;
+            let idx = match prior.get(&track_id) {
+                Some(&existing) => existing,
+                None => {
+                    next_idx += 1;
+                    used_idx.insert(next_idx);
+                    next_idx
+                }
+            };
+            assignments.push((track_index, idx));
+        }
+
+        let max_idx = assignments.iter().map(|(_, i)| *i).max().unwrap_or(0);
+        let width = max_idx.to_string().len().max(3);
+        for (track_index, idx) in assignments {
+            let track = &req.tracks[track_index];
+            let stem = format!("{idx:0width$} {} - {}", track.artist, track.title);
+            let name = crate::sanitize::filename(&stem, &track.extension, FOLDER_COMPONENT_CAP);
+            let rel = match cap {
+                Some(c) if max_idx > c => {
+                    let sub = (idx - 1) / c + 1;
+                    format!("{folder}/{sub:02}/{name}")
+                }
+                _ => format!("{folder}/{name}"),
+            };
+            placements.push(Placement {
+                track_index,
+                rel_path: rel,
+                fingerprint: track.fingerprint.clone(),
+            });
+        }
+    }
+    placements
+}
+
+fn leading_number(name: &str) -> Option<u32> {
+    let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+fn unique_name(used: &mut HashSet<String>, base: String) -> String {
+    if used.insert(base.clone()) {
+        return base;
+    }
+    for n in 2.. {
+        let candidate = format!("{base} ({n})");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("name space is unbounded")
+}
+
+// ---------------------------------------------------------------------
+// m3u index files
+// ---------------------------------------------------------------------
+
+fn write_m3u_playlists(
+    req: &SyncRequest,
+    root: &Path,
+    placements: &[Placement],
+) -> Result<(), SyncError> {
+    // track index -> its on-device relative path.
+    let path_for: HashMap<usize, &str> = placements
+        .iter()
+        .map(|p| (p.track_index, p.rel_path.as_str()))
+        .collect();
+
+    let mut used: HashSet<String> = HashSet::new();
+    for playlist in &req.playlists {
+        let stem = crate::sanitize::component(&playlist.name, TREE_COMPONENT_CAP, "Playlist");
+        let name = unique_name(&mut used, format!("{stem}.m3u8"));
+        let mut body = String::from("#EXTM3U\n");
+        for &track_index in &playlist.track_indices {
+            let Some(rel) = path_for.get(&track_index) else {
+                continue;
+            };
+            let track = &req.tracks[track_index];
+            body.push_str(&format!(
+                "#EXTINF:{},{} - {}\n{}\n",
+                track.duration_ms / 1000,
+                track.artist,
+                track.title,
+                rel,
+            ));
+        }
+        let dest = root.join(&name);
+        std::fs::write(&dest, body).map_err(|e| SyncError::io(&dest, e))?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// Pioneer database + ANLZ
+// ---------------------------------------------------------------------
+
+fn write_pioneer(
+    req: &SyncRequest,
+    root: &Path,
+    placements: &[Placement],
+    written: &HashSet<usize>,
+) -> Result<(), SyncError> {
+    // One placement per track, in `req.tracks` order, so a track's index
+    // is its PDB row index.
+    let mut pioneer_tracks = Vec::with_capacity(placements.len());
+    for (placement_index, placement) in placements.iter().enumerate() {
+        let track = &req.tracks[placement.track_index];
+        let audio_path = format!("/{}", placement.rel_path);
+        let anlz_dat = path_hash::anlz_file(&audio_path, "DAT");
+
+        // Write ANLZ when the audio was (re)written this run or when the
+        // .EXT is missing on the device (out-of-band deletion / first run).
+        let anlz_dir_rel = path_hash::anlz_dir(&audio_path);
+        let anlz_dir_abs = root.join(anlz_dir_rel.trim_start_matches('/'));
+        let needs_anlz =
+            written.contains(&placement_index) || !anlz_dir_abs.join("ANLZ0000.EXT").exists();
+        if needs_anlz {
+            let empty = WaveformSegments {
+                segment_duration_ms: 0.0,
+                segments: Vec::new(),
+            };
+            let input = AnlzInput {
+                device_audio_path: &audio_path,
+                bpm: track.bpm,
+                duration_ms: track.duration_ms,
+                waveform_preview: track.waveform_preview.as_ref().unwrap_or(&empty),
+                waveform_detail: track.waveform_detail.as_ref().unwrap_or(&empty),
+            };
+            anlz::write_files(&anlz_dir_abs, &input)
+                .map_err(|e| SyncError::io(&anlz_dir_abs, e))?;
+        }
+
+        pioneer_tracks.push(PioneerTrack {
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+            genre: track.genre.clone(),
+            bpm: track.bpm,
+            key: track.key,
+            duration_secs: track.duration_ms / 1000,
+            file_size: track.file_size,
+            track_number: track.track_number,
+            year: track.year,
+            rating: track.rating,
+            bitrate_kbps: track.bitrate_kbps,
+            sample_rate_hz: track.sample_rate_hz,
+            bit_depth: track.bit_depth,
+            file_type: PioneerFileType::from_extension(&track.extension),
+            date_added: track.date_added.clone(),
+            device_audio_path: audio_path,
+            device_anlz_path: anlz_dat,
+        });
+    }
+
+    // Map req.tracks index -> pioneer row index. With one placement per
+    // track in track order this is the identity, but build it explicitly
+    // so the mapping is robust.
+    let row_for: HashMap<usize, usize> = placements
+        .iter()
+        .enumerate()
+        .map(|(row, p)| (p.track_index, row))
+        .collect();
+    let pioneer_playlists: Vec<PioneerPlaylist> = req
+        .playlists
+        .iter()
+        .map(|playlist| PioneerPlaylist {
+            name: playlist.name.clone(),
+            entries: playlist
+                .track_indices
+                .iter()
+                .filter_map(|ti| row_for.get(ti).copied())
+                .collect(),
+        })
+        .collect();
+
+    let pdb_path = root.join(sustain_pioneer::PDB_RELATIVE_PATH);
+    let bytes = pdb::build(&pioneer_tracks, &pioneer_playlists, &req.export_date)
+        .map_err(SyncError::Pdb)?;
+    if let Some(parent) = pdb_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| SyncError::io(parent, e))?;
+    }
+    std::fs::write(&pdb_path, bytes).map_err(|e| SyncError::io(&pdb_path, e))?;
+    Ok(())
+}

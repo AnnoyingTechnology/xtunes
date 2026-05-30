@@ -205,6 +205,39 @@ impl ApplicationRuntime {
             ApplicationCommand::AddExternalLibraryItems { paths } => {
                 self.add_external_library_items(paths)?;
             }
+            ApplicationCommand::SetDeviceLayout { device_id, layout } => {
+                self.set_device_layout(device_id, layout)?;
+            }
+            ApplicationCommand::SetDeviceSubPath {
+                device_id,
+                sub_path,
+            } => {
+                self.set_device_sub_path(device_id, sub_path)?;
+            }
+            ApplicationCommand::SetDeviceFilesPerFolderCap { device_id, cap } => {
+                self.set_device_files_per_folder_cap(device_id, cap)?;
+            }
+            ApplicationCommand::SetDeviceSelection {
+                device_id,
+                selection,
+            } => {
+                self.set_device_selection(device_id, selection)?;
+            }
+            ApplicationCommand::RenameDevice { device_id, label } => {
+                self.rename_device(device_id, label)?;
+            }
+            ApplicationCommand::ForgetDevice { device_id } => {
+                self.forget_device(device_id)?;
+            }
+            ApplicationCommand::SyncDevice {
+                device_id,
+                remove_stale,
+            } => {
+                self.start_device_sync(device_id, remove_stale)?;
+            }
+            ApplicationCommand::AnalyzeDeviceTracks { device_id } => {
+                self.analyze_device_tracks(device_id)?;
+            }
         }
 
         Ok(())

@@ -672,6 +672,52 @@ MPRIS and work globally without focus.
 
 ---
 
+## Device sync — *Sustain-native*
+
+A **DEVICES** section in the sidebar lists connected USB sticks and SD cards.
+Selecting one opens its sync panel in the main content column: a tick-list of
+playlists and smart playlists to send to the device, the on-drive format, and a
+Sync button. The same GUI-driven workflow iTunes used for iPod sync, generalised
+to any removable drive.
+
+Sustain owns the sync state. A device is recognised across sessions by a
+generated `.sustain-device-id` marker written at its root (with the filesystem
+volume id as a fallback if the marker is deleted), so the panel reopens with the
+playlists you ticked for that device pre-filled. The marker is only written on
+first sync — Sustain never touches a device until you ask it to.
+
+Re-syncing is **incremental**. Per device, Sustain keeps a manifest of what it
+last wrote (track → on-device path + content fingerprint), resolves the ticked
+playlists to a track set (smart playlists are re-evaluated every sync), diffs it
+against the manifest and what is actually on the drive, and copies only what
+changed. The panel shows the plan — to copy / update / unchanged / to remove —
+before you sync; removing tracks no longer selected requires ticking an explicit
+confirmation. Progress and the outcome flow through the status-bar notification
+lane.
+
+Three on-drive formats, chosen per device:
+
+- **Playlists as `.m3u8`** — one deduplicated `Music/Artist/Album/NN Title.ext`
+  tree plus one UTF-8 `.m3u8` per playlist. For phones and players that read
+  playlists.
+- **One folder per playlist** — a folder per playlist with real audio copies
+  (a track in three playlists is copied three times), no `.m3u`. Names are
+  capped at 32 characters and per-track positions stay stable across syncs so
+  adding tracks does not reshuffle the folder. An optional per-folder file cap
+  (64 / 128 / 256 / 512, off by default) splits oversized playlists into
+  numbered subfolders. For folder-navigating car stereos.
+- **Pioneer (Rekordbox / XDJ)** — Pioneer's on-device database
+  (`PIONEER/rekordbox/export.pdb`) plus per-track ANLZ waveform files under
+  `PIONEER/USBANLZ/`, consumable by Pioneer XDJ/CDJ hardware and Rekordbox.
+  BPM, key, and waveforms come from Sustain's own analysis pipeline; the panel
+  shows how many tracks in the selection are missing analysis and offers to run
+  it before export.
+
+Android (MTP) transport is not yet implemented — only mounted block devices
+(USB sticks, SD cards, external SSDs) are synced today.
+
+---
+
 ## Single-instance enforcement — *iso-iTunes*
 
 A second Sustain process targeting the same library database is

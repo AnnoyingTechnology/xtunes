@@ -74,6 +74,9 @@ pub enum NotificationCategory {
     /// invisible to the user except through these one-shot
     /// notifications.
     SmartShuffle,
+    /// Device sync (#23/#24): copy/playlist/database progress while a
+    /// sync runs, and the one-shot outcome summary when it finishes.
+    DeviceSync,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -477,6 +480,58 @@ pub fn runtime_error_text(error: &ApplicationRuntimeError) -> &'static str {
         }
         ApplicationRuntimeError::UnsupportedCommand(_) => "This action is not available yet.",
     }
+}
+
+pub fn device_sync_running_text(label: &str) -> String {
+    format!("Syncing {label}…")
+}
+
+pub fn device_sync_progress_text(progress: sustain_device_sync::SyncProgress) -> String {
+    use sustain_device_sync::SyncStage;
+    match progress.stage {
+        SyncStage::Copying => {
+            format!(
+                "Copying tracks ({}/{})…",
+                progress.completed, progress.total
+            )
+        }
+        SyncStage::WritingPlaylists => "Writing playlists…".to_owned(),
+        SyncStage::WritingDatabase => "Writing device database…".to_owned(),
+        SyncStage::Removing => {
+            format!(
+                "Removing tracks ({}/{})…",
+                progress.completed, progress.total
+            )
+        }
+    }
+}
+
+pub fn device_sync_outcome_text(outcome: &sustain_device_sync::SyncOutcome) -> String {
+    if outcome.cancelled {
+        return format!(
+            "Sync stopped: {} copied, {} updated.",
+            outcome.copied, outcome.updated
+        );
+    }
+    let changed = outcome.copied + outcome.updated;
+    if changed == 0 && outcome.removed == 0 {
+        return "Device already up to date.".to_owned();
+    }
+    let mut parts = Vec::new();
+    if outcome.copied > 0 {
+        parts.push(format!(
+            "{} {} added",
+            outcome.copied,
+            pluralize(outcome.copied, "track", "tracks")
+        ));
+    }
+    if outcome.updated > 0 {
+        parts.push(format!("{} updated", outcome.updated));
+    }
+    if outcome.removed > 0 {
+        parts.push(format!("{} removed", outcome.removed));
+    }
+    format!("Sync complete: {}.", parts.join(", "))
 }
 
 fn pluralize(count: usize, singular: &'static str, plural: &'static str) -> &'static str {

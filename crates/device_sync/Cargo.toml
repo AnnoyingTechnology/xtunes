@@ -1,0 +1,22 @@
+[package]
+name = "sustain-device-sync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sustain_device_sync"
+path = "src/lib.rs"
+
+[dependencies]
+# Durable value types (SyncDevice, manifest, layouts) and the neutral
+# track/playlist models the engine resolves against.
+sustain-domain = { path = "../domain" }
+# Pioneer on-drive writer for the Pioneer layout.
+sustain-pioneer = { path = "../pioneer" }
+
+[dev-dependencies]
+# Scratch device roots for the writer/diff tests.
+tempfile = "3"

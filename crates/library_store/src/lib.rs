@@ -12,9 +12,10 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value as SqlValue};
 use sustain_domain::SmartPlaylistRuleSet;
 pub use sustain_domain::{
-    AcousticFeatures, LibraryQuery, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId, Rating,
-    SmartPlaylist, SmartPlaylistId, SyncedLyrics, Track, TrackAnalysis, TrackColumnEntry,
-    TrackColumnLayout, TrackColumnLayoutScope, TrackId, WaveformSegments,
+    AcousticFeatures, LibraryQuery, Playlist, PlaylistFolder, PlaylistFolderId, PlaylistId,
+    PlaylistItem, Rating, SmartPlaylist, SmartPlaylistId, SyncDevice, SyncDeviceId,
+    SyncManifestEntry, SyncedLyrics, Track, TrackAnalysis, TrackColumnEntry, TrackColumnLayout,
+    TrackColumnLayoutScope, TrackId, WaveformSegments,
 };
 
 mod memory;
@@ -397,6 +398,41 @@ pub trait LibraryStore: Send + Sync {
     /// load discovers a schema mismatch, so the next rebuild starts
     /// from a clean slate.
     fn clear_smart_shuffle_index(&self) -> StoreResult<()>;
+
+    // --- Device sync (#23 / #24) ---
+
+    /// Insert or update a device's saved configuration, keyed by its
+    /// Sustain device id.
+    fn save_sync_device(&self, device: &SyncDevice) -> StoreResult<()>;
+
+    /// Load a device's saved configuration, if Sustain knows it.
+    fn sync_device(&self, id: &SyncDeviceId) -> StoreResult<Option<SyncDevice>>;
+
+    /// All devices Sustain has configuration for.
+    fn sync_devices(&self) -> StoreResult<Vec<SyncDevice>>;
+
+    /// Forget a device: drop its config, selection, and manifest.
+    fn delete_sync_device(&self, id: &SyncDeviceId) -> StoreResult<()>;
+
+    /// Replace a device's ticked-playlist selection (in display order).
+    fn save_device_selection(
+        &self,
+        id: &SyncDeviceId,
+        selection: &[PlaylistItem],
+    ) -> StoreResult<()>;
+
+    /// Load a device's ticked-playlist selection.
+    fn device_selection(&self, id: &SyncDeviceId) -> StoreResult<Vec<PlaylistItem>>;
+
+    /// Replace a device's on-device manifest (what was last written).
+    fn save_device_manifest(
+        &self,
+        id: &SyncDeviceId,
+        entries: &[SyncManifestEntry],
+    ) -> StoreResult<()>;
+
+    /// Load a device's on-device manifest.
+    fn device_manifest(&self, id: &SyncDeviceId) -> StoreResult<Vec<SyncManifestEntry>>;
 
     fn tracks_matching(&self, query: LibraryQuery) -> StoreResult<Vec<Track>> {
         let mut tracks = if let Some(playlist_id) = query.playlist_id {

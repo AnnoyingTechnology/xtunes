@@ -1,0 +1,21 @@
+[package]
+name = "sustain-pioneer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sustain_pioneer"
+path = "src/lib.rs"
+
+[dependencies]
+# Neutral value types: MusicalKey and the WaveformSegments tiers the
+# ANLZ serializer consumes. The crate deliberately depends on nothing
+# heavier — no DSP, no decoding, no storage — so the Pioneer on-drive
+# format lives in isolation from the rest of the application.
+sustain-domain = { path = "../domain" }
+
+[lints]
+workspace = true

@@ -11,7 +11,7 @@ pub struct PlaylistFolder {
     pub position: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PlaylistItem {
     Playlist(PlaylistId),
     SmartPlaylist(SmartPlaylistId),

@@ -25,8 +25,8 @@ Sustain (`open-sustain/sustain`) is a Linux music player heavily inspired by old
 
 This player is not pixel-perfect iTunes taxidermy for a few reasons :
 - each versions brought and took away good things, I'm cherry picking what I believe to be tasteful,
-- bloat has not been ported,
-- features for music lovers have been added.
+- captivity has been converted into freedom, especially exports which are not iPod-bound
+- features for local-first music lovers have been added.
 
 This player is not designed by commity. 
 It's autoritarian*, as I believe was the case for most good Apple products.
@@ -70,12 +70,13 @@ Implemented:
 - Background BPM and musical-key detection, with a tempo/harmony-aware smart-playlist rule engine (*Sustain-native*)
 - Background backfill of artwork, ID3 tags, and lyrics via MusicBrainz, Cover Art Archive, AcoustID, and LRClib (*iTunes-adjacent*)
 - Smart Shuffle that picks each next track as a continuation of the one playing — a local, transparent perceptual match, no cloud, no learning (*Sustain-native*)
+- Sync playlists to USB sticks / SD cards — deduplicated `.m3u8` tree, one-folder-per-playlist, or Pioneer Rekordbox/[XDJ](https://github.com/AnnoyingTechnology/rhythmbox-to-pioneer-xdj-exporter) format, incremental (*Sustain-native*)
 - Native light / dark theme and system accent color (*Sustain-native*)
 
 ## Roadmap
 
 - Duplicates consolidation (preserve the best audio version, aggregate tags)
-- Sync to Android / Export to [XDJ](https://github.com/AnnoyingTechnology/rhythmbox-to-pioneer-xdj-exporter)
+- Sync to Android phones over MTP (USB/SD-card sync and Pioneer XDJ export already ship)
 
 ## Install
 

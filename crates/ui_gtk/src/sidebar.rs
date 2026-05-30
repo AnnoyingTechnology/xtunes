@@ -10,8 +10,8 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 
 use sustain_app_runtime::{
-    AnalysisCapability, AnalysisRunRequest, OnlineRunRequest, PlaylistItem, SmartPlaylistId,
-    TrackId,
+    AnalysisCapability, AnalysisRunRequest, ConnectedDevice, DeviceKind, OnlineRunRequest,
+    PlaylistItem, SmartPlaylistId, TrackId,
 };
 
 use super::{
@@ -44,6 +44,9 @@ pub(crate) type SidebarAnalysisRunCallback = Rc<dyn Fn(PlaylistItem, AnalysisRun
 /// Invoked when the user picks any item inside the "Retrieve"
 /// submenu on a playlist or smart playlist sidebar row.
 pub(crate) type SidebarOnlineRunCallback = Rc<dyn Fn(PlaylistItem, OnlineRunRequest)>;
+/// Invoked when the user clicks a row under the DEVICES section. Carries
+/// the connected device so the panel can render and sync it.
+pub(crate) type SidebarDeviceSelectedCallback = Rc<dyn Fn(ConnectedDevice)>;
 /// Queries whether a given analysis capability is enabled globally
 /// (i.e. covered by the background sweep). The sidebar renders the
 /// matching submenu item insensitive whenever this returns `true`.
@@ -116,6 +119,11 @@ pub(crate) struct PlaylistSidebar {
     library_section_collapsed: Rc<Cell<bool>>,
     /// Fold state of the PLAYLISTS disclosure section.
     playlists_section_collapsed: Rc<Cell<bool>>,
+    /// Container holding the dynamically-rebuilt DEVICES rows.
+    devices_body: gtk::Box,
+    on_device_selected: Rc<RefCell<Option<SidebarDeviceSelectedCallback>>>,
+    /// The currently highlighted device row, for single-selection CSS.
+    selected_device_row: Rc<RefCell<Option<gtk::Widget>>>,
 }
 
 impl PlaylistSidebar {
@@ -136,6 +144,29 @@ impl PlaylistSidebar {
         let albums_row = build_library_row("Albums", "media-optical-symbolic");
         root.append(&music_row);
         root.append(&albums_row);
+
+        // DEVICES section: connected USB sticks / SD cards. Sits between
+        // LIBRARY and PLAYLISTS; the playlist list view below keeps
+        // vexpand, so this group stays a fixed-height block pinned under
+        // the library rows while the playlists absorb the remaining
+        // space. Rows are rebuilt dynamically from device discovery,
+        // which runs after first-frame to keep startup cheap. Folded
+        // state is not persisted — the section defaults to expanded.
+        let (devices_header, devices_caret) = build_section_header("DEVICES");
+        root.append(&devices_header);
+        let devices_body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        devices_body.add_css_class("playlist-sidebar-devices");
+        root.append(&devices_body);
+        let devices_section_collapsed = Rc::new(Cell::new(false));
+        connect_section_toggle(
+            &devices_header,
+            &devices_caret,
+            devices_section_collapsed,
+            vec![devices_body.clone().upcast::<gtk::Widget>()],
+        );
+        let on_device_selected: Rc<RefCell<Option<SidebarDeviceSelectedCallback>>> =
+            Rc::new(RefCell::new(None));
+        let selected_device_row: Rc<RefCell<Option<gtk::Widget>>> = Rc::new(RefCell::new(None));
 
         let (playlists_header, playlists_caret) = build_section_header("PLAYLISTS");
         root.append(&playlists_header);
@@ -279,6 +310,9 @@ impl PlaylistSidebar {
             pending_rename,
             library_section_collapsed,
             playlists_section_collapsed,
+            devices_body,
+            on_device_selected,
+            selected_device_row,
         }
     }
 
@@ -346,6 +380,63 @@ impl PlaylistSidebar {
 
     pub(crate) fn set_online_busy_query(&self, query: SidebarOnlineBusyQuery) {
         self.online_busy_query.replace(Some(query));
+    }
+
+    pub(crate) fn set_device_selected_callback(&self, callback: SidebarDeviceSelectedCallback) {
+        self.on_device_selected.replace(Some(callback));
+    }
+
+    /// Rebuild the DEVICES section from the current set of connected
+    /// devices. Clears the previous rows and any highlight.
+    pub(crate) fn set_devices(&self, devices: &[ConnectedDevice]) {
+        while let Some(child) = self.devices_body.first_child() {
+            self.devices_body.remove(&child);
+        }
+        self.selected_device_row.replace(None);
+
+        if devices.is_empty() {
+            let empty = gtk::Label::new(Some("No devices connected"));
+            empty.add_css_class("playlist-sidebar-devices-empty");
+            empty.add_css_class("dim-label");
+            empty.set_xalign(0.0);
+            self.devices_body.append(&empty);
+            return;
+        }
+
+        for device in devices {
+            let icon = match device.kind {
+                DeviceKind::Android => "phone-symbolic",
+                DeviceKind::UsbDrive => "drive-removable-media-symbolic",
+            };
+            let row = build_library_row(&device.label, icon);
+            let gesture = gtk::GestureClick::new();
+            gesture.set_button(gdk::BUTTON_PRIMARY);
+            let on_device_selected = self.on_device_selected.clone();
+            let selected_device_row = self.selected_device_row.clone();
+            let row_widget = row.clone().upcast::<gtk::Widget>();
+            let device = device.clone();
+            gesture.connect_pressed(move |gesture, _n_press, _x, _y| {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                if let Some(previous) = selected_device_row.borrow_mut().take() {
+                    previous.remove_css_class("selected");
+                }
+                row_widget.add_css_class("selected");
+                selected_device_row.replace(Some(row_widget.clone()));
+                if let Some(callback) = on_device_selected.borrow().as_ref() {
+                    callback(device.clone());
+                }
+            });
+            row.add_controller(gesture);
+            self.devices_body.append(&row);
+        }
+    }
+
+    /// Drop the DEVICES row highlight — called when a different sidebar
+    /// surface (a library row or a playlist) becomes active.
+    pub(crate) fn clear_device_highlight(&self) {
+        if let Some(previous) = self.selected_device_row.borrow_mut().take() {
+            previous.remove_css_class("selected");
+        }
     }
 
     /// Arm an inline rename for `item` on the next bind that matches it.

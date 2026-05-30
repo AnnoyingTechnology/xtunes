@@ -229,6 +229,44 @@ CREATE TABLE IF NOT EXISTS track_online_status (
     lyrics_attempted_at_unix    INTEGER,
     provider_version            INTEGER NOT NULL
 );
+
+-- Device sync (#23/#24). Sustain owns the per-device configuration and
+-- the saved playlist selection (the device only carries the files), all
+-- keyed by the stable Sustain device id stored in the device's
+-- `.sustain-device-id` marker.
+CREATE TABLE IF NOT EXISTS sync_devices (
+    id                   TEXT PRIMARY KEY,
+    label                TEXT NOT NULL,
+    kind                 INTEGER NOT NULL,
+    layout               INTEGER NOT NULL,
+    sub_path             TEXT NOT NULL,
+    files_per_folder_cap INTEGER NOT NULL,
+    volume_id            TEXT
+);
+
+-- Ticked playlists / smart playlists per device (item_kind 0 = playlist,
+-- 1 = smart playlist), in display order.
+CREATE TABLE IF NOT EXISTS sync_device_playlists (
+    device_id TEXT NOT NULL,
+    item_kind INTEGER NOT NULL,
+    item_id   INTEGER NOT NULL,
+    position  INTEGER NOT NULL,
+    PRIMARY KEY (device_id, item_kind, item_id),
+    FOREIGN KEY (device_id) REFERENCES sync_devices(id) ON DELETE CASCADE
+);
+
+-- What Sustain last wrote to a device: track -> on-device path + content
+-- fingerprint. Drives the incremental differ. A track may have several
+-- rows (the folder-per-playlist layout copies it once per playlist), so
+-- the key is (device, on-device path).
+CREATE TABLE IF NOT EXISTS sync_manifest (
+    device_id      TEXT NOT NULL,
+    track_id       INTEGER NOT NULL,
+    on_device_path TEXT NOT NULL,
+    fingerprint    TEXT NOT NULL,
+    PRIMARY KEY (device_id, on_device_path),
+    FOREIGN KEY (device_id) REFERENCES sync_devices(id) ON DELETE CASCADE
+);
 "#;
 
 #[derive(Clone, Copy)]
